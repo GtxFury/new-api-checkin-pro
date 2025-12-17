@@ -279,8 +279,10 @@ class LinuxDoSignIn:
                                     else:
                                         # 先尝试点击 Turnstile 小组件的复选框
                                         try:
+                                            # 等待 Turnstile iframe 出现
+                                            await page.wait_for_timeout(1000)
                                             turnstile_iframe = await page.query_selector(
-                                                'iframe[src*="challenges.cloudflare.com"][title*="Cloudflare"]'
+                                                'iframe[id^="cf-chl-widget-"]'
                                             )
                                             if not turnstile_iframe:
                                                 turnstile_iframe = await page.query_selector(
@@ -288,17 +290,55 @@ class LinuxDoSignIn:
                                                 )
 
                                             if turnstile_iframe:
+                                                iframe_id = await turnstile_iframe.get_attribute("id")
+                                                print(
+                                                    f"ℹ️ {self.account_name}: Found Turnstile iframe "
+                                                    f"with id={iframe_id}"
+                                                )
                                                 box = await turnstile_iframe.bounding_box()
+                                                print(
+                                                    f"ℹ️ {self.account_name}: Turnstile iframe bounding box: {box}"
+                                                )
                                                 if box:
-                                                    print(
-                                                        f"ℹ️ {self.account_name}: Clicking Turnstile checkbox iframe"
-                                                    )
                                                     cx = box["x"] + box["width"] / 2
                                                     cy = box["y"] + box["height"] / 2
+                                                    print(
+                                                        f"ℹ️ {self.account_name}: Clicking Turnstile checkbox at "
+                                                        f"({cx}, {cy})"
+                                                    )
                                                     await page.mouse.move(cx, cy)
                                                     await page.mouse.click(cx, cy)
                                                     # 等待 Turnstile 处理完成
                                                     await page.wait_for_timeout(4000)
+
+                                                # 尝试通过 frame 再点击一次，以提高成功率
+                                                try:
+                                                    for frame in page.frames:
+                                                        if "challenges.cloudflare.com" in getattr(frame, "url", ""):
+                                                            print(
+                                                                f"ℹ️ {self.account_name}: Trying click inside "
+                                                                f"Turnstile frame"
+                                                            )
+                                                            try:
+                                                                checkbox = await frame.query_selector("input[type=checkbox]")
+                                                                if checkbox:
+                                                                    await checkbox.click()
+                                                                    await page.wait_for_timeout(3000)
+                                                                    print(
+                                                                        f"ℹ️ {self.account_name}: Clicked checkbox "
+                                                                        f"inside Turnstile frame"
+                                                                    )
+                                                            except Exception as inner_e:
+                                                                print(
+                                                                    f"⚠️ {self.account_name}: "
+                                                                    f"Inner frame click error: {inner_e}"
+                                                                )
+                                                            break
+                                                except Exception as frame_e:
+                                                    print(
+                                                        f"⚠️ {self.account_name}: Error iterating Turnstile frames: "
+                                                        f"{frame_e}"
+                                                    )
                                             else:
                                                 print(
                                                     f"⚠️ {self.account_name}: Turnstile iframe not found on page"
