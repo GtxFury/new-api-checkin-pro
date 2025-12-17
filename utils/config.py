@@ -131,6 +131,27 @@ class AppConfig:
                 bypass_method="waf_cookies",
                 turnstile_check=False,
             ),
+            "wzw": ProviderConfig(
+                name="wzw",
+                origin="https://wzw.de5.net",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                # WONG 公益站使用 /api/user/checkin 作为签到接口
+                sign_in_path="/api/user/checkin",
+                user_info_path="/api/user/self",
+                # 该站点使用 New-Api-User 作为用户标识头
+                api_user_key="New-Api-User",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 从 https://wzw.de5.net/api/status 中获取
+                linuxdo_client_id="dnJe0SrrGDT8dh4hkbl2bo9R7SQx5If5",
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                # 与 anyrouter 类似，可能需要 WAF cookies
+                bypass_method="waf_cookies",
+                turnstile_check=False,
+            ),
             "agentrouter": ProviderConfig(
                 name="agentrouter",
                 origin="https://agentrouter.org",
