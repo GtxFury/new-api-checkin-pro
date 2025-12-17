@@ -190,6 +190,28 @@ class AppConfig:
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
             ),
+            "elysiver": ProviderConfig(
+                name="elysiver",
+                origin="https://elysiver.h-e.top",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                # 与 runanytime 一样：签到在前端 /app/me 完成，后端通过 check_in_status 确认
+                sign_in_path=None,
+                user_info_path="/api/user/self",
+                # Veloera 站点约定使用 Veloera-User 作为用户标识头
+                api_user_key="Veloera-User",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 从 https://elysiver.h-e.top/api/status 中获取
+                linuxdo_client_id="E2eaCQVl9iecd4aJBeTKedXfeKiJpSPF",
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                # 和 runanytime 类似，在浏览器中执行每日签到，并通过 /api/user/check_in_status 校验
+                turnstile_check=True,
+                check_in_status_path="/api/user/check_in_status",
+            ),
         }
 
         # 尝试从环境变量加载自定义 providers
