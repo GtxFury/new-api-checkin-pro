@@ -5,11 +5,28 @@
 
 import json
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
 from camoufox.async_api import AsyncCamoufox
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
+
+# 优先尝试直接导入 camoufox-captcha，如果失败，再尝试从上一级目录的 camoufox-captcha 子项目导入
+solve_captcha = None
+try:  # 尝试作为已安装包导入
+	from camoufox_captcha import solve_captcha  # type: ignore[assignment]
+except Exception:
+	try:
+		repo_root = Path(__file__).resolve().parent.parent
+		extra_path = repo_root / "camoufox-captcha"
+		if extra_path.exists():
+			sys.path.insert(0, str(extra_path))
+			from camoufox_captcha import solve_captcha  # type: ignore[assignment]
+	except Exception:
+		solve_captcha = None
 
 try:
     # 可选依赖: 使用 camoufox-captcha 统一处理 Cloudflare / Turnstile
