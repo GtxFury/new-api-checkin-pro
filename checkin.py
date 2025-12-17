@@ -1325,8 +1325,9 @@ class CheckIn:
             waf_cookies = await self.get_waf_cookies_with_browser()
             if not waf_cookies:
                 print(f"❌ {self.account_name}: Unable to get WAF cookies")
-                # 即使 WAF cookies 失败，也继续尝试其他认证方式
-                print(f"✅ {self.account_name}: WAF cookies obtained")
+                # 获取失败时使用空字典，避免后续合并 cookies 出现 NoneType 错误
+                waf_cookies = {}
+                print(f"ℹ️ {self.account_name}: Continue without WAF cookies")
         else:
             print(f"ℹ️ {self.account_name}: Bypass WAF not required, using user cookies directly")
 
