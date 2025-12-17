@@ -47,13 +47,12 @@ jobs:
         uv sync
         echo "✅ 环境初始化完成"
 
-    - name: 安装 Playwright 与 camoufox-captcha
+    - name: 安装 Playwright 浏览器依赖
       run: |
-        echo "安装 Playwright 与 camoufox-captcha..."
-        uv run python -m pip install "playwright>=1.49.0"
-        uv run python -m pip install -e "../camoufox-captcha"
+        echo "安装 Playwright 浏览器依赖..."
+        # Python 依赖由 pyproject.toml + uv sync 负责，这里只安装浏览器二进制
         uv run python -m playwright install
-        echo "✅ Playwright 与 camoufox-captcha 安装完成"
+        echo "✅ Playwright 浏览器依赖安装完成"
 
     - name: 获取 Camoufox 版本
       id: camoufox-version
