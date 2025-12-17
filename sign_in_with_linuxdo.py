@@ -277,7 +277,38 @@ class LinuxDoSignIn:
                                     if already_btn:
                                         print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
                                     else:
-                                        # 尝试找到“立即签到”按钮
+                                        # 先尝试点击 Turnstile 小组件的复选框
+                                        try:
+                                            turnstile_iframe = await page.query_selector(
+                                                'iframe[src*="challenges.cloudflare.com"][title*="Cloudflare"]'
+                                            )
+                                            if not turnstile_iframe:
+                                                turnstile_iframe = await page.query_selector(
+                                                    'iframe[src*="challenges.cloudflare.com"]'
+                                                )
+
+                                            if turnstile_iframe:
+                                                box = await turnstile_iframe.bounding_box()
+                                                if box:
+                                                    print(
+                                                        f"ℹ️ {self.account_name}: Clicking Turnstile checkbox iframe"
+                                                    )
+                                                    cx = box["x"] + box["width"] / 2
+                                                    cy = box["y"] + box["height"] / 2
+                                                    await page.mouse.move(cx, cy)
+                                                    await page.mouse.click(cx, cy)
+                                                    # 等待 Turnstile 处理完成
+                                                    await page.wait_for_timeout(4000)
+                                            else:
+                                                print(
+                                                    f"⚠️ {self.account_name}: Turnstile iframe not found on page"
+                                                )
+                                        except Exception as e:
+                                            print(
+                                                f"⚠️ {self.account_name}: Error interacting with Turnstile widget: {e}"
+                                            )
+
+                                        # 然后尝试找到“立即签到”按钮
                                         checkin_btn = None
                                         try:
                                             checkin_btn = await page.query_selector('button:has-text("立即签到")')
