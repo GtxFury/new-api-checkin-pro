@@ -239,7 +239,8 @@ class CheckIn:
                 user_data_dir=tmp_dir,
                 headless=False,
                 humanize=True,
-                locale="en-US",
+                # 中文环境，减小与本地浏览器差异
+                locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
             ) as browser:
@@ -302,7 +303,7 @@ class CheckIn:
                 user_data_dir=tmp_dir,
                 headless=False,
                 humanize=True,
-                locale="en-US",
+                locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
             ) as browser:
@@ -472,7 +473,7 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
-                locale="en-US",
+                locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
             ) as browser:
@@ -608,7 +609,7 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
-                locale="en-US",
+                locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
             ) as browser:

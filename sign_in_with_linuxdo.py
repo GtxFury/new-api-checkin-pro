@@ -112,7 +112,8 @@ class LinuxDoSignIn:
             # user_data_dir=tmp_dir,
             headless=False,
             humanize=True,
-            locale="en-US",
+            # 使用中文环境，更接近你本地浏览器配置
+            locale="zh-CN",
         ) as browser:
             # 只有在缓存文件存在时才加载 storage_state
             storage_state = cache_file_path if os.path.exists(cache_file_path) else None
