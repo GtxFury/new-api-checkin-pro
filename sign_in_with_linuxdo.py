@@ -279,15 +279,19 @@ class LinuxDoSignIn:
                                     else:
                                         # 先尝试点击 Turnstile 小组件的复选框
                                         try:
-                                            # 等待 Turnstile iframe 出现
-                                            await page.wait_for_timeout(1000)
-                                            turnstile_iframe = await page.query_selector(
-                                                'iframe[id^="cf-chl-widget-"]'
-                                            )
-                                            if not turnstile_iframe:
+                                            turnstile_iframe = None
+                                            # Turnstile 组件是异步挂载的，这里轮询一段时间等待它出现
+                                            for i in range(10):
                                                 turnstile_iframe = await page.query_selector(
-                                                    'iframe[src*="challenges.cloudflare.com"]'
+                                                    'iframe[id^="cf-chl-widget-"]'
                                                 )
+                                                if not turnstile_iframe:
+                                                    turnstile_iframe = await page.query_selector(
+                                                        'iframe[src*="challenges.cloudflare.com"]'
+                                                    )
+                                                if turnstile_iframe:
+                                                    break
+                                                await page.wait_for_timeout(1000)
 
                                             if turnstile_iframe:
                                                 iframe_id = await turnstile_iframe.get_attribute("id")
@@ -320,7 +324,9 @@ class LinuxDoSignIn:
                                                                 f"Turnstile frame"
                                                             )
                                                             try:
-                                                                checkbox = await frame.query_selector("input[type=checkbox]")
+                                                                checkbox = await frame.query_selector(
+                                                                    "input[type=checkbox]"
+                                                                )
                                                                 if checkbox:
                                                                     await checkbox.click()
                                                                     await page.wait_for_timeout(3000)
