@@ -11,6 +11,12 @@ from camoufox.async_api import AsyncCamoufox
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
 
+try:
+    # 可选依赖: 使用 camoufox-captcha 统一处理 Cloudflare / Turnstile
+    from camoufox_captcha import solve_captcha
+except Exception:  # pragma: no cover - 未安装 camoufox-captcha 时自动跳过
+    solve_captcha = None
+
 
 class LinuxDoSignIn:
     """使用 Linux.do 登录授权类"""
@@ -116,6 +122,9 @@ class LinuxDoSignIn:
             locale="zh-CN",
             # 为了可以点击 cross-origin 的 Turnstile iframe
             disable_coop=True,
+            # 允许访问 scope / shadow-root，用于 camoufox-captcha 检测 iframe
+            config={"forceScopeAccess": True},
+            i_know_what_im_doing=True,
             # 固定一个常见桌面分辨率，方便我们基于坐标点击
             window=(1280, 720),
         ) as browser:
@@ -272,6 +281,25 @@ class LinuxDoSignIn:
                                     except Exception:
                                         await page.wait_for_timeout(3000)
 
+                                    # 先尝试通过 camoufox-captcha 解决 Turnstile（如果可用）
+                                    if solve_captcha is not None:
+                                        try:
+                                            print(
+                                                f"ℹ️ {self.account_name}: Solving Cloudflare Turnstile via camoufox-captcha"
+                                            )
+                                            solved = await solve_captcha(
+                                                page,
+                                                captcha_type="cloudflare",
+                                                challenge_type="turnstile",
+                                            )
+                                            print(
+                                                f"ℹ️ {self.account_name}: Turnstile solve result: {solved}"
+                                            )
+                                        except Exception as sc_err:
+                                            print(
+                                                f"⚠️ {self.account_name}: camoufox-captcha solve_captcha error: {sc_err}"
+                                            )
+
                                     # 检查是否已经签到
                                     try:
                                         already_btn = await page.query_selector('button:has-text("今日已签到")')
@@ -281,83 +309,6 @@ class LinuxDoSignIn:
                                     if already_btn:
                                         print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
                                     else:
-                                        # 先尝试点击 Turnstile 小组件的复选框
-                                        try:
-                                            turnstile_iframe = None
-                                            # Turnstile 组件是异步挂载的，这里轮询一段时间等待它出现
-                                            for i in range(10):
-                                                turnstile_iframe = await page.query_selector(
-                                                    'iframe[id^="cf-chl-widget-"]'
-                                                )
-                                                if not turnstile_iframe:
-                                                    turnstile_iframe = await page.query_selector(
-                                                        'iframe[src*="challenges.cloudflare.com"]'
-                                                    )
-                                                if turnstile_iframe:
-                                                    break
-                                                await page.wait_for_timeout(1000)
-
-                                            if turnstile_iframe:
-                                                iframe_id = await turnstile_iframe.get_attribute("id")
-                                                print(
-                                                    f"ℹ️ {self.account_name}: Found Turnstile iframe "
-                                                    f"with id={iframe_id}"
-                                                )
-                                                box = await turnstile_iframe.bounding_box()
-                                                print(
-                                                    f"ℹ️ {self.account_name}: Turnstile iframe bounding box: {box}"
-                                                )
-                                                if box:
-                                                    cx = box["x"] + box["width"] / 2
-                                                    cy = box["y"] + box["height"] / 2
-                                                    print(
-                                                        f"ℹ️ {self.account_name}: Clicking Turnstile checkbox at "
-                                                        f"({cx}, {cy})"
-                                                    )
-                                                    await page.mouse.move(cx, cy)
-                                                    await page.mouse.click(cx, cy)
-                                                    # 等待 Turnstile 处理完成
-                                                    await page.wait_for_timeout(4000)
-
-                                                # 尝试通过 frame 再点击一次，以提高成功率
-                                                try:
-                                                    for frame in page.frames:
-                                                        if "challenges.cloudflare.com" in getattr(frame, "url", ""):
-                                                            print(
-                                                                f"ℹ️ {self.account_name}: Trying click inside "
-                                                                f"Turnstile frame"
-                                                            )
-                                                            try:
-                                                                checkbox = await frame.query_selector(
-                                                                    "input[type=checkbox]"
-                                                                )
-                                                                if checkbox:
-                                                                    await checkbox.click()
-                                                                    await page.wait_for_timeout(3000)
-                                                                    print(
-                                                                        f"ℹ️ {self.account_name}: Clicked checkbox "
-                                                                        f"inside Turnstile frame"
-                                                                    )
-                                                            except Exception as inner_e:
-                                                                print(
-                                                                    f"⚠️ {self.account_name}: "
-                                                                    f"Inner frame click error: {inner_e}"
-                                                                )
-                                                            break
-                                                except Exception as frame_e:
-                                                    print(
-                                                        f"⚠️ {self.account_name}: Error iterating Turnstile frames: "
-                                                        f"{frame_e}"
-                                                    )
-                                            else:
-                                                print(
-                                                    f"⚠️ {self.account_name}: Turnstile iframe not found on page"
-                                                )
-                                        except Exception as e:
-                                            print(
-                                                f"⚠️ {self.account_name}: Error interacting with Turnstile widget: {e}"
-                                            )
-
                                         # 然后尝试找到“立即签到”按钮
                                         checkin_btn = None
                                         try:
