@@ -212,6 +212,9 @@ class LinuxDoSignIn:
 					f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
 				)
 				await self._take_screenshot(page, "runanytime_checkin_timeout")
+		except Exception as e:
+			print(f"❌ {self.account_name}: Error during browser check-in: {e}")
+			await self._take_screenshot(page, "runanytime_checkin_error")
 
 	async def signin(
 		self,
@@ -421,4 +424,3 @@ class LinuxDoSignIn:
 			finally:
 				await page.close()
 				await context.close()
-
