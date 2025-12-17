@@ -316,6 +316,11 @@ class LinuxDoSignIn:
                                             print(
                                                 f"⚠️ {self.account_name}: camoufox-captcha solve_captcha error: {sc_err}"
                                             )
+                                    else:
+                                        print(
+                                            f"⚠️ {self.account_name}: camoufox-captcha not available, "
+                                            f"solve_captcha is None"
+                                        )
 
                                     # 检查是否已经签到
                                     try:
