@@ -1046,9 +1046,8 @@ class CheckIn:
                 api_user = result_data["api_user"]
 
                 merged_cookies = {**waf_cookies, **user_cookies}
-                # runanytime 需要手动调用签到接口，其它站点维持原有行为
-                needs_check_in_flag = None if self.provider_config.name == "runanytime" else False
-                return await self.check_in_with_cookies(merged_cookies, api_user, needs_check_in=needs_check_in_flag)
+                # GitHub 认证获取到的 cookies/api_user 已完成登录，后续只需获取用户信息
+                return await self.check_in_with_cookies(merged_cookies, api_user, needs_check_in=False)
             elif success and "code" in result_data and "state" in result_data:
                 # 收到 OAuth code，通过 HTTP 调用回调接口获取 api_user
                 print(f"ℹ️ {self.account_name}: Received OAuth code, calling callback API")
@@ -1077,11 +1076,13 @@ class CheckIn:
                                 for cookie in response.cookies.jar:
                                     user_cookies[cookie.name] = cookie.value
 
-                                print(f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} user cookies: {list(user_cookies.keys())}")
+                                print(
+                                    f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} user cookies: "
+                                    f"{list(user_cookies.keys())}"
+                                )
                                 merged_cookies = {**waf_cookies, **user_cookies}
-                                needs_check_in_flag = None if self.provider_config.name == "runanytime" else False
                                 return await self.check_in_with_cookies(
-                                    merged_cookies, api_user, needs_check_in=needs_check_in_flag
+                                    merged_cookies, api_user, needs_check_in=False
                                 )
                             else:
                                 print(f"❌ {self.account_name}: No user ID in callback response")
@@ -1197,8 +1198,8 @@ class CheckIn:
                 api_user = result_data["api_user"]
 
                 merged_cookies = {**waf_cookies, **user_cookies}
-                needs_check_in_flag = None if self.provider_config.name == "runanytime" else False
-                return await self.check_in_with_cookies(merged_cookies, api_user, needs_check_in=needs_check_in_flag)
+                # Linux.do 认证后，RunAnytime 等站点的实际签到已在浏览器中完成
+                return await self.check_in_with_cookies(merged_cookies, api_user, needs_check_in=False)
             elif success and "code" in result_data and "state" in result_data:
                 # 收到 OAuth code，通过 HTTP 调用回调接口获取 api_user
                 print(f"ℹ️ {self.account_name}: Received OAuth code, calling callback API")
@@ -1227,11 +1228,13 @@ class CheckIn:
                                 for cookie in response.cookies.jar:
                                     user_cookies[cookie.name] = cookie.value
 
-                                print(f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} user cookies: {list(user_cookies.keys())}")
+                                print(
+                                    f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} user cookies: "
+                                    f"{list(user_cookies.keys())}"
+                                )
                                 merged_cookies = {**waf_cookies, **user_cookies}
-                                needs_check_in_flag = None if self.provider_config.name == "runanytime" else False
                                 return await self.check_in_with_cookies(
-                                    merged_cookies, api_user, needs_check_in=needs_check_in_flag
+                                    merged_cookies, api_user, needs_check_in=False
                                 )
                             else:
                                 print(f"❌ {self.account_name}: No user ID in callback response")

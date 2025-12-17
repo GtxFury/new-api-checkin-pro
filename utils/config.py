@@ -27,6 +27,8 @@ class ProviderConfig:
     linuxdo_auth_path: str = "/api/oauth/linuxdo"
     aliyun_captcha: bool = False
     bypass_method: Literal["waf_cookies"] | None = None
+    # 是否启用 Turnstile 校验（需要在浏览器中执行签到）
+    turnstile_check: bool = False
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -51,6 +53,7 @@ class ProviderConfig:
             linuxdo_auth_path=data.get("linuxdo_auth_path", "/api/oauth/linuxdo"),
             aliyun_captcha=data.get("aliyun_captcha", False),
             bypass_method=data.get("bypass_method"),
+            turnstile_check=data.get("turnstile_check", False),
         )
 
     def needs_waf_cookies(self) -> bool:
@@ -117,6 +120,7 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method="waf_cookies",
+                turnstile_check=False,
             ),
             "agentrouter": ProviderConfig(
                 name="agentrouter",
@@ -133,6 +137,7 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=True,
                 bypass_method=None,
+                turnstile_check=False,
             ),
             "runanytime": ProviderConfig(
                 name="runanytime",
@@ -140,8 +145,8 @@ class AppConfig:
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
-                # runanytime 使用新的签到接口 /api/user/check_in
-                sign_in_path="/api/user/check_in",
+                # runanytime 的签到需要在浏览器中完成（Turnstile），HTTP 客户端不直接调用签到接口
+                sign_in_path=None,
                 user_info_path="/api/user/self",
                 # 该站点使用 Veloera-User 作为用户标识头
                 api_user_key="Veloera-User",
@@ -152,6 +157,7 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
+                turnstile_check=True,
             ),
         }
 

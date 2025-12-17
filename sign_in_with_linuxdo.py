@@ -251,6 +251,69 @@ class LinuxDoSignIn:
                         if api_user:
                             print(f"✅ {self.account_name}: OAuth authorization successful")
 
+                            # 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+                            if getattr(self.provider_config, "turnstile_check", False):
+                                try:
+                                    target_url = f"{self.provider_config.origin}/app/me"
+                                    print(
+                                        f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}"
+                                    )
+                                    await page.goto(target_url, wait_until="networkidle")
+
+                                    try:
+                                        await page.wait_for_function(
+                                            'document.readyState === "complete"', timeout=5000
+                                        )
+                                    except Exception:
+                                        await page.wait_for_timeout(3000)
+
+                                    # 检查是否已经签到
+                                    try:
+                                        already_btn = await page.query_selector('button:has-text("今日已签到")')
+                                    except Exception:
+                                        already_btn = None
+
+                                    if already_btn:
+                                        print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
+                                    else:
+                                        # 尝试找到“立即签到”按钮
+                                        checkin_btn = None
+                                        try:
+                                            checkin_btn = await page.query_selector('button:has-text("立即签到")')
+                                        except Exception:
+                                            checkin_btn = None
+
+                                        if checkin_btn:
+                                            print(
+                                                f"ℹ️ {self.account_name}: Clicking daily check-in button in browser"
+                                            )
+                                            await checkin_btn.click()
+                                            # 等待状态变为“今日已签到”
+                                            try:
+                                                await page.wait_for_selector(
+                                                    'button:has-text("今日已签到")', timeout=60000
+                                                )
+                                                print(
+                                                    f"✅ {self.account_name}: Daily check-in completed in browser"
+                                                )
+                                            except Exception as wait_err:
+                                                print(
+                                                    f"⚠️ {self.account_name}: "
+                                                    f"Daily check-in may have failed or timed out: {wait_err}"
+                                                )
+                                                await self._take_screenshot(page, "runanytime_checkin_timeout")
+                                        else:
+                                            print(
+                                                f"⚠️ {self.account_name}: "
+                                                f"Daily check-in button not found on profile page"
+                                            )
+                                            await self._take_screenshot(
+                                                page, "runanytime_checkin_button_not_found"
+                                            )
+                                except Exception as e:
+                                    print(f"❌ {self.account_name}: Error during browser check-in: {e}")
+                                    await self._take_screenshot(page, "runanytime_checkin_error")
+
                             # 提取 session cookie，只保留与 provider domain 匹配的
                             restore_cookies = await page.context.cookies()
                             user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
