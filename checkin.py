@@ -1219,10 +1219,17 @@ class CheckIn:
                     return False, {"error": "Failed to get Linux.do client ID"}
 
             # 获取 OAuth 认证状态
-            auth_state_result = await self.get_auth_state(
-                client=client,
-                headers=headers,
-            )
+            # Elysiver 对 /api/oauth/state 使用 HTTP 客户端会返回 403，改用浏览器方式获取
+            if self.provider_config.name == "elysiver":
+                print(
+                    f"ℹ️ {self.account_name}: Getting auth state with browser for provider 'elysiver'"
+                )
+                auth_state_result = await self.get_auth_state_with_browser()
+            else:
+                auth_state_result = await self.get_auth_state(
+                    client=client,
+                    headers=headers,
+                )
             if auth_state_result and auth_state_result.get("success"):
                 print(f"ℹ️ {self.account_name}: Got auth state for Linux.do: {auth_state_result['state']}")
             else:
