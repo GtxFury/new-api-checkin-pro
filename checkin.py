@@ -42,6 +42,15 @@ class CheckIn:
         self.camoufox_proxy_config = account_config.proxy if account_config.proxy else global_proxy
         # httpx.Client proxy 转换
         self.http_proxy_config = self._get_http_proxy(self.camoufox_proxy_config)
+        # 某些站点（如 elysiver）直连更稳定，这里强制禁用代理，避免 /api/oauth/state 等关键请求被代理拦截
+        if self.provider_config.name == "elysiver":
+            if self.camoufox_proxy_config or self.http_proxy_config:
+                print(
+                    f"ℹ️ {self.account_name}: Provider 'elysiver' will ignore proxy "
+                    f"for better compatibility (using direct connection instead)"
+                )
+            self.camoufox_proxy_config = None
+            self.http_proxy_config = None
 
         # storage-states 目录
         self.storage_state_dir = storage_state_dir
