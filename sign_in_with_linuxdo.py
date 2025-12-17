@@ -128,13 +128,20 @@ class LinuxDoSignIn:
 
 		# 2. 手动回退方案：查找 Turnstile iframe，然后点击其中心区域
 		try:
-			iframe_selector = 'iframe[src*="challenges.cloudflare.com"][id^="cf-chl-widget-"]'
+			# 有些环境下 iframe 的 id 可能不固定，这里只按 src 匹配
+			iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
 			iframe = await page.query_selector(iframe_selector)
 			if not iframe:
 				try:
-					iframe = await page.wait_for_selector(iframe_selector, timeout=15000)
+					# 只要求元素存在即可，不强制可见，避免样式原因导致超时
+					iframe = await page.wait_for_selector(
+						iframe_selector,
+						timeout=20000,
+						state="attached",
+					)
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: Turnstile iframe not found on page: {e}")
+					await self._take_screenshot(page, "runanytime_turnstile_iframe_not_found")
 					return False
 
 			box = await iframe.bounding_box()
