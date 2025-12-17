@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-使用 Camoufox 绕过 Cloudflare 验证执行 Linux.do 签到
+使用 Camoufox 通过 Linux.do 执行 OAuth 登录，并在浏览器中完成带 Cloudflare Turnstile 验证的每日签到。
+
+主要用于 runanytime.hxi.me 这类需要在前端页面完成签到的站点。
 """
 
 import json
@@ -8,404 +10,415 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from camoufox.async_api import AsyncCamoufox
+
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
 
-# 优先尝试直接导入 camoufox-captcha，如果失败，再尝试从上一级目录的 camoufox-captcha 子项目导入
+# 可选依赖：camoufox-captcha，用于更智能地处理 Cloudflare Turnstile
 solve_captcha = None
-try:  # 尝试作为已安装包导入
+try:  # 优先尝试作为已安装包导入
 	from camoufox_captcha import solve_captcha  # type: ignore[assignment]
-except Exception:
-	try:
-		repo_root = Path(__file__).resolve().parent.parent
-		extra_path = repo_root / "camoufox-captcha"
-		if extra_path.exists():
-			sys.path.insert(0, str(extra_path))
-			from camoufox_captcha import solve_captcha  # type: ignore[assignment]
-	except Exception:
-		solve_captcha = None
+	print("ℹ️ LinuxDoSignIn: camoufox_captcha imported as installed package")
+except Exception as e1:
+	print(f"⚠️ LinuxDoSignIn: import camoufox_captcha failed (installed): {e1!r}")
 
-try:
-    # 可选依赖: 使用 camoufox-captcha 统一处理 Cloudflare / Turnstile
-    from camoufox_captcha import solve_captcha
-except Exception:  # pragma: no cover - 未安装 camoufox-captcha 时自动跳过
-    solve_captcha = None
+	# 在 CI / GitHub Actions 中，camoufox-captcha 通常作为当前仓库的“兄弟目录”存在
+	candidates: list[Path] = []
+	try:
+		current = Path(__file__).resolve()
+		parents = [current.parent, current.parent.parent, current.parent.parent.parent]
+		for base in parents:
+			if base:
+				candidates.append(base / "camoufox-captcha")
+	except Exception:
+		pass
+
+	for extra_path in candidates:
+		try:
+			print(f"ℹ️ LinuxDoSignIn: trying to import camoufox_captcha from {extra_path}")
+			if extra_path and extra_path.exists():
+				sys.path.insert(0, str(extra_path))
+				from camoufox_captcha import solve_captcha  # type: ignore[assignment]
+				print(
+					"ℹ️ LinuxDoSignIn: camoufox_captcha imported from local directory "
+					f"{extra_path}"
+				)
+				break
+		except Exception as e2:  # pragma: no cover - 仅用于调试 CI 环境
+			print(f"⚠️ LinuxDoSignIn: import camoufox_captcha failed from {extra_path}: {e2!r}")
+	else:
+		print("⚠️ LinuxDoSignIn: camoufox_captcha not available, Turnstile will be solved manually")
+		solve_captcha = None
 
 
 class LinuxDoSignIn:
-    """使用 Linux.do 登录授权类"""
+	"""使用 Linux.do 账号完成 OAuth 授权，并在浏览器中执行签到。"""
 
-    def __init__(
-        self,
-        account_name: str,
-        provider_config: ProviderConfig,
-        username: str,
-        password: str,
-    ):
-        """初始化
+	def __init__(
+		self,
+		account_name: str,
+		provider_config: ProviderConfig,
+		username: str,
+		password: str,
+	):
+		self.account_name = account_name
+		self.safe_account_name = "".join(c if c.isalnum() else "_" for c in account_name)
+		self.provider_config = provider_config
+		self.username = username
+		self.password = password
 
-        Args:
-            account_name: 账号名称
-            provider_config: 提供商配置
-            username: Linux.do 用户名
-            password: Linux.do 密码
-        """
-        self.account_name = account_name
-        self.safe_account_name = "".join(c if c.isalnum() else "_" for c in self.account_name)
-        self.provider_config = provider_config
-        self.username = username
-        self.password = password
+	async def _take_screenshot(self, page, reason: str) -> None:
+		"""截取当前页面截图"""
+		try:
+			screenshots_dir = "screenshots"
+			os.makedirs(screenshots_dir, exist_ok=True)
 
-    async def _take_screenshot(self, page, reason: str) -> None:
-        """截取当前页面的屏幕截图
+			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+			safe_reason = "".join(c if c.isalnum() else "_" for c in reason)
+			filename = f"{self.safe_account_name}_{timestamp}_{safe_reason}.png"
+			filepath = os.path.join(screenshots_dir, filename)
 
-        Args:
-            page: Camoufox 页面对象
-            reason: 截图原因描述
-        """
-        try:
-            # 创建 screenshots 目录
-            screenshots_dir = "screenshots"
-            os.makedirs(screenshots_dir, exist_ok=True)
+			await page.screenshot(path=filepath, full_page=True)
+			print(f"📸 {self.account_name}: Screenshot saved to {filepath}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Failed to take screenshot: {e}")
 
-            # 生成文件名: 账号名_时间戳_原因.png
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_reason = "".join(c if c.isalnum() else "_" for c in reason)
-            filename = f"{self.safe_account_name}_{timestamp}_{safe_reason}.png"
-            filepath = os.path.join(screenshots_dir, filename)
+	async def _save_page_content_to_file(self, page, reason: str) -> None:
+		"""保存页面 HTML 到日志文件"""
+		try:
+			logs_dir = "logs"
+			os.makedirs(logs_dir, exist_ok=True)
 
-            await page.screenshot(path=filepath, full_page=True)
-            print(f"📸 {self.account_name}: Screenshot saved to {filepath}")
-        except Exception as e:
-            print(f"⚠️ {self.account_name}: Failed to take screenshot: {e}")
+			timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+			safe_reason = "".join(c if c.isalnum() else "_" for c in reason)
+			filename = f"{self.safe_account_name}_{timestamp}_linuxdo_{safe_reason}.html"
+			filepath = os.path.join(logs_dir, filename)
 
-    async def _save_page_content_to_file(self, page, reason: str) -> None:
-        """保存页面 HTML 到日志文件
+			html_content = await page.content()
+			with open(filepath, "w", encoding="utf-8") as f:
+				f.write(html_content)
 
-        Args:
-            page: Camoufox 页面对象
-            reason: 日志原因描述
-        """
-        try:
-            logs_dir = "logs"
-            os.makedirs(logs_dir, exist_ok=True)
+			print(f"📄 {self.account_name}: Page HTML saved to {filepath}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Failed to save HTML: {e}")
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_reason = "".join(c if c.isalnum() else "_" for c in reason)
-            filename = f"{self.safe_account_name}_{timestamp}_linuxdo_{safe_reason}.html"
-            filepath = os.path.join(logs_dir, filename)
+	async def _solve_turnstile(self, page) -> bool:
+		"""尝试解决 Cloudflare Turnstile 验证
 
-            html_content = await page.content()
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(html_content)
+		优先使用 camoufox-captcha，如果不可用则回退到简单的坐标点击方案。
+		"""
 
-            print(f"📄 {self.account_name}: Page HTML saved to {filepath}")
-        except Exception as e:
-            print(f"⚠️ {self.account_name}: Failed to save HTML: {e}")
+		# 1. 如果 camoufox-captcha 可用，优先使用
+		if solve_captcha is not None:
+			try:
+				print(f"ℹ️ {self.account_name}: Solving Cloudflare Turnstile via camoufox-captcha")
+				solved = await solve_captcha(
+					page,
+					captcha_type="cloudflare",
+					challenge_type="turnstile",
+				)
+				print(f"ℹ️ {self.account_name}: Turnstile solve result from camoufox-captcha: {solved}")
+				if solved:
+					return True
+			except Exception as sc_err:
+				print(f"⚠️ {self.account_name}: camoufox-captcha solve_captcha error: {sc_err}")
 
-    async def signin(
-        self,
-        client_id: str,
-        auth_state: str,
-        auth_cookies: list,
-        cache_file_path: str = "",
-    ) -> tuple[bool, dict]:
-        """使用 Linux.do 账号执行登录授权
+		# 2. 手动回退方案：查找 Turnstile iframe，然后点击其中心区域
+		try:
+			iframe_selector = 'iframe[src*="challenges.cloudflare.com"][id^="cf-chl-widget-"]'
+			iframe = await page.query_selector(iframe_selector)
+			if not iframe:
+				try:
+					iframe = await page.wait_for_selector(iframe_selector, timeout=15000)
+				except Exception as e:
+					print(f"⚠️ {self.account_name}: Turnstile iframe not found on page: {e}")
+					return False
 
-        Args:
-            client_id: OAuth 客户端 ID
-            auth_state: OAuth 认证状态
-            auth_cookies: OAuth 认证 cookies
-            cache_file_path: 缓存文件
+			box = await iframe.bounding_box()
+			if not box:
+				print(f"⚠️ {self.account_name}: Failed to get Turnstile iframe bounding box")
+				return False
 
-        Returns:
-            (成功标志, 用户信息字典)
-        """
-        print(f"ℹ️ {self.account_name}: Executing sign-in with Linux.do")
-        print(
-            f"ℹ️ {self.account_name}: Using client_id: {client_id}, auth_state: {auth_state}, cache_file: {cache_file_path}"
-        )
+			click_x = box["x"] + box["width"] / 2
+			click_y = box["y"] + box["height"] / 2
+			print(
+				f"ℹ️ {self.account_name}: Clicking Turnstile checkbox at "
+				f"({click_x:.1f}, {click_y:.1f}) using manual fallback"
+			)
 
-        # 使用 Camoufox 启动浏览器
-        async with AsyncCamoufox(
-            # persistent_context=True,
-            # user_data_dir=tmp_dir,
-            headless=False,
-            humanize=True,
-            # 使用中文环境，更接近你本地浏览器配置
-            locale="zh-CN",
-            # 为了可以点击 cross-origin 的 Turnstile iframe
-            disable_coop=True,
-            # 允许访问 scope / shadow-root，用于 camoufox-captcha 检测 iframe
-            config={"forceScopeAccess": True},
-            i_know_what_im_doing=True,
-            # 固定一个常见桌面分辨率，方便我们基于坐标点击
-            window=(1280, 720),
-        ) as browser:
-            # 只有在缓存文件存在时才加载 storage_state
-            storage_state = cache_file_path if os.path.exists(cache_file_path) else None
-            if storage_state:
-                print(f"ℹ️ {self.account_name}: Found cache file, restore storage state")
-            else:
-                print(f"ℹ️ {self.account_name}: No cache file found, starting fresh")
+			await page.mouse.move(click_x, click_y)
+			await page.wait_for_timeout(1000)
+			await page.mouse.click(click_x, click_y)
+			await page.wait_for_timeout(5000)
 
-            context = await browser.new_context(storage_state=storage_state)
+			return True
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Manual Turnstile solving failed: {e}")
+			return False
 
-            # 设置从参数获取的 auth cookies 到页面上下文
-            if auth_cookies:
-                await context.add_cookies(auth_cookies)
-                print(f"ℹ️ {self.account_name}: Set {len(auth_cookies)} auth cookies from provider")
-            else:
-                print(f"ℹ️ {self.account_name}: No auth cookies to set")
+	async def _browser_check_in_with_turnstile(self, page) -> None:
+		"""在 provider 的页面中执行带 Turnstile 的每日签到"""
+		try:
+			target_url = f"{self.provider_config.origin}/app/me"
+			print(f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}")
+			await page.goto(target_url, wait_until="networkidle")
 
-            page = await context.new_page()
+			try:
+				await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+			except Exception:
+				await page.wait_for_timeout(3000)
 
-            try:
-                # 检查是否已经登录（通过缓存恢复）
-                is_logged_in = False
-                oauth_url = (
-                    f"https://connect.linux.do/oauth2/authorize?"
-                    f"response_type=code&client_id={client_id}&state={auth_state}"
-                )
+			# 先尝试解决 Turnstile（如果存在）
+			solved = await self._solve_turnstile(page)
+			if not solved:
+				print(f"⚠️ {self.account_name}: Turnstile solving may have failed, continue to try check-in")
 
-                if os.path.exists(cache_file_path):
-                    try:
-                        print(f"ℹ️ {self.account_name}: Checking login status at {oauth_url}")
-                        # 直接访问授权页面检查是否已登录
-                        response = await page.goto(oauth_url, wait_until="domcontentloaded")
-                        print(f"ℹ️ {self.account_name}: redirected to app page {response.url if response else 'N/A'}")
-                        await self._save_page_content_to_file(page, "sign_in_check")
+			# 检查是否已经签到
+			try:
+				already_btn = await page.query_selector('button:has-text("今日已签到")')
+			except Exception:
+				already_btn = None
 
-                        # 登录后可能直接跳转回应用页面
-                        if response and response.url.startswith(self.provider_config.origin):
-                            is_logged_in = True
-                            print(f"✅ {self.account_name}: Already logged in via cache, proceeding to authorization")
-                        else:
-                            # 检查是否出现授权按钮（表示已登录）
-                            allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                            if allow_btn:
-                                is_logged_in = True
-                                print(
-                                    f"✅ {self.account_name}: Already logged in via cache, proceeding to authorization"
-                                )
-                            else:
-                                print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
-                    except Exception as e:
-                        print(f"⚠️ {self.account_name}: Failed to check login status: {e}")
+			if already_btn:
+				print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
+				return
 
-                # 如果未登录，则执行登录流程
-                if not is_logged_in:
-                    try:
-                        print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
+			# 查找“立即签到”按钮并点击
+			checkin_btn = None
+			try:
+				checkin_btn = await page.query_selector('button:has-text("立即签到")')
+			except Exception:
+				checkin_btn = None
 
-                        await page.goto("https://linux.do/login", wait_until="domcontentloaded")
-                        await page.fill("#login-account-name", self.username)
-                        await page.wait_for_timeout(2000)
-                        await page.fill("#login-account-password", self.password)
-                        await page.wait_for_timeout(2000)
-                        await page.click("#login-button")
-                        await page.wait_for_timeout(10000)
+			if not checkin_btn:
+				print(
+					f"⚠️ {self.account_name}: Daily check-in button not found on profile page"
+				)
+				await self._take_screenshot(page, "runanytime_checkin_button_not_found")
+				return
 
-                        await self._save_page_content_to_file(page, "sign_in_result")
+			print(f"ℹ️ {self.account_name}: Clicking daily check-in button in browser")
+			await checkin_btn.click()
 
-                        try:
-                            current_url = page.url
-                            print(f"ℹ️ {self.account_name}: Current page url is {current_url}")
-                            if "linux.do/challenge" in current_url:
-                                print(
-                                    f"⚠️ {self.account_name}: Cloudflare challenge detected, "
-                                    "Camoufox should bypass it automatically. Waiting..."
-                                )
-                                # 等待 Cloudflare 验证完成
-                                await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=60000)
-                                print(f"✅ {self.account_name}: Cloudflare challenge bypassed successfully")
+			# 等待状态变为“今日已签到”
+			try:
+				await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
+				print(f"✅ {self.account_name}: Daily check-in completed in browser")
+			except Exception as wait_err:
+				print(
+					f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
+				)
+				await self._take_screenshot(page, "runanytime_checkin_timeout")
 
-                        except Exception as e:
-                            print(f"⚠️ {self.account_name}: Possible Cloudflare challenge: {e}")
-                            # 即使超时，也尝试继续
-                            pass
+	async def signin(
+		self,
+		client_id: str,
+		auth_state: str,
+		auth_cookies: list,
+		cache_file_path: str = "",
+	) -> tuple[bool, dict]:
+		"""使用 Linux.do 账号执行登录授权并返回 provider cookies / api_user"""
 
-                        # 保存新的会话状态
-                        await context.storage_state(path=cache_file_path)
-                        print(f"✅ {self.account_name}: Storage state saved to cache file")
+		print(f"ℹ️ {self.account_name}: Executing sign-in with Linux.do")
+		print(
+			f"ℹ️ {self.account_name}: Using client_id: {client_id}, auth_state: {auth_state}, cache_file: {cache_file_path}"
+		)
 
-                    except Exception as e:
-                        print(f"❌ {self.account_name}: Error occurred while signing in linux.do: {e}")
-                        await self._take_screenshot(page, "signin_bypass_error")
-                        return False, {"error": "Linux.do sign-in error"}
+		# 使用 Camoufox 启动浏览器
+		async with AsyncCamoufox(
+			headless=False,
+			humanize=True,
+			# 使用中文环境，更接近本地浏览器配置
+			locale="zh-CN",
+			# 为了可以点击 cross-origin 的 Turnstile iframe
+			disable_coop=True,
+			# 允许访问 scope / shadow-root，用于 camoufox-captcha 检测 iframe
+			config={"forceScopeAccess": True},
+			i_know_what_im_doing=True,
+			# 固定一个常见桌面分辨率，方便我们基于坐标点击
+			window=(1280, 720),
+		) as browser:
+			# 只有在缓存文件存在时才加载 storage_state
+			storage_state = cache_file_path if os.path.exists(cache_file_path) else None
+			if storage_state:
+				print(f"ℹ️ {self.account_name}: Found cache file, restore storage state")
+			else:
+				print(f"ℹ️ {self.account_name}: No cache file found, starting fresh")
 
-                    # 登录后访问授权页面
-                    try:
-                        print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
-                        await page.goto(oauth_url, wait_until="domcontentloaded")
-                    except Exception as e:
-                        print(f"❌ {self.account_name}: Failed to navigate to authorization page: {e}")
-                        await self._take_screenshot(page, "auth_page_navigation_failed_bypass")
-                        return False, {"error": "Linux.do authorization page navigation failed"}
+			context = await browser.new_context(storage_state=storage_state)
 
-                # 统一处理授权逻辑（无论是否通过缓存登录）
-                try:
-                    # 等待授权按钮出现，最多等待30秒
-                    print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
-                    await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
-                    allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
+			# 设置从参数获取的 auth cookies 到页面上下文
+			if auth_cookies:
+				await context.add_cookies(auth_cookies)
+				print(f"ℹ️ {self.account_name}: Set {len(auth_cookies)} auth cookies from provider")
+			else:
+				print(f"ℹ️ {self.account_name}: No auth cookies to set")
 
-                    if allow_btn_ele:
-                        print(f"ℹ️ {self.account_name}: Clicking authorization button...")
-                        await allow_btn_ele.click()
-                        await page.wait_for_url(f"**{self.provider_config.origin}/oauth/**", timeout=30000)
+			page = await context.new_page()
 
-                        # 从 localStorage 获取 user 对象并提取 id
-                        api_user = None
-                        try:
-                            try:
-                                await page.wait_for_function('localStorage.getItem("user") !== null', timeout=10000)
-                            except Exception:
-                                await page.wait_for_timeout(5000)
+			try:
+				is_logged_in = False
+				oauth_url = (
+					"https://connect.linux.do/oauth2/authorize?"
+					f"response_type=code&client_id={client_id}&state={auth_state}"
+				)
 
-                            user_data = await page.evaluate("() => localStorage.getItem('user')")
-                            if user_data:
-                                user_obj = json.loads(user_data)
-                                api_user = user_obj.get("id")
-                                if api_user:
-                                    print(f"✅ {self.account_name}: Got api user: {api_user}")
-                                else:
-                                    print(f"⚠️ {self.account_name}: User id not found in localStorage")
-                            else:
-                                print(f"⚠️ {self.account_name}: User data not found in localStorage")
-                        except Exception as e:
-                            print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
+				# 如果存在缓存，先尝试直接访问授权页面
+				if os.path.exists(cache_file_path):
+					try:
+						print(f"ℹ️ {self.account_name}: Checking login status at {oauth_url}")
+						response = await page.goto(oauth_url, wait_until="domcontentloaded")
+						print(
+							f"ℹ️ {self.account_name}: redirected to app page "
+							f"{response.url if response else 'N/A'}"
+						)
+						await self._save_page_content_to_file(page, "sign_in_check")
 
-                        if api_user:
-                            print(f"✅ {self.account_name}: OAuth authorization successful")
+						if response and response.url.startswith(self.provider_config.origin):
+							is_logged_in = True
+							print(
+								f"✅ {self.account_name}: Already logged in via cache, "
+								f"proceeding to authorization"
+							)
+						else:
+							allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+							if allow_btn:
+								is_logged_in = True
+								print(
+									f"✅ {self.account_name}: Already logged in via cache, "
+									f"proceeding to authorization"
+								)
+							else:
+								print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
+					except Exception as e:
+						print(f"⚠️ {self.account_name}: Failed to check login status: {e}")
 
-                            # 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
-                            if getattr(self.provider_config, "turnstile_check", False):
-                                try:
-                                    target_url = f"{self.provider_config.origin}/app/me"
-                                    print(
-                                        f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}"
-                                    )
-                                    await page.goto(target_url, wait_until="networkidle")
+				# 如果未登录，则执行登录流程
+				if not is_logged_in:
+					try:
+						print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
 
-                                    try:
-                                        await page.wait_for_function(
-                                            'document.readyState === "complete"', timeout=5000
-                                        )
-                                    except Exception:
-                                        await page.wait_for_timeout(3000)
+						await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+						await page.fill("#login-account-name", self.username)
+						await page.wait_for_timeout(2000)
+						await page.fill("#login-account-password", self.password)
+						await page.wait_for_timeout(2000)
+						await page.click("#login-button")
+						await page.wait_for_timeout(10000)
 
-                                    # 先尝试通过 camoufox-captcha 解决 Turnstile（如果可用）
-                                    if solve_captcha is not None:
-                                        try:
-                                            print(
-                                                f"ℹ️ {self.account_name}: Solving Cloudflare Turnstile via camoufox-captcha"
-                                            )
-                                            solved = await solve_captcha(
-                                                page,
-                                                captcha_type="cloudflare",
-                                                challenge_type="turnstile",
-                                            )
-                                            print(
-                                                f"ℹ️ {self.account_name}: Turnstile solve result: {solved}"
-                                            )
-                                        except Exception as sc_err:
-                                            print(
-                                                f"⚠️ {self.account_name}: camoufox-captcha solve_captcha error: {sc_err}"
-                                            )
-                                    else:
-                                        print(
-                                            f"⚠️ {self.account_name}: camoufox-captcha not available, "
-                                            f"solve_captcha is None"
-                                        )
+						await self._save_page_content_to_file(page, "sign_in_result")
 
-                                    # 检查是否已经签到
-                                    try:
-                                        already_btn = await page.query_selector('button:has-text("今日已签到")')
-                                    except Exception:
-                                        already_btn = None
+						# 简单处理 Cloudflare challenge（如果存在）
+						try:
+							current_url = page.url
+							print(f"ℹ️ {self.account_name}: Current page url is {current_url}")
+							if "linux.do/challenge" in current_url:
+								print(
+									f"⚠️ {self.account_name}: Cloudflare challenge detected, "
+									"Camoufox should bypass it automatically. Waiting..."
+								)
+								await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=60000)
+								print(f"✅ {self.account_name}: Cloudflare challenge bypassed successfully")
+						except Exception as e:
+							print(f"⚠️ {self.account_name}: Possible Cloudflare challenge: {e}")
 
-                                    if already_btn:
-                                        print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
-                                    else:
-                                        # 然后尝试找到“立即签到”按钮
-                                        checkin_btn = None
-                                        try:
-                                            checkin_btn = await page.query_selector('button:has-text("立即签到")')
-                                        except Exception:
-                                            checkin_btn = None
+						# 保存新的会话状态
+						await context.storage_state(path=cache_file_path)
+						print(f"✅ {self.account_name}: Storage state saved to cache file")
+					except Exception as e:
+						print(f"❌ {self.account_name}: Error occurred while signing in linux.do: {e}")
+						await self._take_screenshot(page, "signin_bypass_error")
+						return False, {"error": "Linux.do sign-in error"}
 
-                                        if checkin_btn:
-                                            print(
-                                                f"ℹ️ {self.account_name}: Clicking daily check-in button in browser"
-                                            )
-                                            await checkin_btn.click()
-                                            # 等待状态变为“今日已签到”
-                                            try:
-                                                await page.wait_for_selector(
-                                                    'button:has-text("今日已签到")', timeout=60000
-                                                )
-                                                print(
-                                                    f"✅ {self.account_name}: Daily check-in completed in browser"
-                                                )
-                                            except Exception as wait_err:
-                                                print(
-                                                    f"⚠️ {self.account_name}: "
-                                                    f"Daily check-in may have failed or timed out: {wait_err}"
-                                                )
-                                                await self._take_screenshot(page, "runanytime_checkin_timeout")
-                                        else:
-                                            print(
-                                                f"⚠️ {self.account_name}: "
-                                                f"Daily check-in button not found on profile page"
-                                            )
-                                            await self._take_screenshot(
-                                                page, "runanytime_checkin_button_not_found"
-                                            )
-                                except Exception as e:
-                                    print(f"❌ {self.account_name}: Error during browser check-in: {e}")
-                                    await self._take_screenshot(page, "runanytime_checkin_error")
+					# 登录后访问授权页面
+					try:
+						print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
+						await page.goto(oauth_url, wait_until="domcontentloaded")
+					except Exception as e:
+						print(f"❌ {self.account_name}: Failed to navigate to authorization page: {e}")
+						await self._take_screenshot(page, "auth_page_navigation_failed_bypass")
+						return False, {"error": "Linux.do authorization page navigation failed"}
 
-                            # 提取 session cookie，只保留与 provider domain 匹配的
-                            restore_cookies = await page.context.cookies()
-                            user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+				# 统一处理授权逻辑（无论是否通过缓存登录）
+				try:
+					print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
+					await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+					allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
 
-                            return True, {"cookies": user_cookies, "api_user": api_user}
-                        else:
-                            print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
-                            await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
-                            parsed_url = urlparse(page.url)
-                            query_params = parse_qs(parsed_url.query)
+					if not allow_btn_ele:
+						print(f"❌ {self.account_name}: Approve button not found")
+						await self._take_screenshot(page, "approve_button_not_found_bypass")
+						return False, {"error": "Linux.do allow button not found"}
 
-                            # 如果 query 中包含 code，说明 OAuth 回调成功
-                            if "code" in query_params:
-                                print(f"✅ {self.account_name}: OAuth code received: {query_params.get('code')}")
-                                return True, query_params
-                            else:
-                                print(f"❌ {self.account_name}: OAuth failed, no code in callback")
-                                return False, {
-                                    "error": "Linux.do OAuth failed - no code in callback",
-                                }
-                    else:
-                        print(f"❌ {self.account_name}: Approve button not found")
-                        await self._take_screenshot(page, "approve_button_not_found_bypass")
-                        return False, {"error": "Linux.do allow button not found"}
+					print(f"ℹ️ {self.account_name}: Clicking authorization button...")
+					await allow_btn_ele.click()
+					await page.wait_for_url(f"**{self.provider_config.origin}/oauth/**", timeout=30000)
 
-                except Exception as e:
-                    print(
-                        f"❌ {self.account_name}: Error occurred during authorization: {e}\n\n"
-                        f"Current page is: {page.url}"
-                    )
-                    await self._take_screenshot(page, "authorization_failed_bypass")
-                    return False, {"error": "Linux.do authorization failed"}
+					# 从 localStorage 获取 user 对象并提取 id
+					api_user = None
+					try:
+						try:
+							await page.wait_for_function(
+								'localStorage.getItem("user") !== null', timeout=10000
+							)
+						except Exception:
+							await page.wait_for_timeout(5000)
 
-            except Exception as e:
-                print(f"❌ {self.account_name}: Error occurred while processing linux.do page: {e}")
-                await self._take_screenshot(page, "page_navigation_error_bypass")
-                return False, {"error": "Linux.do page navigation error"}
-            finally:
-                await page.close()
-                await context.close()
+						user_data = await page.evaluate("() => localStorage.getItem('user')")
+						if user_data:
+							user_obj = json.loads(user_data)
+							api_user = user_obj.get("id")
+							if api_user:
+								print(f"✅ {self.account_name}: Got api user: {api_user}")
+							else:
+								print(f"⚠️ {self.account_name}: User id not found in localStorage")
+						else:
+							print(f"⚠️ {self.account_name}: User data not found in localStorage")
+					except Exception as e:
+						print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
+
+					if api_user:
+						print(f"✅ {self.account_name}: OAuth authorization successful")
+
+						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+						if getattr(self.provider_config, "turnstile_check", False):
+							await self._browser_check_in_with_turnstile(page)
+
+						# 提取 session cookie，只保留与 provider domain 匹配的
+						restore_cookies = await page.context.cookies()
+						user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+
+						return True, {"cookies": user_cookies, "api_user": api_user}
+
+					# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
+					print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
+					await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
+					parsed_url = urlparse(page.url)
+					query_params = parse_qs(parsed_url.query)
+
+					if "code" in query_params:
+						print(f"✅ {self.account_name}: OAuth code received: {query_params.get('code')}")
+						return True, query_params
+
+					print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+					return False, {
+						"error": "Linux.do OAuth failed - no code in callback",
+					}
+				except Exception as e:
+					print(
+						f"❌ {self.account_name}: Error occurred during authorization: {e}\n\n"
+						f"Current page is: {page.url}"
+					)
+					await self._take_screenshot(page, "authorization_failed_bypass")
+					return False, {"error": "Linux.do authorization failed"}
+			except Exception as e:
+				print(f"❌ {self.account_name}: Error occurred while processing linux.do page: {e}")
+				await self._take_screenshot(page, "page_navigation_error_bypass")
+				return False, {"error": "Linux.do page navigation error"}
+			finally:
+				await page.close()
+				await context.close()
+
