@@ -29,6 +29,8 @@ class ProviderConfig:
     bypass_method: Literal["waf_cookies"] | None = None
     # 是否启用 Turnstile 校验（需要在浏览器中执行签到）
     turnstile_check: bool = False
+    # 可选的签到状态接口路径（如 /api/user/check_in_status）
+    check_in_status_path: str | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -54,6 +56,7 @@ class ProviderConfig:
             aliyun_captcha=data.get("aliyun_captcha", False),
             bypass_method=data.get("bypass_method"),
             turnstile_check=data.get("turnstile_check", False),
+            check_in_status_path=data.get("check_in_status_path"),
         )
 
     def needs_waf_cookies(self) -> bool:
@@ -93,6 +96,12 @@ class ProviderConfig:
     def get_linuxdo_auth_url(self) -> str:
         """获取 LinuxDo 认证 URL"""
         return f"{self.origin}{self.linuxdo_auth_path}"
+
+    def get_check_in_status_url(self) -> str | None:
+        """获取签到状态 URL"""
+        if self.check_in_status_path:
+            return f"{self.origin}{self.check_in_status_path}"
+        return None
 
 
 @dataclass
@@ -158,6 +167,7 @@ class AppConfig:
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=True,
+                check_in_status_path="/api/user/check_in_status",
             ),
         }
 

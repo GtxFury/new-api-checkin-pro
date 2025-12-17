@@ -918,6 +918,31 @@ class CheckIn:
             print(f"❌ {self.account_name}: Check-in failed - HTTP {response.status_code}")
             return False
 
+    async def get_check_in_status(self, client: httpx.Client, headers: dict) -> dict | None:
+        """获取签到状态（仅在配置了 check_in_status_path 时可用）"""
+        status_url = self.provider_config.get_check_in_status_url()
+        if not status_url:
+            return None
+
+        try:
+            print(f"ℹ️ {self.account_name}: Fetching check-in status from {status_url}")
+            resp = client.get(status_url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                print(
+                    f"⚠️ {self.account_name}: Failed to get check-in status - HTTP {resp.status_code}"
+                )
+                return None
+
+            data = self._check_and_handle_response(resp, "check_in_status")
+            if not data or not isinstance(data, dict):
+                print(f"⚠️ {self.account_name}: Invalid check-in status response")
+                return None
+
+            return data
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Error getting check-in status: {e}")
+            return None
+
     async def check_in_with_cookies(
         self, cookies: dict, api_user: str | int, needs_check_in: bool | None = None
     ) -> tuple[bool, dict]:
@@ -953,12 +978,45 @@ class CheckIn:
                 print(f"❌ {self.account_name}: {error_msg}")
                 return False, {"error": "Failed to get user info"}
 
+            # 1) 传统站点：通过独立签到接口完成
             if needs_check_in is None and self.provider_config.needs_manual_check_in():
                 success = self.execute_check_in(client, headers)
                 return success, user_info if user_info else {"error": "No user info available"}
-            else:
-                print(f"ℹ️ {self.account_name}: Check-in completed automatically (triggered by user info request)")
-                return True, user_info if user_info else {"error": "No user info available"}
+
+            # 2) 特殊站点（如 runanytime）：需要根据签到状态接口判断是否真的签到成功
+            if getattr(self.provider_config, "turnstile_check", False):
+                status_data = await self.get_check_in_status(client, headers)
+                if status_data and status_data.get("success"):
+                    data = status_data.get("data", {})
+                    can_check_in = data.get("can_check_in")
+
+                    # can_check_in 为 False：表示今天已经签到过（本次或之前），视为成功
+                    if can_check_in is False:
+                        print(
+                            f"✅ {self.account_name}: Check-in status confirmed (already checked in today)"
+                        )
+                        return True, user_info if user_info else status_data
+
+                    # can_check_in 为 True：仍然可以签到，说明本次流程未真正完成签到
+                    if can_check_in is True:
+                        print(
+                            f"❌ {self.account_name}: Check-in status indicates not checked in yet "
+                            f"(can_check_in is true)"
+                        )
+                        return False, {
+                            "error": "Check-in status indicates not checked in yet (can_check_in=true)"
+                        }
+
+                # 无法获取签到状态时，保守起见按失败处理，避免误报成功
+                print(
+                    f"❌ {self.account_name}: Unable to confirm check-in status for provider "
+                    f"'{self.provider_config.name}'"
+                )
+                return False, {"error": "Unable to confirm check-in status"}
+
+            # 3) 其它站点：维持原有“访问用户信息即视为签到完成”的语义
+            print(f"ℹ️ {self.account_name}: Check-in completed automatically (triggered by user info request)")
+            return True, user_info if user_info else {"error": "No user info available"}
 
         except Exception as e:
             print(f"❌ {self.account_name}: Error occurred during check-in process - {e}")
