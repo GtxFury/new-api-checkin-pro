@@ -970,6 +970,27 @@ class CheckIn:
                 self.provider_config.api_user_key: f"{api_user}",
             }
 
+            # wzw 专用逻辑：先签到，再查余额，避免只拿到签到前的额度
+            if self.provider_config.name == "wzw":
+                # 只在配置了独立签到接口且未显式禁用签到时调用签到
+                if needs_check_in is None and self.provider_config.needs_manual_check_in():
+                    success = self.execute_check_in(client, headers)
+                    if not success:
+                        return False, {"error": "Check-in failed"}
+
+                user_info = await self.get_user_info(client, headers)
+                if user_info and user_info.get("success"):
+                    success_msg = user_info.get("display", "User info retrieved successfully")
+                    print(f"✅ {success_msg} (after check-in)")
+                    return True, user_info
+                elif user_info:
+                    error_msg = user_info.get("error", "Unknown error")
+                    print(f"❌ {self.account_name}: {error_msg}")
+                    return False, {"error": "Failed to get user info after check-in"}
+
+                return False, {"error": "Failed to get user info after check-in"}
+
+            # 其它站点沿用原有语义：先查一次用户信息，再按配置决定是否额外调用签到接口
             user_info = await self.get_user_info(client, headers)
             if user_info and user_info.get("success"):
                 success_msg = user_info.get("display", "User info retrieved successfully")
@@ -979,7 +1000,7 @@ class CheckIn:
                 print(f"❌ {self.account_name}: {error_msg}")
                 return False, {"error": "Failed to get user info"}
 
-            # 1) 传统站点：通过独立签到接口完成
+            # 1) 传统站点：通过独立签到接口完成（非 wzw 保持原逻辑：用签到前的余额做展示）
             if needs_check_in is None and self.provider_config.needs_manual_check_in():
                 success = self.execute_check_in(client, headers)
                 return success, user_info if user_info else {"error": "No user info available"}
