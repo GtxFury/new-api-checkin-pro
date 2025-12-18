@@ -619,16 +619,21 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
+                # 与 camoufox-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
                 locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
+                disable_coop=True,
+                config={"forceScopeAccess": True},
+                i_know_what_im_doing=True,
             ) as browser:
                 page = await browser.new_page()
 
                 try:
-                    # 1. 先打开登录页，触发基础的 Cloudflare / WAF 校验
-                    print(f"ℹ️ {self.account_name}: Opening login page")
-                    await page.goto(self.provider_config.get_login_url(), wait_until="networkidle")
+                    # 1. 打开登录页，触发基础的 Cloudflare / WAF 校验
+                    login_url = self.provider_config.get_login_url()
+                    print(f"ℹ️ {self.account_name}: Opening login page {login_url}")
+                    await page.goto(login_url, wait_until="networkidle")
 
                     try:
                         await page.wait_for_function('document.readyState === "complete"', timeout=5000)
@@ -640,49 +645,69 @@ class CheckIn:
                         if captcha_check:
                             await page.wait_for_timeout(3000)
 
-                    # 2. 通过顶层导航访问 auth_state 接口，让 Cloudflare 的 JS 挑战自动运行
-                    auth_state_url = self.provider_config.get_auth_state_url()
-                    print(f"ℹ️ {self.account_name}: Opening auth state url in browser: {auth_state_url}")
-                    await page.goto(auth_state_url, wait_until="networkidle")
-
-                    # 如果 camoufox-captcha 可用，优先尝试自动解决 Cloudflare 挑战
+                    # 2. 在登录页上优先尝试解决 Cloudflare 整页拦截（interstitial）
                     if linuxdo_solve_captcha is not None:
                         try:
                             print(
-                                f"ℹ️ {self.account_name}: Solving Cloudflare challenge for auth state via "
+                                f"ℹ️ {self.account_name}: Solving Cloudflare challenge on login page via "
                                 "camoufox-captcha"
                             )
-                            # 对于 /api/oauth/state 返回的整页 Cloudflare 验证，属于 interstitial 类型
-                            solved = await linuxdo_solve_captcha(
+                            solved_login = await linuxdo_solve_captcha(
                                 page,
                                 captcha_type="cloudflare",
                                 challenge_type="interstitial",
                             )
                             print(
-                                f"ℹ️ {self.account_name}: camoufox-captcha solve result for auth state: {solved}"
+                                f"ℹ️ {self.account_name}: camoufox-captcha solve result on login page: {solved_login}"
                             )
-                            # 无论 solved 结果如何，都等待一小段时间给页面刷新 / 重定向
                             await page.wait_for_timeout(5000)
                         except Exception as sc_err:
                             print(
-                                f"⚠️ {self.account_name}: camoufox-captcha error while solving auth state: {sc_err}"
+                                f"⚠️ {self.account_name}: camoufox-captcha error on login page: {sc_err}"
                             )
 
-                    # 尝试从页面正文中解析 JSON
-                    json_text = await page.evaluate(
-                        "() => document.body && (document.body.innerText || document.body.textContent || '')"
+                    # 3. 使用浏览器内的 fetch 调用 auth_state 接口，复用已通过的 Cloudflare 状态
+                    auth_state_url = self.provider_config.get_auth_state_url()
+                    print(
+                        f"ℹ️ {self.account_name}: Fetching auth state via browser fetch: {auth_state_url}"
+                    )
+                    response = await page.evaluate(
+                        f"""async () => {{
+                            try {{
+                                const resp = await fetch('{auth_state_url}', {{ credentials: 'include' }});
+                                const text = await resp.text();
+                                return {{ ok: resp.ok, status: resp.status, text }};
+                            }} catch (e) {{
+                                return {{ ok: false, status: 0, text: String(e) }};
+                            }}
+                        }}"""
                     )
 
+                    if not response or "text" not in response:
+                        return {
+                            "success": False,
+                            "error": f"Failed to get state via browser fetch, invalid response: {response}",
+                        }
+
+                    status = response.get("status", 0)
+                    text = response.get("text", "")
+
+                    if not response.get("ok") or status != 200:
+                        # 依然被 Cloudflare 或后端拒绝，保存部分文本便于排查
+                        return {
+                            "success": False,
+                            "error": f"Failed to get state via browser fetch: HTTP {status}, body: {text[:200]}",
+                        }
+
                     try:
-                        data = json.loads(json_text)
+                        data = json.loads(text)
                     except Exception as parse_err:
-                        # 页面内容不是 JSON，多半仍然是 Cloudflare challenge 或错误页
                         print(
                             f"⚠️ {self.account_name}: Failed to parse auth state JSON in browser: {parse_err}"
                         )
                         return {
                             "success": False,
-                            "error": f"Failed to get state, invalid JSON body: {json_text[:200]}",
+                            "error": f"Failed to parse auth state JSON in browser: {text[:200]}",
                         }
 
                     if data and "data" in data:
