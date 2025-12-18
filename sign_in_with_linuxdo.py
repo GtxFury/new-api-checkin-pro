@@ -223,6 +223,74 @@ class LinuxDoSignIn:
 			print(f"❌ {self.account_name}: Error during browser check-in: {e}")
 			await self._take_screenshot(page, "runanytime_checkin_error")
 
+	async def _extract_balance_from_profile(self, page) -> dict | None:
+		"""从 provider 的 /app/me 页面中提取当前余额和历史消耗。
+
+		当前针对 runanytime / elysiver 等 Veloera 系站点，这些站点在
+		个人中心页面的表格中以「当前余额 / 历史消耗」形式展示美元金额。
+		"""
+		try:
+			summary = await page.evaluate(
+				"""() => {
+					try {
+						const rows = Array.from(document.querySelectorAll('table tr'));
+						const result = {};
+						for (const row of rows) {
+							const header = row.querySelector('th, [role="rowheader"]');
+							const cell = row.querySelector('td, [role="cell"]');
+							if (!header || !cell) continue;
+							const label = header.innerText.trim();
+							const value = cell.innerText.trim();
+							result[label] = value;
+						}
+						return result;
+					} catch (e) {
+						return null;
+					}
+				}"""
+			)
+
+			if not summary:
+				print(f"⚠️ {self.account_name}: Failed to extract balance table from /app/me")
+				return None
+
+			balance_str = summary.get("当前余额")
+			used_str = summary.get("历史消耗")
+
+			if balance_str is None or used_str is None:
+				try:
+					snippet = json.dumps(summary, ensure_ascii=False)[:200]
+				except Exception:
+					snippet = str(summary)[:200]
+				print(
+					f"⚠️ {self.account_name}: Balance rows not found in profile page summary: {snippet}"
+				)
+				return None
+
+			def _parse_amount(s: str) -> float:
+				s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
+				try:
+					return float(s)
+				except Exception:
+					return 0.0
+
+			quota = _parse_amount(balance_str)
+			used_quota = _parse_amount(used_str)
+
+			print(
+				f"✅ {self.account_name}: Parsed balance from /app/me - "
+				f"Current balance: ${quota}, Used: ${used_quota}"
+			)
+			return {
+				"success": True,
+				"quota": quota,
+				"used_quota": used_quota,
+				"display": f"Current balance: ${quota}, Used: ${used_quota}",
+			}
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Error extracting balance from /app/me: {e}")
+			return None
+
 	async def signin(
 		self,
 		client_id: str,
@@ -397,14 +465,21 @@ class LinuxDoSignIn:
 						print(f"✅ {self.account_name}: OAuth authorization successful")
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+						user_info = None
 						if getattr(self.provider_config, "turnstile_check", False):
 							await self._browser_check_in_with_turnstile(page)
+							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求
+							user_info = await self._extract_balance_from_profile(page)
 
 						# 提取 session cookie，只保留与 provider domain 匹配的
 						restore_cookies = await page.context.cookies()
 						user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
 
-						return True, {"cookies": user_cookies, "api_user": api_user}
+						result: dict = {"cookies": user_cookies, "api_user": api_user}
+						if user_info:
+							result["user_info"] = user_info
+
+						return True, result
 
 					# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
 					print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
@@ -469,13 +544,19 @@ class LinuxDoSignIn:
 											user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
 
 											# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+											user_info_cb = None
 											if getattr(self.provider_config, "turnstile_check", False):
 												await self._browser_check_in_with_turnstile(page)
+												user_info_cb = await self._extract_balance_from_profile(page)
 
-											return True, {
+											result_cb: dict = {
 												"cookies": user_cookies,
 												"api_user": api_user_from_cb,
 											}
+											if user_info_cb:
+												result_cb["user_info"] = user_info_cb
+
+											return True, result_cb
 
 							print(
 								f"⚠️ {self.account_name}: Linux.do callback via browser failed or not JSON success "

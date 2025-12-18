@@ -1465,10 +1465,18 @@ class CheckIn:
 
             # 检查是否成功获取 cookies 和 api_user
             if success and "cookies" in result_data and "api_user" in result_data:
-                # 统一调用 check_in_with_cookies 执行签到
                 user_cookies = result_data["cookies"]
                 api_user = result_data["api_user"]
 
+                # 对于启用了 Turnstile 的站点（如 runanytime / elysiver），
+                # 如果在 LinuxDo 登录流程中已经在 /app/me 页面解析出了余额信息，
+                # 则直接使用该信息作为最终结果，避免再次通过 HTTP 或额外浏览器访问。
+                if getattr(self.provider_config, "turnstile_check", False) and "user_info" in result_data:
+                    user_info = result_data["user_info"]
+                    # 维持与其它路径一致的返回格式
+                    return True, user_info
+
+                # 其它站点沿用原有逻辑：统一调用 check_in_with_cookies 执行签到 / 获取余额
                 merged_cookies = {**waf_cookies, **user_cookies}
                 return await self.check_in_with_cookies(merged_cookies, api_user)
             elif success and "code" in result_data and "state" in result_data:
