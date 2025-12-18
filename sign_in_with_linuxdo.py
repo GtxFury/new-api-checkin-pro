@@ -19,11 +19,12 @@ from utils.config import ProviderConfig
 
 # 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
 try:
-	from playwright_captcha import ClickSolver, FrameworkType  # type: ignore[assignment]
+	from playwright_captcha import ClickSolver, CaptchaType, FrameworkType  # type: ignore[assignment]
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = True
 	print("ℹ️ LinuxDoSignIn: playwright-captcha imported successfully")
 except Exception as e1:  # pragma: no cover - 可选依赖
 	ClickSolver = None  # type: ignore[assignment]
+	CaptchaType = None  # type: ignore[assignment]
 	FrameworkType = None  # type: ignore[assignment]
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = False
 	print(f"⚠️ LinuxDoSignIn: playwright-captcha not available: {e1!r}")
@@ -35,7 +36,7 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 	为了兼容现有调用方，保留 captcha_type / challenge_type 参数，但目前主要依赖
 	playwright-captcha 的自动检测能力。
 	"""
-	if not PLAYWRIGHT_CAPTCHA_AVAILABLE or ClickSolver is None or FrameworkType is None:
+	if not PLAYWRIGHT_CAPTCHA_AVAILABLE or ClickSolver is None or FrameworkType is None or CaptchaType is None:
 		print(
 			f"⚠️ LinuxDoSignIn: playwright-captcha is not available, "
 			f"solve_captcha fallback will always return False"
@@ -44,9 +45,22 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 
 	try:
 		framework = FrameworkType.CAMOUFOX  # 当前项目在 Camoufox 上运行
+
+		# 将调用方传入的 captcha_type / challenge_type 映射到 playwright-captcha 的 CaptchaType
+		if captcha_type == "cloudflare" and challenge_type == "turnstile":
+			target_type = CaptchaType.CLOUDFLARE_TURNSTILE
+		elif captcha_type == "cloudflare" and challenge_type == "interstitial":
+			target_type = CaptchaType.CLOUDFLARE_INTERSTITIAL
+		else:
+			print(
+				f"⚠️ LinuxDoSignIn: Unsupported captcha_type/challenge_type combination for playwright-captcha: "
+				f"{captcha_type}/{challenge_type}"
+			)
+			return False
+
 		async with ClickSolver(framework=framework, page=page) as solver:
-			# 目前依赖自动识别 Cloudflare Turnstile / Interstitial
-			await solver.solve_captcha()
+			# 对于 ClickSolver，solve_captcha 在成功时不会返回 token，能正常返回即视为成功
+			await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
 			return True
 	except Exception as e:
 		print(f"⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}")
