@@ -409,8 +409,81 @@ class LinuxDoSignIn:
 					parsed_url = urlparse(page.url)
 					query_params = parse_qs(parsed_url.query)
 
-					if "code" in query_params:
-						print(f"✅ {self.account_name}: OAuth code received: {query_params.get('code')}")
+					code_values = query_params.get("code")
+					if code_values:
+						code = code_values[0]
+						print(f"✅ {self.account_name}: OAuth code received: {code}")
+
+						# 优先在浏览器内调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
+						try:
+							callback_url = self.provider_config.get_linuxdo_auth_url()
+							print(
+								f"ℹ️ {self.account_name}: Calling Linux.do callback via browser fetch: {callback_url}"
+							)
+
+							callback_resp = await page.evaluate(
+								"""async (cbUrl, codeValue, stateValue) => {
+									try {
+										const url = new URL(cbUrl);
+										if (codeValue) url.searchParams.set('code', codeValue);
+										if (stateValue) url.searchParams.set('state', stateValue);
+
+										const resp = await fetch(url.toString(), { credentials: 'include' });
+										const text = await resp.text();
+										return { ok: resp.ok, status: resp.status, text };
+									} catch (e) {
+										return { ok: false, status: 0, text: String(e) };
+									}
+								}""",
+								callback_url,
+								code,
+								auth_state,
+							)
+
+							status = callback_resp.get("status", 0) if callback_resp else 0
+							text = callback_resp.get("text", "") if callback_resp else ""
+
+							if callback_resp and callback_resp.get("ok") and status == 200:
+								try:
+									json_data = json.loads(text)
+								except Exception as parse_err:
+									print(
+										f"⚠️ {self.account_name}: Failed to parse Linux.do callback JSON: {parse_err}"
+									)
+								else:
+									if json_data and json_data.get("success"):
+										user_data = json_data.get("data", {})
+										api_user_from_cb = user_data.get("id")
+
+										if api_user_from_cb:
+											print(
+												f"✅ {self.account_name}: Got api_user from Linux.do callback: "
+												f"{api_user_from_cb}"
+											)
+
+											# 提取 session cookie，只保留与 provider domain 匹配的
+											restore_cookies = await page.context.cookies()
+											user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+
+											# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+											if getattr(self.provider_config, "turnstile_check", False):
+												await self._browser_check_in_with_turnstile(page)
+
+											return True, {
+												"cookies": user_cookies,
+												"api_user": api_user_from_cb,
+											}
+
+							print(
+								f"⚠️ {self.account_name}: Linux.do callback via browser failed or not JSON success "
+								f"(HTTP {status}), body: {text[:200]}"
+							)
+						except Exception as cb_err:
+							print(
+								f"⚠️ {self.account_name}: Error during Linux.do callback via browser: {cb_err}"
+							)
+
+						# 浏览器回调失败，回退到返回 code/state，由上层用 httpx 调用
 						return True, query_params
 
 					print(f"❌ {self.account_name}: OAuth failed, no code in callback")
