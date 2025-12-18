@@ -1257,8 +1257,7 @@ class CheckIn:
                 api_user = result_data["api_user"]
 
                 merged_cookies = {**waf_cookies, **user_cookies}
-                # Linux.do 认证后，RunAnytime 等站点的实际签到已在浏览器中完成
-                return await self.check_in_with_cookies(merged_cookies, api_user, needs_check_in=False)
+                return await self.check_in_with_cookies(merged_cookies, api_user)
             elif success and "code" in result_data and "state" in result_data:
                 # 收到 OAuth code，通过 HTTP 调用回调接口获取 api_user
                 print(f"ℹ️ {self.account_name}: Received OAuth code, calling callback API")
@@ -1292,9 +1291,7 @@ class CheckIn:
                                     f"{list(user_cookies.keys())}"
                                 )
                                 merged_cookies = {**waf_cookies, **user_cookies}
-                                return await self.check_in_with_cookies(
-                                    merged_cookies, api_user, needs_check_in=False
-                                )
+                                return await self.check_in_with_cookies(merged_cookies, api_user)
                             else:
                                 print(f"❌ {self.account_name}: No user ID in callback response")
                                 return False, {"error": "No user ID in OAuth callback response"}
