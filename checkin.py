@@ -479,9 +479,13 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
+                # 与 camoufox-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
                 locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
+                disable_coop=True,
+                config={"forceScopeAccess": True},
+                i_know_what_im_doing=True,
             ) as browser:
                 page = await browser.new_page()
 
@@ -648,10 +652,11 @@ class CheckIn:
                                 f"ℹ️ {self.account_name}: Solving Cloudflare challenge for auth state via "
                                 "camoufox-captcha"
                             )
+                            # 对于 /api/oauth/state 返回的整页 Cloudflare 验证，属于 interstitial 类型
                             solved = await linuxdo_solve_captcha(
                                 page,
                                 captcha_type="cloudflare",
-                                challenge_type="turnstile",
+                                challenge_type="interstitial",
                             )
                             print(
                                 f"ℹ️ {self.account_name}: camoufox-captcha solve result for auth state: {solved}"
