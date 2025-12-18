@@ -616,11 +616,10 @@ class CheckIn:
                 page = await browser.new_page()
 
                 try:
-                    # 1. Open the login page first
+                    # 1. 先打开登录页，触发基础的 Cloudflare / WAF 校验
                     print(f"ℹ️ {self.account_name}: Opening login page")
                     await page.goto(self.provider_config.get_login_url(), wait_until="networkidle")
 
-                    # Wait for page to be fully loaded
                     try:
                         await page.wait_for_function('document.readyState === "complete"', timeout=5000)
                     except Exception:
@@ -631,30 +630,40 @@ class CheckIn:
                         if captcha_check:
                             await page.wait_for_timeout(3000)
 
-                    response = await page.evaluate(
-                        f"""async () => {{
-                            try{{
-                                const response = await fetch('{self.provider_config.get_auth_state_url()}');
-                                const data = await response.json();
-                                return data;
-                            }}catch(e){{
-                                return {{
-                                    success: false,
-                                    message: e.message
-                                }};
-                            }}
-                        }}"""
+                    # 2. 通过顶层导航访问 auth_state 接口，让 Cloudflare 的 JS 挑战自动运行
+                    auth_state_url = self.provider_config.get_auth_state_url()
+                    print(f"ℹ️ {self.account_name}: Opening auth state url in browser: {auth_state_url}")
+                    await page.goto(auth_state_url, wait_until="networkidle")
+
+                    # 尝试从页面正文中解析 JSON
+                    json_text = await page.evaluate(
+                        "() => document.body && (document.body.innerText || document.body.textContent || '')"
                     )
 
-                    if response and "data" in response:
+                    try:
+                        data = json.loads(json_text)
+                    except Exception as parse_err:
+                        # 页面内容不是 JSON，多半仍然是 Cloudflare challenge 或错误页
+                        print(
+                            f"⚠️ {self.account_name}: Failed to parse auth state JSON in browser: {parse_err}"
+                        )
+                        return {
+                            "success": False,
+                            "error": f"Failed to get state, invalid JSON body: {json_text[:200]}",
+                        }
+
+                    if data and "data" in data:
                         cookies = await browser.cookies()
                         return {
                             "success": True,
-                            "state": response.get("data"),
+                            "state": data.get("data"),
                             "cookies": cookies,
                         }
 
-                    return {"success": False, "error": f"Failed to get state, \n{json.dumps(response, indent=2)}"}
+                    return {
+                        "success": False,
+                        "error": f"Failed to get state, \n{json.dumps(data, indent=2)}",
+                    }
 
                 except Exception as e:
                     print(f"❌ {self.account_name}: Failed to get state, {e}")
