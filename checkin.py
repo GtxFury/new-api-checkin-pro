@@ -89,6 +89,97 @@ class CheckIn:
         # 转换为 httpx.URL 对象
         return httpx.URL(proxy_url)
 
+    # Cloudflare 相关 cookie 名称（包含站点 session，便于一起复用）
+    CF_COOKIE_NAMES: set[str] = {"cf_clearance", "_cfuvid", "__cf_bm", "session"}
+
+    def _get_cf_cookie_cache_path(self) -> str:
+        """生成当前账号 + provider 对应的 Cloudflare cookie 缓存文件路径"""
+        provider_name = getattr(self.provider_config, "name", "provider")
+        filename = f"cf_{provider_name}_{self.safe_account_name}_cookies.json"
+        return os.path.join(self.storage_state_dir, filename)
+
+    def _filter_cf_cookies_for_cache(self, cookies: list[dict]) -> list[dict]:
+        """从浏览器/httpx cookies 中筛选出需要缓存的 Cloudflare 相关 cookie"""
+        filtered: list[dict] = []
+        for cookie in cookies:
+            name = cookie.get("name")
+            if not name or name not in self.CF_COOKIE_NAMES:
+                continue
+            filtered.append(
+                {
+                    "name": name,
+                    "value": cookie.get("value", ""),
+                    "domain": cookie.get("domain"),
+                    "path": cookie.get("path", "/"),
+                    "expires": cookie.get("expires"),
+                    "secure": cookie.get("secure", False),
+                    "httpOnly": cookie.get("httpOnly", False),
+                    "sameSite": cookie.get("sameSite", "Lax"),
+                }
+            )
+        return filtered
+
+    def _save_cf_cookies_to_cache(self, cookies: list[dict]) -> None:
+        """将 Cloudflare 相关 cookie 持久化到本地文件，供下次运行复用"""
+        try:
+            cf_cookies = self._filter_cf_cookies_for_cache(cookies)
+            if not cf_cookies:
+                return
+
+            cache_path = self._get_cf_cookie_cache_path()
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cf_cookies, f, ensure_ascii=False)
+
+            print(
+                f"ℹ️ {self.account_name}: Saved {len(cf_cookies)} Cloudflare cookies to cache: {cache_path}"
+            )
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to save Cloudflare cookies cache: {e}")
+
+    def _load_cf_cookies_from_cache(self) -> list[dict] | None:
+        """从本地文件加载 Cloudflare 相关 cookie，供 httpx 直接复用"""
+        cache_path = self._get_cf_cookie_cache_path()
+        if not os.path.exists(cache_path):
+            return None
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                print(
+                    f"ℹ️ {self.account_name}: Loaded {len(data)} Cloudflare cookies from cache: {cache_path}"
+                )
+                return data
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to load Cloudflare cookies cache: {e}")
+        return None
+
+    def _apply_cf_cookies_to_client(self, client: httpx.Client, cookies: list[dict]) -> None:
+        """将缓存的 Cloudflare 相关 cookie 注入到 httpx Client 中"""
+        if not cookies:
+            return
+
+        parsed_domain = urlparse(self.provider_config.origin).netloc
+        applied = 0
+        for cookie in cookies:
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not name or value is None:
+                continue
+
+            domain = cookie.get("domain") or parsed_domain
+            path = cookie.get("path") or "/"
+            try:
+                client.cookies.set(name, value, domain=domain, path=path)
+                applied += 1
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed to apply cached cookie {name}: {e}")
+
+        if applied:
+            print(
+                f"ℹ️ {self.account_name}: Applied {applied} cached Cloudflare cookies to httpx client"
+            )
+
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
         """检查响应类型，如果是 HTML 则保存为文件，否则返回 JSON 数据
 
@@ -535,6 +626,14 @@ class CheckIn:
             包含 success 和 client_id 或 error 的字典
         """
         try:
+            # 在请求状态接口之前尝试复用已缓存的 Cloudflare 相关 cookies
+            try:
+                cached_cf_cookies = self._load_cf_cookies_from_cache()
+                if cached_cf_cookies:
+                    self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
             response = client.get(self.provider_config.get_status_url(), headers=headers, timeout=30)
 
             if response.status_code == 200:
@@ -712,6 +811,16 @@ class CheckIn:
 
                     if data and "data" in data:
                         cookies = await browser.cookies()
+
+                        # 将浏览器中成功通过 Cloudflare 后的 cookie 缓存下来，供后续 httpx 直接复用
+                        try:
+                            self._save_cf_cookies_to_cache(cookies)
+                        except Exception as cache_err:
+                            print(
+                                f"⚠️ {self.account_name}: Failed to cache Cloudflare cookies from browser: "
+                                f"{cache_err}"
+                            )
+
                         return {
                             "success": True,
                             "state": data.get("data"),
@@ -742,6 +851,14 @@ class CheckIn:
         Cloudflare / WAF / 额外校验等情况。
         """
         auth_state_url = self.provider_config.get_auth_state_url()
+
+        # 0) 尝试从本地缓存中加载 Cloudflare 相关 cookie，直接注入到 httpx Client
+        try:
+            cached_cf_cookies = self._load_cf_cookies_from_cache()
+            if cached_cf_cookies:
+                self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
 
         # 1) 尝试通过 httpx 直接获取
         try:
@@ -788,6 +905,16 @@ class CheckIn:
                                         "sameSite": same_site,
                                     }
                                 )
+
+                        # 将当前成功路径中的 Cloudflare 相关 cookie 写入缓存，供下次运行复用
+                        try:
+                            # 这里 cookies 已经是 Camoufox 格式，直接用于缓存
+                            self._save_cf_cookies_to_cache(cookies)
+                        except Exception as cache_err:
+                            print(
+                                f"⚠️ {self.account_name}: Failed to cache Cloudflare cookies from auth state: "
+                                f"{cache_err}"
+                            )
 
                         return {
                             "success": True,
@@ -970,6 +1097,14 @@ class CheckIn:
     async def get_user_info(self, client: httpx.Client, headers: dict) -> dict:
         """获取用户信息"""
         try:
+            # 在请求用户信息之前尝试复用已缓存的 Cloudflare 相关 cookies
+            try:
+                cached_cf_cookies = self._load_cf_cookies_from_cache()
+                if cached_cf_cookies:
+                    self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
             response = client.get(self.provider_config.get_user_info_url(), headers=headers, timeout=30)
 
             if response.status_code == 200:
@@ -1028,6 +1163,14 @@ class CheckIn:
         checkin_headers = headers.copy()
         checkin_headers.update({"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"})
 
+        # 在发起签到请求之前尝试复用已缓存的 Cloudflare 相关 cookies
+        try:
+            cached_cf_cookies = self._load_cf_cookies_from_cache()
+            if cached_cf_cookies:
+                self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
         response = client.post(self.provider_config.get_sign_in_url(), headers=checkin_headers, timeout=30)
 
         print(f"📨 {self.account_name}: Response status code {response.status_code}")
@@ -1068,6 +1211,15 @@ class CheckIn:
 
         try:
             print(f"ℹ️ {self.account_name}: Fetching check-in status from {status_url}")
+
+            # 在查询签到状态之前尝试复用已缓存的 Cloudflare 相关 cookies
+            try:
+                cached_cf_cookies = self._load_cf_cookies_from_cache()
+                if cached_cf_cookies:
+                    self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
             resp = client.get(status_url, headers=headers, timeout=30)
             if resp.status_code != 200:
                 print(
@@ -1332,6 +1484,14 @@ class CheckIn:
                     for cookie_dict in auth_cookies_list:
                         client.cookies.set(cookie_dict["name"], cookie_dict["value"])
 
+                    # 在调用 GitHub OAuth 回调前尝试复用已缓存的 Cloudflare 相关 cookies
+                    try:
+                        cached_cf_cookies = self._load_cf_cookies_from_cache()
+                        if cached_cf_cookies:
+                            self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
                     response = client.get(callback_url, headers=headers, timeout=30)
 
                     if response.status_code == 200:
@@ -1490,6 +1650,14 @@ class CheckIn:
                     auth_cookies_list = auth_state_result.get("cookies", [])
                     for cookie_dict in auth_cookies_list:
                         client.cookies.set(cookie_dict["name"], cookie_dict["value"])
+
+                    # 在调用 Linux.do OAuth 回调前尝试复用已缓存的 Cloudflare 相关 cookies
+                    try:
+                        cached_cf_cookies = self._load_cf_cookies_from_cache()
+                        if cached_cf_cookies:
+                            self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
 
                     response = client.get(callback_url, headers=headers, timeout=30)
 
