@@ -17,41 +17,40 @@ from camoufox.async_api import AsyncCamoufox
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
 
-# 可选依赖：camoufox-captcha，用于更智能地处理 Cloudflare Turnstile
-solve_captcha = None
-try:  # 优先尝试作为已安装包导入
-	from camoufox_captcha import solve_captcha  # type: ignore[assignment]
-	print("ℹ️ LinuxDoSignIn: camoufox_captcha imported as installed package")
-except Exception as e1:
-	print(f"⚠️ LinuxDoSignIn: import camoufox_captcha failed (installed): {e1!r}")
+# 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
+try:
+	from playwright_captcha import ClickSolver, FrameworkType  # type: ignore[assignment]
+	PLAYWRIGHT_CAPTCHA_AVAILABLE = True
+	print("ℹ️ LinuxDoSignIn: playwright-captcha imported successfully")
+except Exception as e1:  # pragma: no cover - 可选依赖
+	ClickSolver = None  # type: ignore[assignment]
+	FrameworkType = None  # type: ignore[assignment]
+	PLAYWRIGHT_CAPTCHA_AVAILABLE = False
+	print(f"⚠️ LinuxDoSignIn: playwright-captcha not available: {e1!r}")
 
-	# 在 CI / GitHub Actions 中，camoufox-captcha 通常作为当前仓库的“兄弟目录”存在
-	candidates: list[Path] = []
+
+async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
+	"""统一的验证码解决入口，优先使用 playwright-captcha。
+
+	为了兼容现有调用方，保留 captcha_type / challenge_type 参数，但目前主要依赖
+	playwright-captcha 的自动检测能力。
+	"""
+	if not PLAYWRIGHT_CAPTCHA_AVAILABLE or ClickSolver is None or FrameworkType is None:
+		print(
+			f"⚠️ LinuxDoSignIn: playwright-captcha is not available, "
+			f"solve_captcha fallback will always return False"
+		)
+		return False
+
 	try:
-		current = Path(__file__).resolve()
-		parents = [current.parent, current.parent.parent, current.parent.parent.parent]
-		for base in parents:
-			if base:
-				candidates.append(base / "camoufox-captcha")
-	except Exception:
-		pass
-
-	for extra_path in candidates:
-		try:
-			print(f"ℹ️ LinuxDoSignIn: trying to import camoufox_captcha from {extra_path}")
-			if extra_path and extra_path.exists():
-				sys.path.insert(0, str(extra_path))
-				from camoufox_captcha import solve_captcha  # type: ignore[assignment]
-				print(
-					"ℹ️ LinuxDoSignIn: camoufox_captcha imported from local directory "
-					f"{extra_path}"
-				)
-				break
-		except Exception as e2:  # pragma: no cover - 仅用于调试 CI 环境
-			print(f"⚠️ LinuxDoSignIn: import camoufox_captcha failed from {extra_path}: {e2!r}")
-	else:
-		print("⚠️ LinuxDoSignIn: camoufox_captcha not available, Turnstile will be solved manually")
-		solve_captcha = None
+		framework = FrameworkType.CAMOUFOX  # 当前项目在 Camoufox 上运行
+		async with ClickSolver(framework=framework, page=page) as solver:
+			# 目前依赖自动识别 Cloudflare Turnstile / Interstitial
+			await solver.solve_captcha()
+			return True
+	except Exception as e:
+		print(f"⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}")
+		return False
 
 
 class LinuxDoSignIn:
@@ -108,23 +107,23 @@ class LinuxDoSignIn:
 	async def _solve_turnstile(self, page) -> bool:
 		"""尝试解决 Cloudflare Turnstile 验证
 
-		优先使用 camoufox-captcha，如果不可用则回退到简单的坐标点击方案。
+		优先使用 playwright-captcha，如果不可用则回退到简单的坐标点击方案。
 		"""
 
-		# 1. 如果 camoufox-captcha 可用，优先使用
+		# 1. 如果 playwright-captcha 可用，优先使用
 		if solve_captcha is not None:
 			try:
-				print(f"ℹ️ {self.account_name}: Solving Cloudflare Turnstile via camoufox-captcha")
+				print(f"ℹ️ {self.account_name}: Solving Cloudflare Turnstile via playwright-captcha ClickSolver")
 				solved = await solve_captcha(
 					page,
 					captcha_type="cloudflare",
 					challenge_type="turnstile",
 				)
-				print(f"ℹ️ {self.account_name}: Turnstile solve result from camoufox-captcha: {solved}")
+				print(f"ℹ️ {self.account_name}: Turnstile solve result from playwright-captcha: {solved}")
 				if solved:
 					return True
 			except Exception as sc_err:
-				print(f"⚠️ {self.account_name}: camoufox-captcha solve_captcha error: {sc_err}")
+				print(f"⚠️ {self.account_name}: playwright-captcha solve_captcha error: {sc_err}")
 
 		# 2. 手动回退方案：查找 Turnstile iframe，然后点击其中心区域
 		try:
@@ -313,7 +312,7 @@ class LinuxDoSignIn:
 			locale="zh-CN",
 			# 为了可以点击 cross-origin 的 Turnstile iframe
 			disable_coop=True,
-			# 允许访问 scope / shadow-root，用于 camoufox-captcha 检测 iframe
+			# 允许访问 scope / shadow-root，用于 playwright-captcha 检测 iframe
 			config={"forceScopeAccess": True},
 			i_know_what_im_doing=True,
 			# 固定一个常见桌面分辨率，方便我们基于坐标点击

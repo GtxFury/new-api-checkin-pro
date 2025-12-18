@@ -15,8 +15,8 @@ from camoufox.async_api import AsyncCamoufox
 from utils.config import AccountConfig, ProviderConfig
 from utils.browser_utils import parse_cookies, get_random_user_agent
 
-# 复用 LinuxDoSignIn 中的 camoufox-captcha 解决方案（如果可用）
-try:  # pragma: no cover - 仅在存在 camoufox-captcha 时生效
+# 复用 LinuxDoSignIn 中的 playwright-captcha 解决方案（如果可用）
+try:  # pragma: no cover - 仅在存在 playwright-captcha 时生效
     from sign_in_with_linuxdo import solve_captcha as linuxdo_solve_captcha  # type: ignore
 except Exception:  # pragma: no cover - 可选依赖缺失时静默跳过
     linuxdo_solve_captcha = None
@@ -479,7 +479,7 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
-                # 与 camoufox-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
+                # 与 playwright-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
                 locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
@@ -619,7 +619,7 @@ class CheckIn:
                 persistent_context=True,
                 headless=False,
                 humanize=True,
-                # 与 camoufox-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
+                # 与 playwright-captcha 推荐配置保持一致，方便处理 Cloudflare Shadow DOM
                 locale="zh-CN",
                 geoip=True if self.camoufox_proxy_config else False,
                 proxy=self.camoufox_proxy_config,
@@ -645,12 +645,12 @@ class CheckIn:
                         if captcha_check:
                             await page.wait_for_timeout(3000)
 
-                    # 2. 在登录页上优先尝试解决 Cloudflare 整页拦截（interstitial）
+                    # 2. 在登录页上优先尝试解决 Cloudflare 整页拦截（interstitial），使用 playwright-captcha
                     if linuxdo_solve_captcha is not None:
                         try:
                             print(
                                 f"ℹ️ {self.account_name}: Solving Cloudflare challenge on login page via "
-                                "camoufox-captcha"
+                                "playwright-captcha ClickSolver"
                             )
                             solved_login = await linuxdo_solve_captcha(
                                 page,
@@ -658,12 +658,12 @@ class CheckIn:
                                 challenge_type="interstitial",
                             )
                             print(
-                                f"ℹ️ {self.account_name}: camoufox-captcha solve result on login page: {solved_login}"
+                                f"ℹ️ {self.account_name}: playwright-captcha solve result on login page: {solved_login}"
                             )
                             await page.wait_for_timeout(5000)
                         except Exception as sc_err:
                             print(
-                                f"⚠️ {self.account_name}: camoufox-captcha error on login page: {sc_err}"
+                                f"⚠️ {self.account_name}: playwright-captcha error on login page: {sc_err}"
                             )
 
                     # 3. 使用浏览器内的 fetch 调用 auth_state 接口，复用已通过的 Cloudflare 状态
