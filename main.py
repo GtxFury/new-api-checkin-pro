@@ -181,7 +181,8 @@ async def main():
         except json.JSONDecodeError:
             # 如果不是 JSON，则视为字符串
             global_proxy = {"server": proxy_str}
-            print(f"⚙️ Global proxy loaded from PROXY environment variable: {proxy_str}")
+            # 避免在日志中泄露代理账号密码等敏感信息
+            print("⚙️ Global proxy loaded from PROXY environment variable (string format)")
 
     # 加载账号配置
     accounts = load_accounts()

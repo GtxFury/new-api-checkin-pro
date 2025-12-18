@@ -668,86 +668,100 @@ class CheckIn:
         client: httpx.Client,
         headers: dict,
     ) -> dict:
-        """获取认证状态"""
+        """获取认证状态
+
+        优先通过 httpx 直接请求后端接口；如果遇到 4xx/5xx 或响应类型异常，
+        会自动回退到使用 Camoufox 在浏览器环境中调用同一个接口，以兼容
+        Cloudflare / WAF / 额外校验等情况。
+        """
+        auth_state_url = self.provider_config.get_auth_state_url()
+
+        # 1) 尝试通过 httpx 直接获取
         try:
-            response = client.get(self.provider_config.get_auth_state_url(), headers=headers, timeout=30)
+            response = client.get(auth_state_url, headers=headers, timeout=30)
 
             if response.status_code == 200:
                 json_data = self._check_and_handle_response(response, "get_auth_state")
                 if json_data is None:
-                    # 尝试从浏览器 localStorage 获取状态
-                    # print(f"ℹ️ {self.account_name}: Getting auth state from browser")
-                    # try:
-                    #     auth_result = await self.get_auth_state_with_browser()
-
-                    #     if not auth_result.get("success"):
-                    #         error_msg = auth_result.get("error", "Unknown error")
-                    #         print(f"❌ {self.account_name}: {error_msg}")
-                    #         return {
-                    #             "success": False,
-                    #             "error": "Failed to get auth state with browser",
-                    #         }
-
-                    #     return auth_result
-                    # except Exception as browser_err:
-                    #     print(f"⚠️ {self.account_name}: Failed to get auth state from browser: " f"{browser_err}")
-
-                    return {
-                        "success": False,
-                        "error": "Failed to get auth state: Invalid response type (saved to logs)",
-                    }
-
-                # 检查响应是否成功
-                if json_data.get("success"):
-                    auth_data = json_data.get("data")
-
-                    # 将 httpx Cookies 对象转换为 Camoufox 格式
-                    cookies = []
-                    if response.cookies:
-                        parsed_domain = urlparse(self.provider_config.origin).netloc
-
-                        print(f"ℹ️ {self.account_name}: Got {len(response.cookies)} cookies from auth state request")
-                        for cookie in response.cookies.jar:
-                            http_only = cookie.httponly if cookie.has_nonstandard_attr("httponly") else False
-                            same_site = cookie.samesite if cookie.has_nonstandard_attr("samesite") else "Lax"
-                            print(
-                                f"  📚 Cookie: {cookie.name} (Domain: {cookie.domain}, "
-                                f"Path: {cookie.path}, Expires: {cookie.expires}, "
-                                f"HttpOnly: {http_only}, Secure: {cookie.secure}, "
-                                f"SameSite: {same_site})"
-                            )
-                            cookies.append(
-                                {
-                                    "name": cookie.name,
-                                    "domain": cookie.domain if cookie.domain else parsed_domain,
-                                    "value": cookie.value,
-                                    "path": cookie.path,
-                                    "expires": cookie.expires,
-                                    "secure": cookie.secure,
-                                    "httpOnly": http_only,
-                                    "sameSite": same_site,
-                                }
-                            )
-
-                    return {
-                        "success": True,
-                        "state": auth_data,
-                        "cookies": cookies,  # 直接返回 Camoufox 格式的 cookies
-                    }
+                    print(
+                        f"⚠️ {self.account_name}: Auth state HTTP 200 but invalid JSON, "
+                        "will try browser-based auth state"
+                    )
                 else:
+                    # 检查响应是否成功
+                    if json_data.get("success"):
+                        auth_data = json_data.get("data")
+
+                        # 将 httpx Cookies 对象转换为 Camoufox 格式
+                        cookies = []
+                        if response.cookies:
+                            parsed_domain = urlparse(self.provider_config.origin).netloc
+
+                            print(
+                                f"ℹ️ {self.account_name}: Got {len(response.cookies)} cookies from auth state request"
+                            )
+                            for cookie in response.cookies.jar:
+                                http_only = cookie.httponly if cookie.has_nonstandard_attr("httponly") else False
+                                same_site = cookie.samesite if cookie.has_nonstandard_attr("samesite") else "Lax"
+                                print(
+                                    f"  📚 Cookie: {cookie.name} (Domain: {cookie.domain}, "
+                                    f"Path: {cookie.path}, Expires: {cookie.expires}, "
+                                    f"HttpOnly: {http_only}, Secure: {cookie.secure}, "
+                                    f"SameSite: {same_site})"
+                                )
+                                cookies.append(
+                                    {
+                                        "name": cookie.name,
+                                        "domain": cookie.domain if cookie.domain else parsed_domain,
+                                        "value": cookie.value,
+                                        "path": cookie.path,
+                                        "expires": cookie.expires,
+                                        "secure": cookie.secure,
+                                        "httpOnly": http_only,
+                                        "sameSite": same_site,
+                                    }
+                                )
+
+                        return {
+                            "success": True,
+                            "state": auth_data,
+                            "cookies": cookies,  # 直接返回 Camoufox 格式的 cookies
+                        }
+
+                    # JSON 返回 success=false，直接按原语义返回，不做浏览器兜底
                     error_msg = json_data.get("message", "Unknown error")
                     return {
                         "success": False,
                         "error": f"Failed to get auth state: {error_msg}",
                     }
-            return {
-                "success": False,
-                "error": f"Failed to get auth state: HTTP {response.status_code}",
-            }
+
+            # 非 200：可能被 WAF / 403/429 等挡住，尝试浏览器兜底
+            print(
+                f"⚠️ {self.account_name}: Auth state HTTP {response.status_code}, "
+                "will try browser-based auth state"
+            )
         except Exception as e:
+            # 网络层异常，同样尝试浏览器兜底
+            print(
+                f"⚠️ {self.account_name}: Auth state HTTP request failed: {e}, "
+                "will try browser-based auth state"
+            )
+
+        # 2) 兜底：用 Camoufox 在浏览器环境中获取 auth state
+        try:
+            auth_result = await self.get_auth_state_with_browser()
+            if not auth_result.get("success"):
+                error_msg = auth_result.get("error", "Unknown error")
+                return {
+                    "success": False,
+                    "error": f"Failed to get auth state with browser: {error_msg}",
+                }
+
+            return auth_result
+        except Exception as browser_err:
             return {
                 "success": False,
-                "error": f"Failed to get auth state, {e}",
+                "error": f"Failed to get auth state with browser, {browser_err}",
             }
 
     async def get_user_info_with_browser(self, auth_cookies: list[dict]) -> dict:
@@ -1427,8 +1441,17 @@ class CheckIn:
                         print(f"❌ {self.account_name}: Linux.do authentication failed")
                         results.append(("linux.do", False, user_info))
             except Exception as e:
-                print(f"❌ {self.account_name}: Linux.do authentication error: {e}")
-                results.append(("linux.do", False, {"error": str(e)}))
+                # 避免在异常信息中直接打印代理 URL 等敏感数据
+                msg = str(e)
+                if "Unknown scheme for proxy URL" in msg:
+                    safe_msg = (
+                        "Linux.do authentication error: invalid proxy configuration "
+                        "(missing scheme like 'http://' or 'socks5://')"
+                    )
+                else:
+                    safe_msg = f"Linux.do authentication error: {msg}"
+                print(f"❌ {self.account_name}: {safe_msg}")
+                results.append(("linux.do", False, {"error": safe_msg}))
 
         if not results:
             print(f"❌ {self.account_name}: No valid authentication method found in configuration")
