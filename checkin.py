@@ -854,7 +854,10 @@ class CheckIn:
             ) as browser:
                 page = await browser.new_page()
 
-                browser.add_cookies(auth_cookies)
+                try:
+                    await browser.add_cookies(auth_cookies)
+                except Exception as e:
+                    print(f"⚠️ {self.account_name}: Failed to add auth cookies to browser context: {e}")
 
                 try:
                     # 1. 打开登录页面
@@ -1079,7 +1082,56 @@ class CheckIn:
             elif user_info:
                 error_msg = user_info.get("error", "Unknown error")
                 print(f"❌ {self.account_name}: {error_msg}")
-                return False, {"error": "Failed to get user info"}
+
+                # 对于启用了 Turnstile 校验的站点（如 runanytime / elysiver），
+                # 如果直接通过 HTTP 获取用户信息失败，则回退到在浏览器中通过相同 cookies 获取，
+                # 避免前端显示“已签到”但因为 WAF / Cloudflare 导致后端检查失败。
+                if getattr(self.provider_config, "turnstile_check", False):
+                    try:
+                        print(
+                            f"ℹ️ {self.account_name}: Falling back to browser-based user info due to previous error"
+                        )
+                        # 将当前 httpx 客户端的 cookies 转换为 Camoufox add_cookies 所需的列表格式
+                        camoufox_cookies: list[dict] = []
+                        parsed_domain = urlparse(self.provider_config.origin).netloc
+                        for cookie in client.cookies.jar:
+                            camoufox_cookies.append(
+                                {
+                                    "name": cookie.name,
+                                    "value": cookie.value,
+                                    "domain": cookie.domain if cookie.domain else parsed_domain,
+                                    "path": cookie.path,
+                                    "expires": cookie.expires,
+                                    "secure": cookie.secure,
+                                    "httpOnly": cookie.has_nonstandard_attr("httponly"),
+                                    "sameSite": cookie.samesite if cookie.has_nonstandard_attr("samesite") else "Lax",
+                                }
+                            )
+
+                        browser_user_info = await self.get_user_info_with_browser(camoufox_cookies)
+                        if browser_user_info and browser_user_info.get("success"):
+                            print(
+                                f"✅ {self.account_name}: Got user info via browser fallback: "
+                                f"{browser_user_info.get('display', '')}"
+                            )
+                            user_info = browser_user_info
+                        else:
+                            fb_err = (
+                                browser_user_info.get("error", "Unknown error")
+                                if browser_user_info
+                                else "Unknown error"
+                            )
+                            print(
+                                f"❌ {self.account_name}: Browser-based user info fallback failed: {fb_err}"
+                            )
+                            return False, {"error": "Failed to get user info"}
+                    except Exception as fb_ex:
+                        print(
+                            f"❌ {self.account_name}: Exception during browser-based user info fallback: {fb_ex}"
+                        )
+                        return False, {"error": "Failed to get user info"}
+                else:
+                    return False, {"error": "Failed to get user info"}
 
             # 1) 传统站点：通过独立签到接口完成（非 wzw 保持原逻辑：用签到前的余额做展示）
             if needs_check_in is None and self.provider_config.needs_manual_check_in():
