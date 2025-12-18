@@ -10,7 +10,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 from camoufox.async_api import AsyncCamoufox
 
@@ -271,9 +271,12 @@ class LinuxDoSignIn:
 
 			try:
 				is_logged_in = False
+				# 使用与后端回调一致的 redirect_uri，避免默认跳转到 linux.do 论坛等其它站点
+				redirect_uri = self.provider_config.get_linuxdo_auth_url()
 				oauth_url = (
 					"https://connect.linux.do/oauth2/authorize?"
 					f"response_type=code&client_id={client_id}&state={auth_state}"
+					f"&redirect_uri={quote(redirect_uri, safe='')}"
 				)
 
 				# 如果存在缓存，先尝试直接访问授权页面
