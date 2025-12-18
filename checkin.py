@@ -834,6 +834,9 @@ class CheckIn:
     async def get_user_info_with_browser(self, auth_cookies: list[dict]) -> dict:
         """使用 Camoufox 获取用户信息
 
+        对于启用了 Turnstile 的站点（如 runanytime / elysiver），优先从 /app/me 页面
+        的静态表格中解析当前余额和历史消耗，避免再次触发 Cloudflare / WAF 对 API 的拦截。
+
         Returns:
             包含 success、quota、used_quota 或 error 的字典
         """
@@ -860,29 +863,83 @@ class CheckIn:
                     print(f"⚠️ {self.account_name}: Failed to add auth cookies to browser context: {e}")
 
                 try:
-                    # 1. 打开登录页面
-                    print(f"ℹ️ {self.account_name}: Opening main page")
-                    await page.goto(self.provider_config.origin, wait_until="networkidle")
+                    # 对于启用了 Turnstile 的站点（如 runanytime / elysiver），
+                    # 直接从 /app/me 页面上解析“当前余额 / 历史消耗”等静态文本。
+                    if getattr(self.provider_config, "turnstile_check", False):
+                        target_url = f"{self.provider_config.origin}/app/me"
+                        print(f"ℹ️ {self.account_name}: Opening profile page for browser-based user info: {target_url}")
+                        await page.goto(target_url, wait_until="networkidle")
 
-                    # 等待页面完全加载
-                    try:
-                        await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-                    except Exception:
-                        await page.wait_for_timeout(3000)
-
-                    if self.provider_config.aliyun_captcha:
-                        captcha_check = await self._aliyun_captcha_check(page)
-                        if captcha_check:
+                        try:
+                            await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+                        except Exception:
                             await page.wait_for_timeout(3000)
 
-                    # 获取用户信息
+                        # 从页面表格中提取“当前余额”和“历史消耗”两行
+                        summary = await page.evaluate(
+                            """() => {
+                                try {
+                                    const rows = Array.from(document.querySelectorAll('table tr'));
+                                    const result = {};
+                                    for (const row of rows) {
+                                        const header = row.querySelector('th, [role="rowheader"]');
+                                        const cell = row.querySelector('td, [role="cell"]');
+                                        if (!header || !cell) continue;
+                                        const label = header.innerText.trim();
+                                        const value = cell.innerText.trim();
+                                        result[label] = value;
+                                    }
+                                    return result;
+                                } catch (e) {
+                                    return null;
+                                }
+                            }"""
+                        )
+
+                        if summary:
+                            balance_str = summary.get("当前余额")
+                            used_str = summary.get("历史消耗")
+
+                            if balance_str is not None and used_str is not None:
+                                def _parse_amount(s: str) -> float:
+                                    s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
+                                    try:
+                                        return float(s)
+                                    except Exception:
+                                        return 0.0
+
+                                quota = _parse_amount(balance_str)
+                                used_quota = _parse_amount(used_str)
+
+                                print(
+                                    f"✅ {self.account_name}: Parsed balance from /app/me - "
+                                    f"Current balance: ${quota}, Used: ${used_quota}"
+                                )
+                                return {
+                                    "success": True,
+                                    "quota": quota,
+                                    "used_quota": used_quota,
+                                    "display": f"Current balance: ${quota}, Used: ${used_quota}",
+                                }
+                        # 如果未能成功解析，则继续尝试通过 API 获取
+                        print(
+                            f"⚠️ {self.account_name}: Failed to parse balance from /app/me, "
+                            "will try API-based user info in browser"
+                        )
+
+                    # 默认分支：在浏览器中直接调用用户信息 API
+                    print(f"ℹ️ {self.account_name}: Fetching user info via browser fetch API")
                     response = await page.evaluate(
                         f"""async () => {{
-                           const response = await fetch(
-                               '{self.provider_config.get_user_info_url()}'
-                           );
-                           const data = await response.json();
-                           return data;
+                           try {{
+                               const response = await fetch('{self.provider_config.get_user_info_url()}', {{
+                                   credentials: 'include',
+                               }});
+                               const data = await response.json();
+                               return data;
+                           }} catch (e) {{
+                               return {{ error: String(e) }};
+                           }}
                         }}"""
                     )
 
@@ -1095,18 +1152,20 @@ class CheckIn:
                         camoufox_cookies: list[dict] = []
                         parsed_domain = urlparse(self.provider_config.origin).netloc
                         for cookie in client.cookies.jar:
-                            camoufox_cookies.append(
-                                {
-                                    "name": cookie.name,
-                                    "value": cookie.value,
-                                    "domain": cookie.domain if cookie.domain else parsed_domain,
-                                    "path": cookie.path,
-                                    "expires": cookie.expires,
-                                    "secure": cookie.secure,
-                                    "httpOnly": cookie.has_nonstandard_attr("httponly"),
-                                    "sameSite": cookie.samesite if cookie.has_nonstandard_attr("samesite") else "Lax",
-                                }
-                            )
+                            cookie_dict: dict = {
+                                "name": cookie.name,
+                                "value": cookie.value,
+                                "domain": cookie.domain if cookie.domain else parsed_domain,
+                                "path": cookie.path or "/",
+                                "secure": cookie.secure,
+                                "httpOnly": cookie.has_nonstandard_attr("httponly"),
+                                "sameSite": cookie.samesite if cookie.has_nonstandard_attr("samesite") else "Lax",
+                            }
+                            # 只有在 expires 为数字类型时才设置，避免 Camoufox 类型错误
+                            if isinstance(cookie.expires, (int, float)):
+                                cookie_dict["expires"] = float(cookie.expires)
+
+                            camoufox_cookies.append(cookie_dict)
 
                         browser_user_info = await self.get_user_info_with_browser(camoufox_cookies)
                         if browser_user_info and browser_user_info.get("success"):
