@@ -15,6 +15,12 @@ from camoufox.async_api import AsyncCamoufox
 from utils.config import AccountConfig, ProviderConfig
 from utils.browser_utils import parse_cookies, get_random_user_agent
 
+# 复用 LinuxDoSignIn 中的 camoufox-captcha 解决方案（如果可用）
+try:  # pragma: no cover - 仅在存在 camoufox-captcha 时生效
+    from sign_in_with_linuxdo import solve_captcha as linuxdo_solve_captcha  # type: ignore
+except Exception:  # pragma: no cover - 可选依赖缺失时静默跳过
+    linuxdo_solve_captcha = None
+
 
 class CheckIn:
     """newapi.ai 签到管理类"""
@@ -634,6 +640,28 @@ class CheckIn:
                     auth_state_url = self.provider_config.get_auth_state_url()
                     print(f"ℹ️ {self.account_name}: Opening auth state url in browser: {auth_state_url}")
                     await page.goto(auth_state_url, wait_until="networkidle")
+
+                    # 如果 camoufox-captcha 可用，优先尝试自动解决 Cloudflare 挑战
+                    if linuxdo_solve_captcha is not None:
+                        try:
+                            print(
+                                f"ℹ️ {self.account_name}: Solving Cloudflare challenge for auth state via "
+                                "camoufox-captcha"
+                            )
+                            solved = await linuxdo_solve_captcha(
+                                page,
+                                captcha_type="cloudflare",
+                                challenge_type="turnstile",
+                            )
+                            print(
+                                f"ℹ️ {self.account_name}: camoufox-captcha solve result for auth state: {solved}"
+                            )
+                            # 无论 solved 结果如何，都等待一小段时间给页面刷新 / 重定向
+                            await page.wait_for_timeout(5000)
+                        except Exception as sc_err:
+                            print(
+                                f"⚠️ {self.account_name}: camoufox-captcha error while solving auth state: {sc_err}"
+                            )
 
                     # 尝试从页面正文中解析 JSON
                     json_text = await page.evaluate(
