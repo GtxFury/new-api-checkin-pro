@@ -438,6 +438,7 @@ class LinuxDoSignIn:
 
 				# 统一处理授权逻辑（无论是否通过缓存登录）
 				try:
+					oauth_redirect_url: str | None = None
 					print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
 					await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
 					allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
@@ -449,13 +450,17 @@ class LinuxDoSignIn:
 
 					print(f"ℹ️ {self.account_name}: Clicking authorization button...")
 					await allow_btn_ele.click()
-					# 等待跳转到 provider 的 OAuth 回调页面
-					# 部分站点使用 /oauth-redirect.html 等路径，这里对 URL 匹配做宽松处理，
-					# 并在超时时不中断流程，而是回退到使用当前 page.url 进行后续解析。
+					# 等待跳转到 provider 的 OAuth 回调页面，并保存第一次匹配到的 OAuth URL，
+					# 便于后续在站点发生二次重定向（例如跳转到 /app 或 /login）后依然能够解析到
+					# 原始的 code/state 参数。
 					try:
 						await page.wait_for_url(
 							f"**{self.provider_config.origin}/oauth**",
 							timeout=30000,
+						)
+						oauth_redirect_url = page.url
+						print(
+							f"ℹ️ {self.account_name}: Captured OAuth redirect URL: {oauth_redirect_url}"
 						)
 					except Exception as nav_err:
 						print(
@@ -513,7 +518,20 @@ class LinuxDoSignIn:
 					# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
 					print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
 					await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
-					parsed_url = urlparse(page.url)
+					# 优先使用首次捕获到的 OAuth 回调 URL（如果存在），避免站点后续重定向到
+					# /app/me 或 /login?expired 等页面导致 code/state 丢失。
+					source_url = oauth_redirect_url or page.url
+					if oauth_redirect_url:
+						print(
+							f"ℹ️ {self.account_name}: Using captured OAuth redirect URL for code parsing: "
+							f"{oauth_redirect_url}"
+						)
+					else:
+						print(
+							f"ℹ️ {self.account_name}: No captured OAuth redirect URL, fallback to current page URL: "
+							f"{page.url}"
+						)
+					parsed_url = urlparse(source_url)
 					query_params = parse_qs(parsed_url.query)
 
 					code_values = query_params.get("code")

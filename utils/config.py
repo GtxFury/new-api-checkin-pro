@@ -144,8 +144,8 @@ class AppConfig:
                 api_user_key="New-Api-User",
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
-                # 从 https://wzw.pp.ua/api/status 中获取
-                linuxdo_client_id="dnJe0SrrGDT8dh4hkbl2bo9R7SQx5If5",
+                # 从 https://wzw.pp.ua/api/status 中动态获取（该值可能会变动）
+                linuxdo_client_id=None,
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 # 与 anyrouter 类似，可能需要 WAF cookies
