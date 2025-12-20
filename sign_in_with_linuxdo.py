@@ -523,16 +523,56 @@ class LinuxDoSignIn:
 								f"{final_callback_url}"
 							)
 
-							response = await page.goto(final_callback_url, wait_until="domcontentloaded")
+							status = 0
+							text = ""
 
-							# 简单检测并处理 Cloudflare interstitial 挑战
-							try:
+							for attempt in range(2):
+								response = await page.goto(final_callback_url, wait_until="domcontentloaded")
+
 								current_url = page.url
 								print(f"ℹ️ {self.account_name}: Callback page current url is {current_url}")
-								if "challenges.cloudflare.com" in current_url or "/challenge" in current_url:
+
+								# 读取本次响应的状态码和正文文本
+								status = 0
+								text = ""
+								if response is not None:
+									try:
+										status = response.status
+										text = await response.text()
+									except Exception as resp_err:
+										print(
+											f"⚠️ {self.account_name}: Failed to read callback response body: {resp_err}"
+										)
+
+								# 判断是否疑似 Cloudflare 挑战页
+								is_cf_challenge = False
+								if (
+									"challenges.cloudflare.com" in current_url
+									or "/challenge" in current_url
+									or "__cf_chl_" in current_url
+								):
+									is_cf_challenge = True
+
+								if not is_cf_challenge and status in (403, 429):
+									try:
+										html_snippet = (await page.content())[:5000]
+										if (
+											"Just a moment" in html_snippet
+											or "cf-browser-verification" in html_snippet
+											or "Cloudflare" in html_snippet
+											or "challenges.cloudflare.com" in html_snippet
+										):
+											is_cf_challenge = True
+									except Exception as cf_html_err:
+										print(
+											f"⚠️ {self.account_name}: Failed to inspect callback page HTML for "
+											f"Cloudflare markers: {cf_html_err}"
+										)
+
+								if is_cf_challenge:
 									print(
 										f"⚠️ {self.account_name}: Cloudflare challenge detected on callback page, "
-										f"attempting to solve or wait for auto-bypass"
+										f"attempting to solve"
 									)
 
 									# 如果 playwright-captcha 可用，尝试解决整页拦截
@@ -551,7 +591,6 @@ class LinuxDoSignIn:
 												f"ℹ️ {self.account_name}: playwright-captcha solve result on callback "
 												f"page: {solved_cb}"
 											)
-											await page.wait_for_timeout(5000)
 										except Exception as sc_err:
 											print(
 												f"⚠️ {self.account_name}: playwright-captcha error on callback page: "
@@ -560,61 +599,57 @@ class LinuxDoSignIn:
 									else:
 										# 没有自动解法时，至少等待一段时间让 Cloudflare JS 检查自动完成
 										await page.wait_for_timeout(15000)
-							except Exception as cf_err:
-								print(
-									f"⚠️ {self.account_name}: Possible Cloudflare challenge on callback page: {cf_err}"
-								)
 
-							# 优先尝试从导航响应中解析 JSON（部分站点会直接返回 JSON）
-							status = 0
-							text = ""
-							if response is not None:
-								try:
-									status = response.status
-									text = await response.text()
-								except Exception as resp_err:
-									print(
-										f"⚠️ {self.account_name}: Failed to read callback response body: {resp_err}"
-									)
+									# 首次尝试遇到 Cloudflare 时，在解决后重试一次回调
+									if attempt == 0:
+										print(
+											f"ℹ️ {self.account_name}: Retrying Linux.do callback after solving "
+											f"Cloudflare challenge"
+										)
+										continue
 
-							if status == 200 and text:
-								try:
-									json_data = json.loads(text)
-								except Exception as parse_err:
-									print(
-										f"⚠️ {self.account_name}: Failed to parse Linux.do callback JSON: {parse_err}"
-									)
-								else:
-									if json_data and json_data.get("success"):
-										user_data = json_data.get("data", {})
-										api_user_from_cb = user_data.get("id")
+								# 没有检测到 Cloudflare 挑战，或已经重试过，尝试解析 JSON
+								if status == 200 and text:
+									try:
+										json_data = json.loads(text)
+									except Exception as parse_err:
+										print(
+											f"⚠️ {self.account_name}: Failed to parse Linux.do callback JSON: {parse_err}"
+										)
+									else:
+										if json_data and json_data.get("success"):
+											user_data = json_data.get("data", {})
+											api_user_from_cb = user_data.get("id")
 
-										if api_user_from_cb:
-											print(
-												f"✅ {self.account_name}: Got api_user from Linux.do callback JSON: "
-												f"{api_user_from_cb}"
-											)
+											if api_user_from_cb:
+												print(
+													f"✅ {self.account_name}: Got api_user from Linux.do callback JSON: "
+													f"{api_user_from_cb}"
+												)
 
-											# 提取 session cookie，只保留与 provider domain 匹配的
-											restore_cookies = await page.context.cookies()
-											user_cookies = filter_cookies(
-												restore_cookies, self.provider_config.origin
-											)
+												# 提取 session cookie，只保留与 provider domain 匹配的
+												restore_cookies = await page.context.cookies()
+												user_cookies = filter_cookies(
+													restore_cookies, self.provider_config.origin
+												)
 
-											# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
-											user_info_cb = None
-											if getattr(self.provider_config, "turnstile_check", False):
-												await self._browser_check_in_with_turnstile(page)
-												user_info_cb = await self._extract_balance_from_profile(page)
+												# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
+												user_info_cb = None
+												if getattr(self.provider_config, "turnstile_check", False):
+													await self._browser_check_in_with_turnstile(page)
+													user_info_cb = await self._extract_balance_from_profile(page)
 
-											result_cb: dict = {
-												"cookies": user_cookies,
-												"api_user": api_user_from_cb,
-											}
-											if user_info_cb:
-												result_cb["user_info"] = user_info_cb
+												result_cb: dict = {
+													"cookies": user_cookies,
+													"api_user": api_user_from_cb,
+												}
+												if user_info_cb:
+													result_cb["user_info"] = user_info_cb
 
-											return True, result_cb
+												return True, result_cb
+
+								# 如果本次尝试没有成功解析 JSON，则不再在循环中处理，统一由下方日志 / 兜底逻辑接管
+								break
 
 							print(
 								f"⚠️ {self.account_name}: Linux.do callback via browser navigation failed or not "
