@@ -133,7 +133,7 @@ class AppConfig:
             ),
             "wzw": ProviderConfig(
                 name="wzw",
-                origin="https://wzw.de5.net",
+                origin="https://wzw.pp.ua",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
@@ -144,7 +144,7 @@ class AppConfig:
                 api_user_key="New-Api-User",
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
-                # 从 https://wzw.de5.net/api/status 中获取
+                # 从 https://wzw.pp.ua/api/status 中获取
                 linuxdo_client_id="dnJe0SrrGDT8dh4hkbl2bo9R7SQx5If5",
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
