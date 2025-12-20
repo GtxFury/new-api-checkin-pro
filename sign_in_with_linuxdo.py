@@ -10,7 +10,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote, urlencode
 
 from camoufox.async_api import AsyncCamoufox
 
@@ -505,36 +505,79 @@ class LinuxDoSignIn:
 						code = code_values[0]
 						print(f"✅ {self.account_name}: OAuth code received: {code}")
 
-						# 优先在浏览器内调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
+						# 优先在浏览器内通过页面导航方式调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
 						try:
-							callback_url = self.provider_config.get_linuxdo_auth_url()
+							base_callback_url = self.provider_config.get_linuxdo_auth_url()
+
+							# 构建带 code/state 参数的完整回调 URL
+							parsed_cb = urlparse(base_callback_url)
+							cb_query = parse_qs(parsed_cb.query)
+							cb_query["code"] = [code]
+							if auth_state:
+								cb_query["state"] = [auth_state]
+							final_query = urlencode(cb_query, doseq=True)
+							final_callback_url = parsed_cb._replace(query=final_query).geturl()
+
 							print(
-								f"ℹ️ {self.account_name}: Calling Linux.do callback via browser fetch: {callback_url}"
+								f"ℹ️ {self.account_name}: Calling Linux.do callback via browser navigation: "
+								f"{final_callback_url}"
 							)
 
-							callback_resp = await page.evaluate(
-								"""async (cbUrl, codeValue, stateValue) => {
-									try {
-										const url = new URL(cbUrl);
-										if (codeValue) url.searchParams.set('code', codeValue);
-										if (stateValue) url.searchParams.set('state', stateValue);
+							response = await page.goto(final_callback_url, wait_until="domcontentloaded")
 
-										const resp = await fetch(url.toString(), { credentials: 'include' });
-										const text = await resp.text();
-										return { ok: resp.ok, status: resp.status, text };
-									} catch (e) {
-										return { ok: false, status: 0, text: String(e) };
-									}
-								}""",
-								callback_url,
-								code,
-								auth_state,
-							)
+							# 简单检测并处理 Cloudflare interstitial 挑战
+							try:
+								current_url = page.url
+								print(f"ℹ️ {self.account_name}: Callback page current url is {current_url}")
+								if "challenges.cloudflare.com" in current_url or "/challenge" in current_url:
+									print(
+										f"⚠️ {self.account_name}: Cloudflare challenge detected on callback page, "
+										f"attempting to solve or wait for auto-bypass"
+									)
 
-							status = callback_resp.get("status", 0) if callback_resp else 0
-							text = callback_resp.get("text", "") if callback_resp else ""
+									# 如果 playwright-captcha 可用，尝试解决整页拦截
+									if solve_captcha is not None:
+										try:
+											print(
+												f"ℹ️ {self.account_name}: Solving Cloudflare interstitial on callback "
+												f"page via playwright-captcha ClickSolver"
+											)
+											solved_cb = await solve_captcha(
+												page,
+												captcha_type="cloudflare",
+												challenge_type="interstitial",
+											)
+											print(
+												f"ℹ️ {self.account_name}: playwright-captcha solve result on callback "
+												f"page: {solved_cb}"
+											)
+											await page.wait_for_timeout(5000)
+										except Exception as sc_err:
+											print(
+												f"⚠️ {self.account_name}: playwright-captcha error on callback page: "
+												f"{sc_err}"
+											)
+									else:
+										# 没有自动解法时，至少等待一段时间让 Cloudflare JS 检查自动完成
+										await page.wait_for_timeout(15000)
+							except Exception as cf_err:
+								print(
+									f"⚠️ {self.account_name}: Possible Cloudflare challenge on callback page: {cf_err}"
+								)
 
-							if callback_resp and callback_resp.get("ok") and status == 200:
+							# 优先尝试从导航响应中解析 JSON（部分站点会直接返回 JSON）
+							status = 0
+							text = ""
+							if response is not None:
+								try:
+									status = response.status
+									text = await response.text()
+								except Exception as resp_err:
+									print(
+										f"⚠️ {self.account_name}: Failed to read callback response body: {resp_err}"
+									)
+
+							if status == 200 and text:
 								try:
 									json_data = json.loads(text)
 								except Exception as parse_err:
@@ -548,13 +591,15 @@ class LinuxDoSignIn:
 
 										if api_user_from_cb:
 											print(
-												f"✅ {self.account_name}: Got api_user from Linux.do callback: "
+												f"✅ {self.account_name}: Got api_user from Linux.do callback JSON: "
 												f"{api_user_from_cb}"
 											)
 
 											# 提取 session cookie，只保留与 provider domain 匹配的
 											restore_cookies = await page.context.cookies()
-											user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+											user_cookies = filter_cookies(
+												restore_cookies, self.provider_config.origin
+											)
 
 											# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 											user_info_cb = None
@@ -572,12 +617,13 @@ class LinuxDoSignIn:
 											return True, result_cb
 
 							print(
-								f"⚠️ {self.account_name}: Linux.do callback via browser failed or not JSON success "
-								f"(HTTP {status}), body: {text[:200]}"
+								f"⚠️ {self.account_name}: Linux.do callback via browser navigation failed or not "
+								f"JSON success (HTTP {status}), body: {text[:200]}"
 							)
 						except Exception as cb_err:
 							print(
-								f"⚠️ {self.account_name}: Error during Linux.do callback via browser: {cb_err}"
+								f"⚠️ {self.account_name}: Error during Linux.do callback via browser navigation: "
+								f"{cb_err}"
 							)
 
 						# 浏览器回调失败，回退到返回 code/state，由上层用 httpx 调用
