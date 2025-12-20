@@ -521,6 +521,75 @@ class LinuxDoSignIn:
 						code = code_values[0]
 						print(f"✅ {self.account_name}: OAuth code received: {code}")
 
+						# 对于启用了 Turnstile 校验的站点（如 runanytime / elysiver），
+						# 不再手动调用 Linux.do 回调接口，而是依赖前端完成 OAuth，
+						# 然后在 /app 页面中解析 user 信息。如果这里依然拿不到 user，
+						# 则直接视为本次认证失败，避免重复使用 code 触发后端错误。
+						if getattr(self.provider_config, "turnstile_check", False):
+							try:
+								target_url = f"{self.provider_config.origin}/app/tokens"
+								print(
+									f"ℹ️ {self.account_name}: Navigating to tokens page for OAuth fallback: "
+									f"{target_url}"
+								)
+								await page.goto(target_url, wait_until="networkidle")
+
+								try:
+									await page.wait_for_function(
+										'localStorage.getItem("user") !== null',
+										timeout=15000,
+									)
+								except Exception:
+									await page.wait_for_timeout(5000)
+
+								user_data_fb = await page.evaluate("() => localStorage.getItem('user')")
+								if user_data_fb:
+									user_obj_fb = json.loads(user_data_fb)
+									api_user_fb = user_obj_fb.get("id")
+									if api_user_fb:
+										print(
+											f"✅ {self.account_name}: Got api user from /app/tokens fallback: "
+											f"{api_user_fb}"
+										)
+
+										user_info_fb = None
+										try:
+											await self._browser_check_in_with_turnstile(page)
+											user_info_fb = await self._extract_balance_from_profile(page)
+										except Exception as fb_chk_err:
+											print(
+												f"⚠️ {self.account_name}: Error during browser check-in fallback: "
+												f"{fb_chk_err}"
+											)
+
+										restore_cookies_fb = await page.context.cookies()
+										user_cookies_fb = filter_cookies(
+											restore_cookies_fb, self.provider_config.origin
+										)
+
+										result_fb: dict = {
+											"cookies": user_cookies_fb,
+											"api_user": api_user_fb,
+										}
+										if user_info_fb:
+											result_fb["user_info"] = user_info_fb
+
+										return True, result_fb
+
+								print(
+									f"⚠️ {self.account_name}: No user found in localStorage after /app fallback "
+									f"for Turnstile provider"
+								)
+							except Exception as fb_err:
+								print(
+									f"⚠️ {self.account_name}: Error during Turnstile provider OAuth fallback: "
+									f"{fb_err}"
+								)
+
+							return False, {
+								"error": "Linux.do OAuth failed for Turnstile provider (no user after /app fallback)",
+							}
+
 						# 优先在浏览器内通过页面导航方式调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
 						try:
 							base_callback_url = self.provider_config.get_linuxdo_auth_url()
