@@ -449,7 +449,23 @@ class LinuxDoSignIn:
 
 					print(f"ℹ️ {self.account_name}: Clicking authorization button...")
 					await allow_btn_ele.click()
-					await page.wait_for_url(f"**{self.provider_config.origin}/oauth/**", timeout=30000)
+					# 等待跳转到 provider 的 OAuth 回调页面
+					# 部分站点使用 /oauth-redirect.html 等路径，这里对 URL 匹配做宽松处理，
+					# 并在超时时不中断流程，而是回退到使用当前 page.url 进行后续解析。
+					try:
+						await page.wait_for_url(
+							f"**{self.provider_config.origin}/oauth**",
+							timeout=30000,
+						)
+					except Exception as nav_err:
+						print(
+							f"⚠️ {self.account_name}: Wait for OAuth redirect URL failed or timed out: {nav_err}"
+						)
+						# 尝试等待页面加载完成，避免直接视为失败
+						try:
+							await page.wait_for_load_state("load", timeout=5000)
+						except Exception:
+							await page.wait_for_timeout(5000)
 
 					# 从 localStorage 获取 user 对象并提取 id
 					api_user = None
