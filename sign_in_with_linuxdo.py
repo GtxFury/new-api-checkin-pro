@@ -104,6 +104,82 @@ class LinuxDoSignIn:
 		self.username = username
 		self.password = password
 
+	async def _call_provider_linuxdo_callback_fast(
+		self,
+		page,
+		code: str,
+		auth_state: str | None,
+	) -> str | None:
+		"""优先用浏览器内 fetch 调用 provider 的 LinuxDO 回调接口，快速拿到 api_user。
+
+		相比等待 SPA 跳转 + 写入 localStorage，这条路径更快且不降低成功率：失败时仍会走旧兜底。
+		"""
+		try:
+			base_callback_url = self.provider_config.get_linuxdo_auth_url()
+			parsed_cb = urlparse(base_callback_url)
+			cb_query = parse_qs(parsed_cb.query)
+			cb_query["code"] = [code]
+			if auth_state:
+				cb_query["state"] = [auth_state]
+			final_query = urlencode(cb_query, doseq=True)
+			final_callback_url = parsed_cb._replace(query=final_query).geturl()
+
+			print(
+				f"ℹ️ {self.account_name}: Fast-calling Linux.do callback via browser fetch: {final_callback_url}"
+			)
+
+			# 某些站点会校验 api_user header，这里统一以 -1 作为“未登录”占位
+			headers = {
+				"Accept": "application/json, text/plain, */*",
+				"new-api-user": "-1",
+				"New-Api-User": "-1",
+				"Veloera-User": "-1",
+			}
+
+			resp = await page.evaluate(
+				"""async ({ url, headers }) => {
+					try {
+						const r = await fetch(url, { credentials: 'include', headers });
+						const t = await r.text();
+						return { ok: r.ok, status: r.status, text: t };
+					} catch (e) {
+						return { ok: false, status: 0, text: String(e) };
+					}
+				}""",
+				{"url": final_callback_url, "headers": headers},
+			)
+
+			status = (resp or {}).get("status", 0)
+			text = (resp or {}).get("text", "") or ""
+			if status != 200 or not text:
+				print(
+					f"⚠️ {self.account_name}: Fast callback fetch failed: HTTP {status}, body: {text[:200]}"
+				)
+				return None
+
+			try:
+				data = json.loads(text)
+			except Exception as parse_err:
+				print(
+					f"⚠️ {self.account_name}: Fast callback JSON parse failed: {parse_err}, body: {text[:200]}"
+				)
+				return None
+
+			if not isinstance(data, dict) or not data.get("success"):
+				msg = data.get("message") if isinstance(data, dict) else "Invalid response"
+				print(f"⚠️ {self.account_name}: Fast callback returned success=false: {msg}")
+				return None
+
+			user_data = data.get("data", {})
+			if isinstance(user_data, dict):
+				api_user = user_data.get("id") or user_data.get("user_id") or user_data.get("userId")
+				if api_user:
+					return str(api_user)
+			return None
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Fast callback fetch error: {e}")
+			return None
+
 	async def _take_screenshot(self, page, reason: str) -> None:
 		"""截取当前页面截图"""
 		try:
@@ -585,6 +661,30 @@ class LinuxDoSignIn:
 					# 从 localStorage 获取 user 对象并提取 id
 					api_user = None
 					try:
+						# 快路径：如果回调 URL 已包含 code/state，优先直接调用后端 /api/oauth/linuxdo 拿 api_user，
+						# 这样可以跳过 SPA 写 localStorage 的慢等待；失败再走原有兜底逻辑。
+						try:
+							source_for_code = oauth_redirect_url or page.url
+							parsed_fast = urlparse(source_for_code)
+							q_fast = parse_qs(parsed_fast.query)
+							code_fast_vals = q_fast.get("code")
+							code_fast = code_fast_vals[0] if code_fast_vals else None
+							if code_fast:
+								api_user_fast = await self._call_provider_linuxdo_callback_fast(
+									page, code_fast, auth_state
+								)
+								if api_user_fast:
+									print(
+										f"✅ {self.account_name}: Got api user from fast callback fetch: {api_user_fast}"
+									)
+									restore_cookies = await page.context.cookies()
+									user_cookies = filter_cookies(
+										restore_cookies, self.provider_config.origin
+									)
+									return True, {"cookies": user_cookies, "api_user": api_user_fast}
+						except Exception:
+							pass
+
 						# OAuth 回调页通常会再跳转到 /console/* 才写入 localStorage，这里做更稳健的等待：
 						# 1) 优先等待 localStorage 出现 user 相关 key
 						try:
@@ -695,6 +795,23 @@ class LinuxDoSignIn:
 					if code_values:
 						code = code_values[0]
 						print(f"✅ {self.account_name}: OAuth code received: {code}")
+
+						# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
+						try:
+							api_user_fast2 = await self._call_provider_linuxdo_callback_fast(
+								page, code, auth_state
+							)
+							if api_user_fast2:
+								print(
+									f"✅ {self.account_name}: Got api_user from fast callback fetch: {api_user_fast2}"
+								)
+								restore_cookies_fast2 = await page.context.cookies()
+								user_cookies_fast2 = filter_cookies(
+									restore_cookies_fast2, self.provider_config.origin
+								)
+								return True, {"cookies": user_cookies_fast2, "api_user": api_user_fast2}
+						except Exception:
+							pass
 
 						# 对于启用了 Turnstile 校验的站点（如 runanytime / elysiver），
 						# 不再手动调用 Linux.do 回调接口，而是依赖前端完成 OAuth，
