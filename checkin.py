@@ -257,6 +257,33 @@ class CheckIn:
 
         return codes
 
+    async def _extract_exchange_codes_from_page(self, page) -> list[str]:
+        """从页面中提取兑换码（兼容兑换码在 input.value 中的情况）。"""
+        try:
+            combined = await page.evaluate(
+                """() => {
+                    const parts = [];
+                    try {
+                        const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                        if (bodyText) parts.push(bodyText);
+                    } catch (e) {}
+
+                    try {
+                        const inputs = Array.from(document.querySelectorAll('input, textarea'));
+                        for (const el of inputs) {
+                            const v = el && typeof el.value === 'string' ? el.value.trim() : '';
+                            if (v) parts.push(v);
+                        }
+                    } catch (e) {}
+
+                    return parts.join('\\n');
+                }"""
+            )
+        except Exception:
+            combined = ""
+
+        return self._extract_exchange_codes(combined or "")
+
     async def _maybe_solve_cloudflare_interstitial(self, page) -> None:
         if linuxdo_solve_captcha is None:
             return
@@ -278,12 +305,14 @@ class CheckIn:
                 }"""
             )
             if has_nav and page.url.startswith(self.FULI_ORIGIN):
+                print(f"ℹ️ {self.account_name}: fuli already logged in (url={page.url})")
                 return
         except Exception:
             pass
 
         await page.goto(self.FULI_LOGIN_URL, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        print(f"ℹ️ {self.account_name}: fuli login page opened (url={page.url})")
 
         # 点击 “使用 Linux Do 登录”
         try:
@@ -295,6 +324,7 @@ class CheckIn:
 
         await page.wait_for_timeout(1200)
         await self._maybe_solve_cloudflare_interstitial(page)
+        print(f"ℹ️ {self.account_name}: fuli after login click (url={page.url})")
 
         # 处理 Linux.do 登录（可能因为缓存已登录而跳过）
         try:
@@ -306,6 +336,7 @@ class CheckIn:
                 await page.wait_for_timeout(500)
                 await page.click("#login-button")
                 await page.wait_for_timeout(5000)
+                print(f"ℹ️ {self.account_name}: fuli linux.do login submitted (url={page.url})")
 
             # 授权页：点击“允许”
             if "connect.linux.do/oauth2/authorize" in page.url:
@@ -316,12 +347,14 @@ class CheckIn:
                         await allow_btn.click()
                 except Exception:
                     pass
+                print(f"ℹ️ {self.account_name}: fuli linux.do approve clicked (url={page.url})")
 
             # 回到 fuli 主站
             try:
                 await page.wait_for_url(f"**{self.FULI_ORIGIN}/**", timeout=30000)
             except Exception:
                 await page.goto(self.FULI_ORIGIN, wait_until="networkidle")
+            print(f"ℹ️ {self.account_name}: fuli login finished (url={page.url})")
         except Exception as e:
             print(f"⚠️ {self.account_name}: fuli 登录流程可能未完全成功: {e}")
 
@@ -329,6 +362,7 @@ class CheckIn:
         """在 fuli 主站执行每日签到，返回 (是否完成, 兑换码, 提示信息)。"""
         await page.goto(self.FULI_ORIGIN, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        print(f"ℹ️ {self.account_name}: fuli check-in page opened (url={page.url})")
 
         # 已签到：按钮禁用
         try:
@@ -344,6 +378,7 @@ class CheckIn:
             'button:has-text("长按")',
             'button:has-text("签到")',
             "main button:not([disabled])",
+            "main [role=\"button\"]:not([aria-disabled=\"true\"])",
         ]:
             try:
                 ele = await page.query_selector(selector)
@@ -368,12 +403,20 @@ class CheckIn:
             await page.mouse.up()
 
             await page.wait_for_timeout(1500)
-            text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
-            codes = self._extract_exchange_codes(text)
+            # 先判断是否已变为“今日已签到”（有些情况下不会弹出/展示兑换码，但签到已生效）
+            try:
+                already_btn_after = await page.query_selector('button:has-text("今日已签到")')
+                if already_btn_after:
+                    return True, None, "今日已签到"
+            except Exception:
+                pass
+
+            codes = await self._extract_exchange_codes_from_page(page)
             if codes:
                 return True, codes[0], "签到成功"
 
-            return False, None, "已执行签到动作，但未识别到兑换码"
+            # 兜底：无法识别兑换码时，也不要直接判失败（站点 UI 可能变化或兑换码不再展示）
+            return True, None, "已执行签到动作（未识别到兑换码）"
         except Exception as e:
             await self._take_screenshot(page, "fuli_checkin_error")
             return False, None, f"签到异常: {e}"
@@ -382,6 +425,13 @@ class CheckIn:
         """在 fuli 转盘抽奖，返回 (兑换码列表, 提示信息)。"""
         await page.goto(self.FULI_WHEEL_URL, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        print(f"ℹ️ {self.account_name}: fuli wheel page opened (url={page.url})")
+
+        body_text = ""
+        try:
+            body_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
+        except Exception:
+            body_text = ""
 
         remaining = None
         try:
@@ -391,7 +441,9 @@ class CheckIn:
                     return el ? (el.innerText || '') : '';
                 }"""
             )
-            m = re.search(r"今日剩余\\s*(\\d+)\\s*/\\s*3\\s*次", info_text or "")
+            info_text = info_text or body_text
+            # 兼容：0/3 次、0 / 3次、今日剩余0/3次 等
+            m = re.search(r"今日剩余\\s*(\\d+)\\s*/\\s*(\\d+)\\s*次", info_text or "")
             if m:
                 remaining = int(m.group(1))
         except Exception:
@@ -400,17 +452,29 @@ class CheckIn:
         spins = remaining if remaining is not None else max_times
         spins = min(max_times, max(0, spins))
         if spins == 0:
-            return [], "转盘次数已用完"
+            return [], "次数已用完"
 
         all_codes: list[str] = []
+        attempted = 0
         for i in range(spins):
             try:
+                # 保险：如果上一次弹窗还没关，先尝试关闭，避免挡住下一次按钮点击
+                try:
+                    close_btn = await page.query_selector('button:has-text("关闭")')
+                    if close_btn:
+                        await close_btn.click()
+                        await page.wait_for_timeout(800)
+                except Exception:
+                    pass
+
                 btn = None
                 for selector in [
+                    'button:has-text("开始抽奖")',
+                    'button:has-text("抽奖")',
                     'button:has-text("开始")',
                     'button:has-text("抽")',
                     'button:has-text("转")',
-                    "main button:not([disabled])",
+                    "main [role=\"button\"]:not([aria-disabled=\"true\"])",
                 ]:
                     try:
                         ele = await page.query_selector(selector)
@@ -421,32 +485,53 @@ class CheckIn:
                         continue
 
                 if not btn:
+                    # 如果页面明确提示次数用完，直接按幂等成功处理
+                    if "次数已用完" in (body_text or "") or "今日剩余 0 / 3 次" in (body_text or ""):
+                        return all_codes, "次数已用完"
+
                     await self._take_screenshot(page, "fuli_wheel_button_not_found")
-                    break
+                    return all_codes, "未找到转盘按钮"
 
-                before_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
+                before_codes = set(await self._extract_exchange_codes_from_page(page))
                 await btn.click()
+                attempted += 1
 
-                await page.wait_for_timeout(3500)
-                after_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
+                # 等待开奖结果弹窗出现（或轮盘动画结束），兑换码可能在 input.value 中
+                try:
+                    await page.wait_for_selector('text=兑换码', timeout=12000)
+                except Exception:
+                    await page.wait_for_timeout(4500)
 
-                before_codes = set(self._extract_exchange_codes(before_text))
-                after_codes = self._extract_exchange_codes(after_text)
+                after_codes = await self._extract_exchange_codes_from_page(page)
                 new_codes = [c for c in after_codes if c not in before_codes and c not in all_codes]
                 all_codes.extend(new_codes)
 
                 # 尝试关闭弹窗
                 try:
-                    close_btn = await page.query_selector('button:has-text("确定")')
-                    if close_btn:
-                        await close_btn.click()
+                    for close_sel in [
+                        'button:has-text("关闭")',
+                        'button:has-text("确定")',
+                        'button:has-text("取消")',
+                    ]:
+                        close_btn = await page.query_selector(close_sel)
+                        if close_btn:
+                            await close_btn.click()
+                            break
                 except Exception:
                     pass
             except Exception:
                 await self._take_screenshot(page, f"fuli_wheel_error_{i+1}")
-                break
+                # 异常时也尝试把弹窗里的兑换码捞出来，避免“抽到了但没记到”
+                try:
+                    fallback_codes = await self._extract_exchange_codes_from_page(page)
+                    for c in fallback_codes:
+                        if c not in all_codes:
+                            all_codes.append(c)
+                except Exception:
+                    pass
+                continue
 
-        return all_codes, f"转盘已尝试 {spins} 次"
+        return all_codes, f"转盘已尝试 {attempted}/{spins} 次"
 
     async def _runanytime_get_balance_from_app_me(self, page) -> dict | None:
         try:
@@ -625,6 +710,11 @@ class CheckIn:
                 checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(page)
                 wheel_codes, wheel_msg = await self._fuli_wheel_get_codes(page, max_times=3)
 
+                print(
+                    f"ℹ️ {self.account_name}: fuli check-in: {checkin_msg}, wheel: {wheel_msg}, "
+                    f"checkin_code={'yes' if bool(checkin_code) else 'no'}, wheel_codes={len(wheel_codes)}"
+                )
+
                 codes: list[str] = []
                 if checkin_code:
                     codes.append(checkin_code)
@@ -659,9 +749,19 @@ class CheckIn:
 
                 user_info = dict(base_info)
 
+                # runanytime：转盘不是硬依赖（经常显示“次数已用完”或 UI 变更），只要每日签到已完成且本次无可兑换码，
+                # 就视为幂等成功；若拿到兑换码则要求全部兑换成功。
                 all_redeemed = len(codes) > 0 and success_redeem == len(codes)
-                nothing_to_redeem = len(codes) == 0 and checkin_msg == "今日已签到" and "次数已用完" in wheel_msg
-                overall_success = all_redeemed or nothing_to_redeem
+                wheel_done = "次数已用完" in (wheel_msg or "")
+                signed_done = bool(checkin_ok) or (checkin_msg in ("今日已签到", "签到成功"))
+                # 已签到（包含“已执行签到动作”这种无法识别兑换码的情况）不应判定为本次执行失败
+                no_codes_but_done = len(codes) == 0 and signed_done
+                quota_increased = (
+                    isinstance(before_quota, (int, float))
+                    and isinstance(after_quota, (int, float))
+                    and after_quota > before_quota
+                )
+                overall_success = all_redeemed or no_codes_but_done or quota_increased or (signed_done and wheel_done)
 
                 user_info.update(
                     {
