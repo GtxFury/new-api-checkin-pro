@@ -178,8 +178,9 @@ class AppConfig:
                 # runanytime 的签到需要在浏览器中完成（Turnstile），HTTP 客户端不直接调用签到接口
                 sign_in_path=None,
                 user_info_path="/api/user/self",
-                # 该站点使用 Veloera-User 作为用户标识头
-                api_user_key="Veloera-User",
+                # 站点实现可能在 Veloera/New-API 间切换，这里默认按 new-api-user 配置，
+                # 实际请求侧会同时兼容注入 Veloera-User 等常见变体。
+                api_user_key="new-api-user",
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 # 从 https://runanytime.hxi.me/api/status 中获取

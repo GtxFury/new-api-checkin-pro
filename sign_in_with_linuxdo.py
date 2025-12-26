@@ -70,6 +70,23 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 class LinuxDoSignIn:
 	"""使用 Linux.do 账号完成 OAuth 授权，并在浏览器中执行签到。"""
 
+	# 站点前端路由可能有差异（Veloera/New-API），这里放一些常见候选路径做兼容
+	PROFILE_PATH_CANDIDATES = (
+		"/app/me",
+		"/app/profile",
+		"/app/user",
+		"/app/account",
+		"/app",
+	)
+
+	APP_FALLBACK_PATH_CANDIDATES = (
+		"/app/tokens",
+		"/app/token",
+		"/app/api-keys",
+		"/app/keys",
+		"/app",
+	)
+
 	def __init__(
 		self,
 		account_name: str,
@@ -182,59 +199,119 @@ class LinuxDoSignIn:
 	async def _browser_check_in_with_turnstile(self, page) -> None:
 		"""在 provider 的页面中执行带 Turnstile 的每日签到"""
 		try:
-			target_url = f"{self.provider_config.origin}/app/me"
-			print(f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}")
-			await page.goto(target_url, wait_until="networkidle")
+			for path in self.PROFILE_PATH_CANDIDATES:
+				target_url = f"{self.provider_config.origin}{path}"
+				print(f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}")
+				await page.goto(target_url, wait_until="networkidle")
 
-			try:
-				await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-			except Exception:
-				await page.wait_for_timeout(3000)
+				try:
+					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+				except Exception:
+					await page.wait_for_timeout(3000)
 
-			# 先尝试解决 Turnstile（如果存在）
-			solved = await self._solve_turnstile(page)
-			if not solved:
-				print(f"⚠️ {self.account_name}: Turnstile solving may have failed, continue to try check-in")
+				# 先尝试解决 Turnstile（如果存在）
+				solved = await self._solve_turnstile(page)
+				if not solved:
+					print(f"⚠️ {self.account_name}: Turnstile solving may have failed, continue to try check-in")
 
-			# 检查是否已经签到
-			try:
-				already_btn = await page.query_selector('button:has-text("今日已签到")')
-			except Exception:
-				already_btn = None
+				# 检查是否已经签到
+				try:
+					already_btn = await page.query_selector('button:has-text("今日已签到")')
+				except Exception:
+					already_btn = None
 
-			if already_btn:
-				print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
-				return
+				if already_btn:
+					print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
+					return
 
-			# 查找“立即签到”按钮并点击
-			checkin_btn = None
-			try:
-				checkin_btn = await page.query_selector('button:has-text("立即签到")')
-			except Exception:
+				# 查找“立即签到”按钮并点击
 				checkin_btn = None
+				try:
+					checkin_btn = await page.query_selector('button:has-text("立即签到")')
+				except Exception:
+					checkin_btn = None
 
-			if not checkin_btn:
-				print(
-					f"⚠️ {self.account_name}: Daily check-in button not found on profile page"
-				)
-				await self._take_screenshot(page, "runanytime_checkin_button_not_found")
+				if not checkin_btn:
+					continue
+
+				print(f"ℹ️ {self.account_name}: Clicking daily check-in button in browser")
+				await checkin_btn.click()
+
+				# 等待状态变为“今日已签到”
+				try:
+					await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
+					print(f"✅ {self.account_name}: Daily check-in completed in browser")
+				except Exception as wait_err:
+					print(
+						f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
+					)
+					await self._take_screenshot(page, "runanytime_checkin_timeout")
 				return
 
-			print(f"ℹ️ {self.account_name}: Clicking daily check-in button in browser")
-			await checkin_btn.click()
-
-			# 等待状态变为“今日已签到”
-			try:
-				await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
-				print(f"✅ {self.account_name}: Daily check-in completed in browser")
-			except Exception as wait_err:
-				print(
-					f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
-				)
-				await self._take_screenshot(page, "runanytime_checkin_timeout")
+			print(f"⚠️ {self.account_name}: Daily check-in button not found on any known profile page")
+			await self._take_screenshot(page, "runanytime_checkin_button_not_found")
 		except Exception as e:
 			print(f"❌ {self.account_name}: Error during browser check-in: {e}")
 			await self._take_screenshot(page, "runanytime_checkin_error")
+
+	async def _extract_api_user_from_localstorage(self, page) -> str | None:
+		"""尽量从 localStorage 中读取 user id（兼容不同前端存储 key/字段）。"""
+		for storage_key in ("user", "user_info", "userInfo"):
+			try:
+				user_data = await page.evaluate(f"() => localStorage.getItem('{storage_key}')")
+			except Exception:
+				user_data = None
+
+			if not user_data:
+				continue
+
+			try:
+				user_obj = json.loads(user_data)
+			except Exception:
+				continue
+
+			if not isinstance(user_obj, dict):
+				continue
+
+			for id_key in ("id", "user_id", "userId"):
+				api_user = user_obj.get(id_key)
+				if api_user:
+					return str(api_user)
+		return None
+
+	async def _extract_api_user_from_body_json(self, page) -> str | None:
+		"""当页面是 /api/oauth/* 这类 JSON 输出时，从 body 里尝试解析 user id。"""
+		try:
+			body_text = await page.evaluate(
+				"() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+			)
+		except Exception:
+			body_text = ""
+
+		body_text = (body_text or "").strip()
+		if not body_text or len(body_text) > 200000:
+			return None
+
+		try:
+			data = json.loads(body_text)
+		except Exception:
+			return None
+
+		if not isinstance(data, dict):
+			return None
+
+		payload = data.get("data")
+		if isinstance(payload, dict):
+			for id_key in ("id", "user_id", "userId"):
+				api_user = payload.get(id_key)
+				if api_user:
+					return str(api_user)
+
+		for id_key in ("id", "user_id", "userId"):
+			api_user = data.get(id_key)
+			if api_user:
+				return str(api_user)
+		return None
 
 	async def _extract_balance_from_profile(self, page) -> dict | None:
 		"""从 provider 的 /app/me 页面中提取当前余额和历史消耗。
@@ -243,40 +320,69 @@ class LinuxDoSignIn:
 		个人中心页面的表格中以「当前余额 / 历史消耗」形式展示美元金额。
 		"""
 		try:
-			summary = await page.evaluate(
-				"""() => {
-					try {
-						const rows = Array.from(document.querySelectorAll('table tr'));
-						const result = {};
-						for (const row of rows) {
-							const header = row.querySelector('th, [role="rowheader"]');
-							const cell = row.querySelector('td, [role="cell"]');
-							if (!header || !cell) continue;
-							const label = header.innerText.trim();
-							const value = cell.innerText.trim();
-							result[label] = value;
+			async def _eval_summary() -> dict | None:
+				return await page.evaluate(
+					"""() => {
+						try {
+							const rows = Array.from(document.querySelectorAll('table tr'));
+							const result = {};
+							for (const row of rows) {
+								const header = row.querySelector('th, [role="rowheader"]');
+								const cell = row.querySelector('td, [role="cell"]');
+								if (!header || !cell) continue;
+								const label = header.innerText.trim();
+								const value = cell.innerText.trim();
+								result[label] = value;
+							}
+							return result;
+						} catch (e) {
+							return null;
 						}
-						return result;
-					} catch (e) {
-						return null;
-					}
-				}"""
-			)
+					}"""
+				)
+
+			summary = await _eval_summary()
+
+			# 若当前页没有表格，尝试跳转到常见个人中心页面再解析
+			if not summary:
+				for path in self.PROFILE_PATH_CANDIDATES:
+					try:
+						await page.goto(f"{self.provider_config.origin}{path}", wait_until="networkidle")
+						try:
+							await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+						except Exception:
+							await page.wait_for_timeout(1500)
+						summary = await _eval_summary()
+						if summary:
+							break
+					except Exception:
+						continue
 
 			if not summary:
-				print(f"⚠️ {self.account_name}: Failed to extract balance table from /app/me")
+				print(f"⚠️ {self.account_name}: Failed to extract balance table from profile pages")
 				return None
 
-			balance_str = summary.get("当前余额")
-			used_str = summary.get("历史消耗")
+			quota_keys = ("当前余额", "当前额度", "剩余额度", "余额", "可用额度")
+			used_keys = ("历史消耗", "历史消费", "已用额度", "消耗")
 
-			if balance_str is None or used_str is None:
+			balance_str = None
+			used_str = None
+			for k in quota_keys:
+				if summary.get(k):
+					balance_str = summary.get(k)
+					break
+			for k in used_keys:
+				if summary.get(k):
+					used_str = summary.get(k)
+					break
+
+			if balance_str is None:
 				try:
 					snippet = json.dumps(summary, ensure_ascii=False)[:200]
 				except Exception:
 					snippet = str(summary)[:200]
 				print(
-					f"⚠️ {self.account_name}: Balance rows not found in profile page summary: {snippet}"
+					f"⚠️ {self.account_name}: Balance row not found in profile page summary: {snippet}"
 				)
 				return None
 
@@ -287,8 +393,8 @@ class LinuxDoSignIn:
 				except Exception:
 					return 0.0
 
-			quota = _parse_amount(balance_str)
-			used_quota = _parse_amount(used_str)
+			quota = _parse_amount(str(balance_str))
+			used_quota = _parse_amount(str(used_str)) if used_str is not None else 0.0
 
 			print(
 				f"✅ {self.account_name}: Parsed balance from /app/me - "
@@ -455,7 +561,7 @@ class LinuxDoSignIn:
 					# 原始的 code/state 参数。
 					try:
 						await page.wait_for_url(
-							f"**{self.provider_config.origin}/oauth**",
+							f"**{self.provider_config.origin}/**",
 							timeout=30000,
 						)
 						oauth_redirect_url = page.url
@@ -475,23 +581,48 @@ class LinuxDoSignIn:
 					# 从 localStorage 获取 user 对象并提取 id
 					api_user = None
 					try:
+						# 先等一小段时间让前端写入 localStorage（如果有二次跳转也能跟上）
 						try:
-							await page.wait_for_function(
-								'localStorage.getItem("user") !== null', timeout=10000
-							)
+							await page.wait_for_timeout(2500)
 						except Exception:
-							await page.wait_for_timeout(5000)
+							pass
 
-						user_data = await page.evaluate("() => localStorage.getItem('user')")
-						if user_data:
-							user_obj = json.loads(user_data)
-							api_user = user_obj.get("id")
-							if api_user:
-								print(f"✅ {self.account_name}: Got api user: {api_user}")
-							else:
-								print(f"⚠️ {self.account_name}: User id not found in localStorage")
+						api_user = await self._extract_api_user_from_localstorage(page)
+						if api_user:
+							print(f"✅ {self.account_name}: Got api user from localStorage: {api_user}")
 						else:
-							print(f"⚠️ {self.account_name}: User data not found in localStorage")
+							# 如果当前落在 /api/oauth/* 这类 JSON 输出页，尝试从 body 解析
+							api_user = await self._extract_api_user_from_body_json(page)
+							if api_user:
+								print(
+									f"✅ {self.account_name}: Got api user from OAuth JSON response: {api_user}"
+								)
+
+						# 某些站点需要进入 /app 才会写入 localStorage，再做一次页面候选跳转
+						if not api_user:
+							for path in self.APP_FALLBACK_PATH_CANDIDATES:
+								try:
+									await page.goto(
+										f"{self.provider_config.origin}{path}",
+										wait_until="networkidle",
+									)
+									try:
+										await page.wait_for_function(
+											'localStorage.length > 0',
+											timeout=8000,
+										)
+									except Exception:
+										await page.wait_for_timeout(2000)
+
+									api_user = await self._extract_api_user_from_localstorage(page)
+									if api_user:
+										print(
+											f"✅ {self.account_name}: Got api user from app fallback ({path}): "
+											f"{api_user}"
+										)
+										break
+								except Exception:
+									continue
 					except Exception as e:
 						print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
 
@@ -545,54 +676,55 @@ class LinuxDoSignIn:
 						# 则直接视为本次认证失败，避免重复使用 code 触发后端错误。
 						if getattr(self.provider_config, "turnstile_check", False):
 							try:
-								target_url = f"{self.provider_config.origin}/app/tokens"
-								print(
-									f"ℹ️ {self.account_name}: Navigating to tokens page for OAuth fallback: "
-									f"{target_url}"
-								)
-								await page.goto(target_url, wait_until="networkidle")
-
-								try:
-									await page.wait_for_function(
-										'localStorage.getItem("user") !== null',
-										timeout=15000,
+								api_user_fb = None
+								for path in self.APP_FALLBACK_PATH_CANDIDATES:
+									target_url = f"{self.provider_config.origin}{path}"
+									print(
+										f"ℹ️ {self.account_name}: Navigating to app page for OAuth fallback: "
+										f"{target_url}"
 									)
-								except Exception:
-									await page.wait_for_timeout(5000)
+									await page.goto(target_url, wait_until="networkidle")
 
-								user_data_fb = await page.evaluate("() => localStorage.getItem('user')")
-								if user_data_fb:
-									user_obj_fb = json.loads(user_data_fb)
-									api_user_fb = user_obj_fb.get("id")
+									try:
+										await page.wait_for_function(
+											'localStorage.length > 0',
+											timeout=15000,
+										)
+									except Exception:
+										await page.wait_for_timeout(3000)
+
+									api_user_fb = await self._extract_api_user_from_localstorage(page)
 									if api_user_fb:
 										print(
-											f"✅ {self.account_name}: Got api user from /app/tokens fallback: "
+											f"✅ {self.account_name}: Got api user from app fallback ({path}): "
 											f"{api_user_fb}"
 										)
+										break
 
-										user_info_fb = None
-										try:
-											await self._browser_check_in_with_turnstile(page)
-											user_info_fb = await self._extract_balance_from_profile(page)
-										except Exception as fb_chk_err:
-											print(
-												f"⚠️ {self.account_name}: Error during browser check-in fallback: "
-												f"{fb_chk_err}"
-											)
-
-										restore_cookies_fb = await page.context.cookies()
-										user_cookies_fb = filter_cookies(
-											restore_cookies_fb, self.provider_config.origin
+								if api_user_fb:
+									user_info_fb = None
+									try:
+										await self._browser_check_in_with_turnstile(page)
+										user_info_fb = await self._extract_balance_from_profile(page)
+									except Exception as fb_chk_err:
+										print(
+											f"⚠️ {self.account_name}: Error during browser check-in fallback: "
+											f"{fb_chk_err}"
 										)
 
-										result_fb: dict = {
-											"cookies": user_cookies_fb,
-											"api_user": api_user_fb,
-										}
-										if user_info_fb:
-											result_fb["user_info"] = user_info_fb
+									restore_cookies_fb = await page.context.cookies()
+									user_cookies_fb = filter_cookies(
+										restore_cookies_fb, self.provider_config.origin
+									)
 
-										return True, result_fb
+									result_fb: dict = {
+										"cookies": user_cookies_fb,
+										"api_user": api_user_fb,
+									}
+									if user_info_fb:
+										result_fb["user_info"] = user_info_fb
+
+									return True, result_fb
 
 								print(
 									f"⚠️ {self.account_name}: No user found in localStorage after /app fallback "

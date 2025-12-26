@@ -97,6 +97,37 @@ class CheckIn:
     # Cloudflare 相关 cookie 名称（包含站点 session，便于一起复用）
     CF_COOKIE_NAMES: set[str] = {"cf_clearance", "_cfuvid", "__cf_bm", "session"}
 
+    def _get_api_user_header_keys(self) -> list[str]:
+        """返回当前 provider 可能使用的 api_user header 名称列表（按优先级去重）。
+
+        说明：
+        - new-api 系站点通常使用 `new-api-user`（或大小写变体）。
+        - 旧的 Veloera 系站点使用 `Veloera-User`。
+        - runanytime/elysiver 近期站点实现可能切换，故做兼容。
+        """
+        keys: list[str] = [self.provider_config.api_user_key]
+
+        # runanytime/elysiver 可能在不同实现间切换，额外注入常见 header 名
+        if self.provider_config.name in {"runanytime", "elysiver"}:
+            keys.extend(["new-api-user", "New-Api-User", "Veloera-User"])
+
+        # 去重（按 header 名大小写不敏感）
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for key in keys:
+            low = key.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            uniq.append(key)
+        return uniq
+
+    def _inject_api_user_headers(self, headers: dict, api_user_value: str | int) -> None:
+        """在 headers 中注入 api_user 标识头（兼容多个实现）。"""
+        value = str(api_user_value)
+        for key in self._get_api_user_header_keys():
+            headers[key] = value
+
     def _get_cf_cookie_cache_path(self) -> str:
         """生成当前账号 + provider 对应的 Cloudflare cookie 缓存文件路径"""
         provider_name = getattr(self.provider_config, "name", "provider")
@@ -1242,10 +1273,17 @@ class CheckIn:
                     print(
                         f"ℹ️ {self.account_name}: Fetching auth state via browser fetch: {auth_state_url}"
                     )
+                    # 某些站点会校验 api_user header（例如要求为 -1 才允许获取 state），这里做兼容注入
+                    api_user_headers = {k: "-1" for k in self._get_api_user_header_keys()}
+                    # 提供基本的 Accept，避免被当成普通页面请求返回 HTML
+                    api_user_headers.setdefault("Accept", "application/json, text/plain, */*")
                     response = await page.evaluate(
                         f"""async () => {{
                             try {{
-                                const resp = await fetch('{auth_state_url}', {{ credentials: 'include' }});
+                                const resp = await fetch('{auth_state_url}', {{
+                                    credentials: 'include',
+                                    headers: {json.dumps(api_user_headers, ensure_ascii=False)},
+                                }});
                                 const text = await resp.text();
                                 return {{ ok: resp.ok, status: resp.status, text }};
                             }} catch (e) {{
@@ -1735,8 +1773,8 @@ class CheckIn:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                self.provider_config.api_user_key: f"{api_user}",
             }
+            self._inject_api_user_headers(headers, api_user)
 
             # wzw 专用逻辑：先签到，再查余额，避免只拿到签到前的额度
             if self.provider_config.name == "wzw":
@@ -1886,8 +1924,8 @@ class CheckIn:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                self.provider_config.api_user_key: "-1",
             }
+            self._inject_api_user_headers(headers, "-1")
 
             # 获取 OAuth 客户端 ID
             # 优先使用 provider_config 中的 client_id
@@ -2046,8 +2084,8 @@ class CheckIn:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                self.provider_config.api_user_key: "-1",
             }
+            self._inject_api_user_headers(headers, "-1")
 
             # 获取 OAuth 客户端 ID
             # 优先使用 provider_config 中的 client_id

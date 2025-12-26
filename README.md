@@ -79,7 +79,7 @@
   - 对于 `runanytime`：已改为通过福利站获取兑换码并自动兑换额度完成签到，需使用 `linux.do` 登录（不再支持仅 cookies）
 - `api_user`(cookies 设置时必需)：
   - `anyrouter` / `agentrouter`：对应请求头 `new-api-user` 的值  
-  - `runanytime`：对应请求头 `Veloera-User` 的值（内部登录流程会自动获取，通常无需手动填写）
+  - `runanytime`：对应请求头 `new-api-user`（或旧实现的 `Veloera-User`）的值（内部登录流程会自动获取，通常无需手动填写）
 - `linux.do`(可选)：用于登录身份验证
   - `username`: 用户名
   - `password`: 密码
