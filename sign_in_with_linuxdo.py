@@ -656,7 +656,8 @@ class LinuxDoSignIn:
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None
-						if getattr(self.provider_config, "turnstile_check", False):
+						# runanytime 新版是 /console 路径 + 福利站兑换逻辑，此处不再尝试旧的 /app/me 签到按钮与表格解析
+						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
 							await self._browser_check_in_with_turnstile(page)
 							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求
 							user_info = await self._extract_balance_from_profile(page)
@@ -729,8 +730,9 @@ class LinuxDoSignIn:
 								if api_user_fb:
 									user_info_fb = None
 									try:
-										await self._browser_check_in_with_turnstile(page)
-										user_info_fb = await self._extract_balance_from_profile(page)
+										if self.provider_config.name != "runanytime":
+											await self._browser_check_in_with_turnstile(page)
+											user_info_fb = await self._extract_balance_from_profile(page)
 									except Exception as fb_chk_err:
 										print(
 											f"⚠️ {self.account_name}: Error during browser check-in fallback: "
@@ -760,10 +762,9 @@ class LinuxDoSignIn:
 									f"⚠️ {self.account_name}: Error during Turnstile provider OAuth fallback: "
 									f"{fb_err}"
 								)
-
-							return False, {
-								"error": "Linux.do OAuth failed for Turnstile provider (no user after /app fallback)",
-							}
+							# localStorage 兜底失败并不代表 OAuth 失败：
+							# 对于 new-api 站点，真正建立会话的是后端回调 `/api/oauth/linuxdo`。
+							# 继续向下走“浏览器内调用回调接口”的通用逻辑，尝试从回调 JSON 拿到 api_user。
 
 						# 优先在浏览器内通过页面导航方式调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
 						try:
@@ -895,7 +896,7 @@ class LinuxDoSignIn:
 
 												# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 												user_info_cb = None
-												if getattr(self.provider_config, "turnstile_check", False):
+												if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
 													await self._browser_check_in_with_turnstile(page)
 													user_info_cb = await self._extract_balance_from_profile(page)
 
