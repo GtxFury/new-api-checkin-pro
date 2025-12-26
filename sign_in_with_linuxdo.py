@@ -80,6 +80,10 @@ class LinuxDoSignIn:
 	)
 
 	APP_FALLBACK_PATH_CANDIDATES = (
+		"/console/personal",
+		"/console",
+		"/console/token",
+		"/console/topup",
 		"/app/tokens",
 		"/app/token",
 		"/app/api-keys",
@@ -581,11 +585,32 @@ class LinuxDoSignIn:
 					# 从 localStorage 获取 user 对象并提取 id
 					api_user = None
 					try:
-						# 先等一小段时间让前端写入 localStorage（如果有二次跳转也能跟上）
+						# OAuth 回调页通常会再跳转到 /console/* 才写入 localStorage，这里做更稳健的等待：
+						# 1) 优先等待 localStorage 出现 user 相关 key
 						try:
-							await page.wait_for_timeout(2500)
+							await page.wait_for_function(
+								"""() => {
+									return (
+										localStorage.getItem('user') !== null ||
+										localStorage.getItem('user_info') !== null ||
+										localStorage.getItem('userInfo') !== null
+									);
+								}""",
+								timeout=20000,
+							)
 						except Exception:
-							pass
+							# 2) 如果未等到，尝试等待跳转到控制台（很多 new-api 站点会走 /console）
+							try:
+								await page.wait_for_url(
+									f"**{self.provider_config.origin}/console**",
+									timeout=15000,
+								)
+							except Exception:
+								# 3) 再给一点时间让 SPA 初始化
+								try:
+									await page.wait_for_timeout(4000)
+								except Exception:
+									pass
 
 						api_user = await self._extract_api_user_from_localstorage(page)
 						if api_user:
@@ -604,7 +629,7 @@ class LinuxDoSignIn:
 								try:
 									await page.goto(
 										f"{self.provider_config.origin}{path}",
-										wait_until="networkidle",
+										wait_until="domcontentloaded",
 									)
 									try:
 										await page.wait_for_function(

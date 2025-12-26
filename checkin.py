@@ -450,39 +450,38 @@ class CheckIn:
 
     async def _runanytime_get_balance_from_app_me(self, page) -> dict | None:
         try:
-            target_url = f"{self.provider_config.origin}/app/me"
+            # runanytime/new-api 新版控制台将额度信息展示在 /console 首页（/app/me 可能不存在或被 CF 拦截）
+            target_url = f"{self.provider_config.origin}/console"
             await page.goto(target_url, wait_until="networkidle")
             await page.wait_for_timeout(1000)
 
-            summary = await page.evaluate(
-                """() => {
-                    try {
-                        const rows = Array.from(document.querySelectorAll('table tr'));
-                        const result = {};
-                        for (const row of rows) {
-                            const header = row.querySelector('th, [role=\"rowheader\"]');
-                            const cell = row.querySelector('td, [role=\"cell\"]');
-                            if (!header || !cell) continue;
-                            const label = header.innerText.trim();
-                            const value = cell.innerText.trim();
-                            result[label] = value;
-                        }
-                        return result;
-                    } catch (e) {
-                        return null;
-                    }
-                }"""
+            body_text = await page.evaluate(
+                "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
             )
-            if not summary:
+            if not body_text:
                 return None
 
-            balance_str = summary.get("当前余额")
-            used_str = summary.get("历史消耗")
-            if balance_str is None or used_str is None:
+            # 示例：
+            # 当前余额\n🏃‍♂️349.59
+            # 历史消耗\n🏃‍♂️26.75
+            def _match_amount(label: str) -> str | None:
+                m = re.search(rf"{re.escape(label)}\\s*\\n\\s*([^\\n]+)", body_text)
+                if not m:
+                    return None
+                return m.group(1).strip()
+
+            balance_str = _match_amount("当前余额")
+            used_str = _match_amount("历史消耗")
+
+            if balance_str is None:
                 return None
+            if used_str is None:
+                used_str = "0"
 
             def _parse_amount(s: str) -> float:
+                # 去掉货币符号/自定义符号（如 🏃‍♂️）、逗号等，仅保留数字/小数点/负号
                 s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
+                s = re.sub(r"[^0-9.\\-]", "", s)
                 try:
                     return float(s)
                 except Exception:
