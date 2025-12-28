@@ -598,14 +598,56 @@ class CheckIn:
 
         return all_codes, f"转盘已尝试 {attempted}/{spins} 次"
 
-    async def _runanytime_get_balance_from_app_me(self, page) -> dict | None:
+    async def _runanytime_get_balance_from_app_me(self, page, api_user: str | int | None = None) -> dict | None:
         try:
             # runanytime/new-api 新版控制台将额度信息展示在 /console（/app/me 可能不存在或被 CF 拦截）。
             # 但 SPA 有时会先渲染 NaN/占位，需等待真实数值出现；若 /console 失败则回退到 /console/topup。
             for path in ("/console", "/console/topup"):
                 target_url = f"{self.provider_config.origin}{path}"
                 await page.goto(target_url, wait_until="networkidle")
+                await self._maybe_solve_cloudflare_interstitial(page)
                 await page.wait_for_timeout(800)
+
+                # 优先用 API 获取余额（比解析页面稳定），需要 api_user 作为 header
+                if api_user is not None:
+                    try:
+                        header_keys = self._get_api_user_header_keys()
+                        api_headers = {k: str(api_user) for k in header_keys}
+                        api_headers.setdefault("Accept", "application/json, text/plain, */*")
+                        api_headers.setdefault("Content-Type", "application/json")
+
+                        api_result = await page.evaluate(
+                            """async ({ url, headers }) => {
+                                try {
+                                    const r = await fetch(url, { credentials: 'include', headers });
+                                    const t = await r.text();
+                                    return { ok: r.ok, status: r.status, text: t };
+                                } catch (e) {
+                                    return { ok: false, status: 0, text: String(e) };
+                                }
+                            }""",
+                            {
+                                "url": f"{self.provider_config.origin}/api/user/self",
+                                "headers": api_headers,
+                            },
+                        )
+
+                        status = (api_result or {}).get("status", 0)
+                        text = (api_result or {}).get("text", "") or ""
+                        if status == 200 and text:
+                            data = json.loads(text)
+                            if isinstance(data, dict) and data.get("success"):
+                                user_data = data.get("data", {}) or {}
+                                quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+                                used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+                                return {
+                                    "success": True,
+                                    "quota": quota,
+                                    "used_quota": used_quota,
+                                    "display": f"Current balance: 🏃‍♂️{quota}, Used: 🏃‍♂️{used_quota}",
+                                }
+                    except Exception:
+                        pass
 
                 try:
                     await page.wait_for_function(
@@ -686,7 +728,7 @@ class CheckIn:
                     "success": True,
                     "quota": quota,
                     "used_quota": used_quota,
-                    "display": f"Current balance: {quota}, Used: {used_quota}",
+                    "display": f"Current balance: 🏃‍♂️{quota}, Used: 🏃‍♂️{used_quota}",
                 }
 
             return None
@@ -815,7 +857,7 @@ class CheckIn:
 
             page = await context.new_page()
             try:
-                before_info = await self._runanytime_get_balance_from_app_me(page)
+                before_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
 
                 await self._ensure_fuli_logged_in(page, linuxdo_username, linuxdo_password)
                 checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(page)
@@ -842,15 +884,20 @@ class CheckIn:
                     if ok:
                         success_redeem += 1
 
-                after_info = await self._runanytime_get_balance_from_app_me(page)
+                after_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
 
+                def _fmt_quota(v) -> str:
+                    if isinstance(v, (int, float)):
+                        return f"🏃‍♂️{v:.2f}"
+                    return "N/A"
+
                 summary = (
                     f"RunAnytime 兑换 {success_redeem}/{len(codes)} 个 | "
                     f"fuli: {checkin_msg}, {wheel_msg} | "
-                    f"余额: ${before_quota} -> ${after_quota}"
+                    f"余额: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
                 )
 
                 base_info = None
