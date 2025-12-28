@@ -582,12 +582,106 @@ class LinuxDoSignIn:
 						print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
 
 						await page.goto("https://linux.do/login", wait_until="domcontentloaded")
-						await page.fill("#login-account-name", self.username)
-						await page.wait_for_timeout(2000)
-						await page.fill("#login-account-password", self.password)
-						await page.wait_for_timeout(2000)
-						await page.click("#login-button")
-						await page.wait_for_timeout(10000)
+						# linux.do 登录页会出现 Cloudflare Turnstile/Interstitial，先尝试处理（失败不阻塞，后续仍可能人工通过）
+						try:
+							await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+						except Exception:
+							pass
+						try:
+							await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+						except Exception:
+							pass
+
+						async def _set_value(selectors: list[str], value: str) -> bool:
+							for sel in selectors:
+								try:
+									ok = await page.evaluate(
+										"""({ sel, value }) => {
+											try {
+												const el = document.querySelector(sel);
+												if (!el) return false;
+												el.focus();
+												el.value = value;
+												el.dispatchEvent(new Event('input', { bubbles: true }));
+												el.dispatchEvent(new Event('change', { bubbles: true }));
+												return true;
+											} catch (e) {
+												return false;
+											}
+										}""",
+										{"sel": sel, "value": value},
+									)
+									if ok:
+										return True
+								except Exception:
+									continue
+							return False
+
+						user_ok = await _set_value(
+							[
+								"#login-account-name",
+								"#signin_username",
+								'input[name="login"]',
+								'input[name="username"]',
+								'input[type="email"]',
+								'input[autocomplete="username"]',
+							],
+							self.username,
+						)
+						pwd_ok = await _set_value(
+							[
+								"#login-account-password",
+								"#signin_password",
+								'input[name="password"]',
+								'input[type="password"]',
+								'input[autocomplete="current-password"]',
+							],
+							self.password,
+						)
+						if not user_ok or not pwd_ok:
+							await self._take_screenshot(page, "linuxdo_login_inputs_not_found")
+							raise RuntimeError("linux.do login inputs not found or not editable")
+
+						# 点击登录按钮（linux.do 近期使用 #signin-button；保留旧 id 兼容）
+						clicked = False
+						for sel in [
+							"#signin-button",
+							"#login-button",
+							'button:has-text("登录")',
+							'button[type="submit"]',
+							'input[type="submit"]',
+						]:
+							try:
+								btn = await page.query_selector(sel)
+								if btn:
+									await btn.click()
+									clicked = True
+									break
+							except Exception:
+								continue
+						if not clicked:
+							# 兜底：回车提交
+							try:
+								await page.press("#login-account-password", "Enter")
+								clicked = True
+							except Exception:
+								pass
+
+						# 等待跳出 /login（或出现授权按钮）
+						try:
+							await page.wait_for_function(
+								"""() => {
+									const u = location.href || '';
+									if (u.includes('/oauth2/authorize')) return true;
+									if (!u.includes('/login')) return true;
+									const t = document.body ? (document.body.innerText || '') : '';
+									return t.includes('授权') || t.includes('Authorize') || t.includes('/oauth2/approve');
+								}""",
+								timeout=30000,
+							)
+						except Exception:
+							await self._take_screenshot(page, "linuxdo_login_timeout")
+							raise RuntimeError("linux.do login submit timeout")
 
 						await self._save_page_content_to_file(page, "sign_in_result")
 
@@ -605,9 +699,13 @@ class LinuxDoSignIn:
 						except Exception as e:
 							print(f"⚠️ {self.account_name}: Possible Cloudflare challenge: {e}")
 
-						# 保存新的会话状态
-						await context.storage_state(path=cache_file_path)
-						print(f"✅ {self.account_name}: Storage state saved to cache file")
+						# 保存新的会话状态（仅在确实离开登录页后保存，避免把错误页状态写进缓存）
+						try:
+							if "/login" not in page.url:
+								await context.storage_state(path=cache_file_path)
+								print(f"✅ {self.account_name}: Storage state saved to cache file")
+						except Exception:
+							pass
 					except Exception as e:
 						print(f"❌ {self.account_name}: Error occurred while signing in linux.do: {e}")
 						await self._take_screenshot(page, "signin_bypass_error")
