@@ -401,10 +401,12 @@ class CheckIn:
 
         # 1) 快速探测：如果已登录则直接返回
         try:
+            print(f"ℹ️ {self.account_name}: checking runanytime login status at {origin}/console")
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
             if await _is_logged_in():
+                print(f"ℹ️ {self.account_name}: runanytime already logged in (url={page.url})")
                 return
             if "/login" not in (page.url or "") and page.url.startswith(origin):
                 # 某些情况下首页/控制台会懒加载，给一点时间
@@ -419,11 +421,13 @@ class CheckIn:
                 except Exception:
                     pass
                 if await _is_logged_in():
+                    print(f"ℹ️ {self.account_name}: runanytime logged in after short wait (url={page.url})")
                     return
         except Exception:
             pass
 
         # 2) 走登录页点击 Linux Do
+        print(f"ℹ️ {self.account_name}: runanytime not logged in, start login flow")
         try:
             await page.goto(f"{origin}/login", wait_until="networkidle")
             await self._maybe_solve_cloudflare_interstitial(page)
@@ -441,6 +445,7 @@ class CheckIn:
                 'button:has-text("Linux Do")',
                 'a:has-text("Linux Do")',
                 'a:has-text("使用 Linux Do 登录")',
+                'a[href*="linuxdo" i]',
             ]:
                 try:
                     ele = await page.query_selector(sel)
@@ -451,6 +456,21 @@ class CheckIn:
                     continue
             if login_btn:
                 await login_btn.click()
+            else:
+                # 再兜底：从所有链接里找包含 linuxdo 的跳转
+                try:
+                    await page.evaluate(
+                        """() => {
+                            const a = Array.from(document.querySelectorAll('a')).find(x => {
+                                const h = (x.getAttribute('href') || '').toLowerCase();
+                                const t = (x.innerText || '').toLowerCase();
+                                return h.includes('linuxdo') || t.includes('linux do') || t.includes('linuxdo');
+                            });
+                            if (a) a.click();
+                        }"""
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -510,6 +530,7 @@ class CheckIn:
                     callback_url = f"{origin}/api/oauth/linuxdo?code={quote(str(code))}"
                     if state:
                         callback_url += f"&state={quote(str(state))}"
+                    print(f"ℹ️ {self.account_name}: runanytime oauth front-route detected, calling callback: {callback_url}")
                     await page.goto(callback_url, wait_until="networkidle")
         except Exception:
             pass
@@ -519,6 +540,11 @@ class CheckIn:
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
+            if await _is_logged_in():
+                print(f"ℹ️ {self.account_name}: runanytime login finished (url={page.url})")
+                return
+            print(f"⚠️ {self.account_name}: runanytime login not confirmed (url={page.url})")
+            await self._take_screenshot(page, "runanytime_login_not_confirmed")
         except Exception:
             pass
 
@@ -748,12 +774,12 @@ class CheckIn:
         return all_codes, f"转盘已尝试 {attempted}/{spins} 次"
 
     async def _runanytime_get_balance_from_app_me(self, page, api_user: str | int | None = None) -> dict | None:
-        """获取 runanytime/new-api 的余额与消耗。
+        """获取 runanytime/new-api 的余额与消耗（纯 UI 解析）。
 
-        经验结论（MCP 实测）：
-        - `/console` 的 `document.body.innerText` 结构稳定：`当前余额\\n🏃‍♂️369.59`、`历史消耗\\n🏃‍♂️26.75`
-        - `/console/topup` 初次渲染可能是 `🏃‍♂️NaN`，不适合作为首选解析入口
-        - `/api/user/self` 需要携带正确的 `new-api-user`（登录用户 id），速度快且最稳定
+        说明：
+        - 该站点会出现 `/api/user/self` 返回 401（未登录/缺 token）的情况，且不同部署校验逻辑不一致；
+          为了稳定性，这里完全改为从 `/console` 文本解析。
+        - `/console/topup` 初次渲染可能是 `🏃‍♂️NaN`，仅作为兜底。
         """
         origin = (self.provider_config.origin or "").rstrip("/")
         if not origin:
@@ -779,89 +805,63 @@ class CheckIn:
                 "display": f"Current balance: 🏃‍♂️{q:.2f}, Used: 🏃‍♂️{u:.2f}",
             }
 
-        # 先打开 /console 确保同源（否则 fetch 可能被 CORS 拦截），且该页面可作为 UI 兜底解析来源。
-        try:
-            await page.goto(f"{origin}/console", wait_until="domcontentloaded")
-            await self._maybe_solve_cloudflare_interstitial(page)
-        except Exception:
-            pass
-
-        # 1) 优先：直接调 API 获取（不依赖 localStorage/hydration，速度最快且最稳定）
-        if api_user is not None:
+        for path, timeout_ms in (("/console", 8000), ("/console/topup", 10000)):
             try:
-                header_keys = self._get_api_user_header_keys()
-                api_headers = {k: str(api_user) for k in header_keys}
-                api_headers.setdefault("Accept", "application/json, text/plain, */*")
+                await page.goto(f"{origin}{path}", wait_until="domcontentloaded")
+                await self._maybe_solve_cloudflare_interstitial(page)
+                await page.wait_for_timeout(600)
+            except Exception:
+                continue
 
-                api_result = await page.evaluate(
-                    """async ({ headers }) => {
-                        try {
-                            const r = await fetch('/api/user/self', { credentials: 'include', headers });
-                            const t = await r.text();
-                            return { status: r.status, text: t };
-                        } catch (e) {
-                            return { status: 0, text: String(e) };
-                        }
+            # 等待 SPA 渲染出数值（topup 页可能先 NaN）
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                        if (!t.includes('当前余额')) return false;
+                        if (t.includes('NaN')) return false;
+                        const m = t.match(/当前余额\\s*\\n\\s*([^\\n\\r]+)/);
+                        return !!(m && m[1] && /\\d/.test(m[1]));
                     }""",
-                    {"headers": api_headers},
+                    timeout=timeout_ms,
                 )
+            except Exception:
+                pass
 
-                status = (api_result or {}).get("status", 0)
-                text = (api_result or {}).get("text", "") or ""
-                if status == 200 and text:
-                    data = json.loads(text)
-                    if isinstance(data, dict) and data.get("success"):
-                        user_data = data.get("data", {}) or {}
-                        quota = round(float(user_data.get("quota", 0)) / 500000, 2)
-                        used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
-                        return _mk_result(quota, used_quota)
-                if status and status != 200:
-                    # 记录一条轻量日志，方便定位 header 不匹配 / session 丢失等问题
-                    msg = text[:200].replace("\n", " ")
-                    print(f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {status}: {msg}")
-            except Exception as e:
-                print(f"⚠️ {self.account_name}: runanytime /api/user/self fetch error: {e}")
+            try:
+                body_text = await page.evaluate(
+                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                )
+            except Exception:
+                body_text = ""
+            if not body_text:
+                continue
 
-        # 2) 兜底：解析 /console 的文本（不走 /console/topup，避免 NaN 占位导致误判）
-        try:
-            await page.wait_for_function(
-                """() => {
-                    const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                    if (!t.includes('当前余额')) return false;
-                    const m = t.match(/当前余额\\s*\\n\\s*([^\\n\\r]+)/);
-                    return !!(m && m[1] && /\\d/.test(m[1]));
-                }""",
-                timeout=8000,
-            )
-        except Exception:
-            pass
+            balance_line = None
+            used_line = None
 
-        try:
-            body_text = await page.evaluate(
-                "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
-            )
-        except Exception:
-            body_text = ""
+            # 兼容“下一行是数值”以及“同一行包含数值”的两种布局
+            m1 = re.search(r"当前余额\\s*\\n\\s*([^\\n\\r]+)", body_text)
+            if not m1:
+                m1 = re.search(r"当前余额\\s*[:：]?\\s*([^\\n\\r]+)", body_text)
+            if m1:
+                balance_line = m1.group(1).strip()
 
-        if not body_text:
-            return None
+            m2 = re.search(r"历史消耗\\s*\\n\\s*([^\\n\\r]+)", body_text)
+            if not m2:
+                m2 = re.search(r"历史消耗\\s*[:：]?\\s*([^\\n\\r]+)", body_text)
+            if m2:
+                used_line = m2.group(1).strip()
 
-        balance_line = None
-        used_line = None
-        m1 = re.search(r"当前余额\\s*\\n\\s*([^\\n\\r]+)", body_text)
-        if m1:
-            balance_line = m1.group(1).strip()
-        m2 = re.search(r"历史消耗\\s*\\n\\s*([^\\n\\r]+)", body_text)
-        if m2:
-            used_line = m2.group(1).strip()
+            quota = _parse_amount(balance_line or "")
+            used_quota = _parse_amount(used_line or "")
+            if quota is None:
+                continue
+            if used_quota is None:
+                used_quota = 0.0
+            return _mk_result(quota, used_quota)
 
-        quota = _parse_amount(balance_line or "")
-        used_quota = _parse_amount(used_line or "")
-        if quota is None:
-            return None
-        if used_quota is None:
-            used_quota = 0.0
-        return _mk_result(quota, used_quota)
+        return None
 
     async def _runanytime_redeem_code_via_browser(self, page, code: str) -> tuple[bool, str]:
         await page.goto(f"{self.provider_config.origin}/console/topup", wait_until="networkidle")
