@@ -9,7 +9,7 @@ import os
 import re
 import tempfile
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, quote
 
 import httpx
 from camoufox.async_api import AsyncCamoufox
@@ -372,6 +372,155 @@ class CheckIn:
             print(f"ℹ️ {self.account_name}: fuli login finished (url={page.url})")
         except Exception as e:
             print(f"⚠️ {self.account_name}: fuli 登录流程可能未完全成功: {e}")
+
+    async def _ensure_runanytime_logged_in(
+        self,
+        page,
+        linuxdo_username: str,
+        linuxdo_password: str,
+    ) -> None:
+        """确保 runanytime 已登录（否则余额/API 会 401）。
+
+        站点是 New-API SPA：未登录时访问 `/console` 往往会跳回 `/login`，而 `/api/user/self`
+        会报“未登录且未提供 access token”。
+        """
+        origin = (self.provider_config.origin or "").rstrip("/")
+        if not origin:
+            return
+
+        async def _is_logged_in() -> bool:
+            try:
+                t = await page.evaluate(
+                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                )
+            except Exception:
+                t = ""
+            if "当前余额" in (t or "") and "历史消耗" in (t or ""):
+                return True
+            return False
+
+        # 1) 快速探测：如果已登录则直接返回
+        try:
+            await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+            await self._maybe_solve_cloudflare_interstitial(page)
+            await page.wait_for_timeout(600)
+            if await _is_logged_in():
+                return
+            if "/login" not in (page.url or "") and page.url.startswith(origin):
+                # 某些情况下首页/控制台会懒加载，给一点时间
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                            return t.includes('当前余额') && t.includes('历史消耗');
+                        }""",
+                        timeout=3000,
+                    )
+                except Exception:
+                    pass
+                if await _is_logged_in():
+                    return
+        except Exception:
+            pass
+
+        # 2) 走登录页点击 Linux Do
+        try:
+            await page.goto(f"{origin}/login", wait_until="networkidle")
+            await self._maybe_solve_cloudflare_interstitial(page)
+        except Exception:
+            # 某些 SPA 会一直 pending，退化到 domcontentloaded
+            try:
+                await page.goto(f"{origin}/login", wait_until="domcontentloaded")
+            except Exception:
+                return
+
+        try:
+            login_btn = None
+            for sel in [
+                'button:has-text("使用 Linux Do 登录")',
+                'button:has-text("Linux Do")',
+                'a:has-text("Linux Do")',
+                'a:has-text("使用 Linux Do 登录")',
+            ]:
+                try:
+                    ele = await page.query_selector(sel)
+                    if ele:
+                        login_btn = ele
+                        break
+                except Exception:
+                    continue
+            if login_btn:
+                await login_btn.click()
+        except Exception:
+            pass
+
+        await page.wait_for_timeout(1200)
+        await self._maybe_solve_cloudflare_interstitial(page)
+
+        # 3) Linux.do 登录或授权
+        try:
+            if "linux.do/login" in (page.url or ""):
+                await page.wait_for_selector("#login-account-name", timeout=30000)
+                await page.fill("#login-account-name", linuxdo_username)
+                await page.wait_for_timeout(400)
+                await page.fill("#login-account-password", linuxdo_password)
+                await page.wait_for_timeout(400)
+                await page.click("#login-button")
+                await page.wait_for_timeout(1200)
+
+            # 授权页常见是 /oauth2/authorize，然后页面上有 approve 链接
+            try:
+                allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+                if allow_btn:
+                    await allow_btn.click()
+                else:
+                    # 兜底：尝试点“授权/允许/Authorize”按钮
+                    for sel in [
+                        'button:has-text("授权")',
+                        'button:has-text("允许")',
+                        'button:has-text("Authorize")',
+                        'button[type="submit"]',
+                    ]:
+                        try:
+                            b = await page.query_selector(sel)
+                            if b:
+                                await b.click()
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: runanytime Linux.do 登录/授权可能未完成: {e}")
+
+        # 4) 回到 runanytime：如果落在前端 `/oauth/linuxdo?code=...`，补打一遍后端回调
+        try:
+            await page.wait_for_url(f"**{origin}/**", timeout=30000)
+        except Exception:
+            pass
+
+        try:
+            cur = page.url or ""
+            if cur.startswith(origin) and "/oauth/linuxdo" in cur and "code=" in cur:
+                parsed = urlparse(cur)
+                qs = parse_qs(parsed.query)
+                code = (qs.get("code") or [None])[0]
+                state = (qs.get("state") or [None])[0]
+                if code:
+                    callback_url = f"{origin}/api/oauth/linuxdo?code={quote(str(code))}"
+                    if state:
+                        callback_url += f"&state={quote(str(state))}"
+                    await page.goto(callback_url, wait_until="networkidle")
+        except Exception:
+            pass
+
+        # 5) 最终确认
+        try:
+            await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+            await self._maybe_solve_cloudflare_interstitial(page)
+            await page.wait_for_timeout(600)
+        except Exception:
+            pass
 
     async def _fuli_daily_checkin_get_code(self, page) -> tuple[bool, str | None, str]:
         """在 fuli 主站执行每日签到，返回 (是否完成, 兑换码, 提示信息)。"""
@@ -835,6 +984,8 @@ class CheckIn:
 
             page = await context.new_page()
             try:
+                # 先确保 runanytime 登录，否则余额/兑换接口会 401（未登录且未提供 access token）
+                await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
                 before_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
 
                 await self._ensure_fuli_logged_in(page, linuxdo_username, linuxdo_password)
@@ -857,6 +1008,8 @@ class CheckIn:
                 redeem_results = []
                 success_redeem = 0
                 for code in codes:
+                    # 兑换前再确保一次 runanytime 已登录（避免中途跳转到 fuli 导致 session 失效）
+                    await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
                     ok, msg = await self._runanytime_redeem_code_via_browser(page, code)
                     redeem_results.append({"code": code, "success": ok, "message": msg})
                     if ok:
