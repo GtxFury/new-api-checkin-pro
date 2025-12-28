@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs, quote
 import httpx
 from camoufox.async_api import AsyncCamoufox
 from utils.config import AccountConfig, ProviderConfig
-from utils.browser_utils import parse_cookies, get_random_user_agent
+from utils.browser_utils import parse_cookies, get_random_user_agent, filter_cookies
 
 # 复用 LinuxDoSignIn 中的 playwright-captcha 解决方案（如果可用）
 try:  # pragma: no cover - 仅在存在 playwright-captcha 时生效
@@ -1027,6 +1027,49 @@ class CheckIn:
 
         return None
 
+    async def _runanytime_get_balance_via_httpx(self, cookies: dict, api_user: str | int) -> dict | None:
+        """像 wzw 一样走 /api/user/self 获取余额（优先使用浏览器上下文里导出的 cookie）。"""
+        if not cookies:
+            return None
+        try:
+            client = httpx.Client(http2=True, timeout=30.0, proxy=self.http_proxy_config)
+            client.cookies.update(cookies)
+
+            headers = {
+                "User-Agent": get_random_user_agent(),
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": f"{self.provider_config.origin}/console",
+                "Origin": self.provider_config.origin,
+                "Connection": "keep-alive",
+            }
+            self._inject_api_user_headers(headers, api_user)
+
+            resp = client.get(self.provider_config.get_user_info_url(), headers=headers)
+            if resp.status_code != 200:
+                return None
+
+            data = self._check_and_handle_response(resp, "runanytime_user_self")
+            if not data or not data.get("success"):
+                return None
+
+            user_data = data.get("data", {}) or {}
+            quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+            used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+            return {
+                "success": True,
+                "quota": quota,
+                "used_quota": used_quota,
+                "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
+            }
+        except Exception:
+            return None
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
     async def _runanytime_redeem_code_via_browser(self, page, code: str) -> tuple[bool, str]:
         await page.goto(f"{self.provider_config.origin}/console/topup", wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
@@ -1156,7 +1199,14 @@ class CheckIn:
                 await self._ensure_runanytime_logged_in(runanytime_page, linuxdo_username, linuxdo_password)
                 # 注入 cookie 的新上下文没有 localStorage.user，会导致 /console 直接跳 /login 或余额 NaN
                 await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
-                before_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
+                # 余额优先按 wzw 的方式走 /api/user/self；失败再回退 UI 解析
+                try:
+                    exported = filter_cookies(await context.cookies(), self.provider_config.origin)
+                except Exception:
+                    exported = runanytime_cookies or {}
+                before_info = await self._runanytime_get_balance_via_httpx(exported, api_user=api_user)
+                if not (before_info and before_info.get("success")):
+                    before_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
 
                 await self._ensure_fuli_logged_in(fuli_page, linuxdo_username, linuxdo_password)
                 checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(fuli_page)
@@ -1186,7 +1236,13 @@ class CheckIn:
                     if ok:
                         success_redeem += 1
 
-                after_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
+                try:
+                    exported_after = filter_cookies(await context.cookies(), self.provider_config.origin)
+                except Exception:
+                    exported_after = exported
+                after_info = await self._runanytime_get_balance_via_httpx(exported_after, api_user=api_user)
+                if not (after_info and after_info.get("success")):
+                    after_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
