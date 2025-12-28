@@ -94,8 +94,8 @@ class CheckIn:
         # 转换为 httpx.URL 对象
         return httpx.URL(proxy_url)
 
-    # Cloudflare 相关 cookie 名称（包含站点 session，便于一起复用）
-    CF_COOKIE_NAMES: set[str] = {"cf_clearance", "_cfuvid", "__cf_bm", "session"}
+    # Cloudflare 相关 cookie 名称（注意：不要缓存站点业务 session，避免用过期 session 覆盖有效登录态）
+    CF_COOKIE_NAMES: set[str] = {"cf_clearance", "_cfuvid", "__cf_bm"}
 
     def _get_api_user_header_keys(self) -> list[str]:
         """返回当前 provider 可能使用的 api_user header 名称列表（按优先级去重）。
@@ -182,10 +182,12 @@ class CheckIn:
             with open(cache_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
+                # 兼容旧缓存：历史版本可能把 session 也写入缓存，这里强制按白名单过滤
+                filtered = [c for c in data if isinstance(c, dict) and c.get("name") in self.CF_COOKIE_NAMES]
                 print(
-                    f"ℹ️ {self.account_name}: Loaded {len(data)} Cloudflare cookies from cache: {cache_path}"
+                    f"ℹ️ {self.account_name}: Loaded {len(filtered)} Cloudflare cookies from cache: {cache_path}"
                 )
-                return data
+                return filtered
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to load Cloudflare cookies cache: {e}")
         return None
