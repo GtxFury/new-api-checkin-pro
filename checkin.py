@@ -888,16 +888,22 @@ class CheckIn:
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
+                before_used = before_info.get("used_quota") if before_info else None
+                after_used = after_info.get("used_quota") if after_info else None
 
                 def _fmt_quota(v) -> str:
                     if isinstance(v, (int, float)):
                         return f"🏃‍♂️{v:.2f}"
                     return "N/A"
 
+                cur_quota = after_quota if isinstance(after_quota, (int, float)) else before_quota
+                cur_used = after_used if isinstance(after_used, (int, float)) else before_used
+
                 summary = (
                     f"RunAnytime 兑换 {success_redeem}/{len(codes)} 个 | "
                     f"fuli: {checkin_msg}, {wheel_msg} | "
-                    f"余额: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
+                    f"余额: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)} | "
+                    f"当前: {_fmt_quota(cur_quota)} | 消耗: {_fmt_quota(cur_used)}"
                 )
 
                 base_info = None

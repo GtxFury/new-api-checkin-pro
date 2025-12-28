@@ -240,7 +240,15 @@ async def main():
                     account_success = True
                     success_count += 1
                     successful_methods.append(auth_method)
-                    account_result += f"    💰 {user_info['display']}\n"
+                    display = user_info.get("display", "")
+                    if not display:
+                        quota = user_info.get("quota")
+                        used_quota = user_info.get("used_quota")
+                        if quota is not None and used_quota is not None:
+                            display = f"Current balance: {quota}, Used: {used_quota}"
+                        else:
+                            display = "余额获取成功（但未提供 display 字段）"
+                    account_result += f"    💰 {display}\n"
                     # 记录余额信息
                     current_quota = user_info["quota"]
                     current_used = user_info["used_quota"]
