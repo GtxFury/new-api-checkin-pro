@@ -180,6 +180,101 @@ class LinuxDoSignIn:
 			print(f"⚠️ {self.account_name}: Fast callback fetch error: {e}")
 			return None
 
+	async def _call_provider_linuxdo_callback_via_navigation(
+		self,
+		page,
+		code: str,
+		auth_state: str | None,
+	) -> str | None:
+		"""通过页面导航调用 provider 的 LinuxDO 回调接口，尽量确保服务端会话(cookie)被正确写入。"""
+		try:
+			base_callback_url = self.provider_config.get_linuxdo_auth_url()
+			parsed_cb = urlparse(base_callback_url)
+			cb_query = parse_qs(parsed_cb.query)
+			cb_query["code"] = [code]
+			if auth_state:
+				cb_query["state"] = [auth_state]
+			final_query = urlencode(cb_query, doseq=True)
+			final_callback_url = parsed_cb._replace(query=final_query).geturl()
+
+			print(
+				f"ℹ️ {self.account_name}: Calling Linux.do callback via browser navigation (helper): "
+				f"{final_callback_url}"
+			)
+
+			# 允许重试一次（应对 CF interstitial）
+			for attempt in range(2):
+				response = await page.goto(final_callback_url, wait_until="domcontentloaded")
+				status = response.status if response else 0
+				try:
+					text = await response.text() if response else ""
+				except Exception:
+					text = ""
+
+				if status == 200 and text:
+					try:
+						data = json.loads(text)
+					except Exception:
+						data = None
+					if isinstance(data, dict) and data.get("success"):
+						user_data = data.get("data", {}) or {}
+						api_user = user_data.get("id") or user_data.get("user_id") or user_data.get("userId")
+						if api_user:
+							return str(api_user)
+
+				# 若遇到挑战页，尝试解决后重试一次
+				try:
+					html = (await page.content())[:5000]
+				except Exception:
+					html = ""
+				is_cf = (
+					"challenges.cloudflare.com" in (page.url or "")
+					or "Just a moment" in html
+					or "cf-browser-verification" in html
+				)
+				if is_cf and attempt == 0:
+					print(
+						f"⚠️ {self.account_name}: Cloudflare interstitial detected on callback page, attempting to solve"
+					)
+					try:
+						await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+					except Exception:
+						pass
+					await page.wait_for_timeout(8000)
+					continue
+				break
+
+			return None
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Callback navigation helper error: {e}")
+			return None
+
+	async def _runanytime_verify_session(self, page, api_user: str) -> bool:
+		"""runanytime/new-api：用 /api/user/self 校验 session 是否有效（比看 UI 是否 NaN 更准）。"""
+		try:
+			resp = await page.evaluate(
+				"""async (apiUser) => {
+					try {
+						const r = await fetch('/api/user/self', {
+							credentials: 'include',
+							headers: { 'new-api-user': String(apiUser), 'Accept': 'application/json, text/plain, */*' },
+						});
+						return { status: r.status, text: await r.text() };
+					} catch (e) {
+						return { status: 0, text: String(e) };
+					}
+				}""",
+				api_user,
+			)
+			status = int((resp or {}).get("status", 0) or 0)
+			if status == 200:
+				return True
+			if status:
+				print(f"⚠️ {self.account_name}: runanytime session verify failed: HTTP {status}")
+			return False
+		except Exception:
+			return False
+
 	async def _take_screenshot(self, page, reason: str) -> None:
 		"""截取当前页面截图"""
 		try:
@@ -723,6 +818,39 @@ class LinuxDoSignIn:
 				# 统一处理授权逻辑（无论是否通过缓存登录）
 				try:
 					oauth_redirect_url: str | None = None
+					observed_oauth_urls: list[str] = []
+
+					def _record_provider_url(u: str) -> None:
+						try:
+							if not u:
+								return
+							if not u.startswith(self.provider_config.origin):
+								return
+							# 只记录包含 code 的跳转（防止最终落在 /console/token 丢失 code）
+							if "code=" in u and "linuxdo" in u:
+								if u not in observed_oauth_urls:
+									observed_oauth_urls.append(u)
+						except Exception:
+							return
+
+					try:
+						def on_frame_navigated(frame) -> None:
+							try:
+								_record_provider_url(frame.url)
+							except Exception:
+								return
+
+						def on_request(req) -> None:
+							try:
+								_record_provider_url(req.url)
+							except Exception:
+								return
+
+						page.on("framenavigated", on_frame_navigated)
+						page.on("request", on_request)
+					except Exception:
+						pass
+
 					print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
 					await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
 					allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
@@ -742,7 +870,8 @@ class LinuxDoSignIn:
 							f"**{self.provider_config.origin}/**",
 							timeout=30000,
 						)
-						oauth_redirect_url = page.url
+						# 优先使用“带 code 的最早一次跳转”，否则回退到当前 URL
+						oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
 						print(
 							f"ℹ️ {self.account_name}: Captured OAuth redirect URL: {oauth_redirect_url}"
 						)
@@ -779,7 +908,29 @@ class LinuxDoSignIn:
 									user_cookies = filter_cookies(
 										restore_cookies, self.provider_config.origin
 									)
+									# 将 provider 侧 cookies 持久化到 cache_file（包含 runanytime session）
+									try:
+										await page.context.storage_state(path=cache_file_path)
+									except Exception:
+										pass
 									return True, {"cookies": user_cookies, "api_user": api_user_fast}
+								# fast fetch 失败时，尝试用“页面导航回调”确保 session cookie 写入
+								api_user_nav = await self._call_provider_linuxdo_callback_via_navigation(
+									page, code_fast, auth_state
+								)
+								if api_user_nav:
+									print(
+										f"✅ {self.account_name}: Got api user from callback navigation: {api_user_nav}"
+									)
+									restore_cookies = await page.context.cookies()
+									user_cookies = filter_cookies(
+										restore_cookies, self.provider_config.origin
+									)
+									try:
+										await page.context.storage_state(path=cache_file_path)
+									except Exception:
+										pass
+									return True, {"cookies": user_cookies, "api_user": api_user_nav}
 						except Exception:
 							pass
 
@@ -852,6 +1003,28 @@ class LinuxDoSignIn:
 					if api_user:
 						print(f"✅ {self.account_name}: OAuth authorization successful")
 
+						# runanytime/new-api：localStorage 里有 user 不代表服务端 session 已建立。
+						# 这里用 /api/user/self（带 new-api-user）强校验；若失败则尝试用 code 回调建立会话。
+						if self.provider_config.name == "runanytime":
+							ok = await self._runanytime_verify_session(page, str(api_user))
+							if not ok:
+								# 尝试从捕获到的 OAuth URL 或 observed 里解析 code 再走回调
+								source = oauth_redirect_url or (observed_oauth_urls[0] if observed_oauth_urls else page.url)
+								parsed = urlparse(source)
+								q = parse_qs(parsed.query)
+								code_vals = q.get("code")
+								code_val = code_vals[0] if code_vals else None
+								if code_val:
+									api_user_cb = await self._call_provider_linuxdo_callback_via_navigation(
+										page, code_val, auth_state
+									)
+									if api_user_cb:
+										api_user = api_user_cb
+										ok = await self._runanytime_verify_session(page, str(api_user))
+							if not ok:
+								await self._take_screenshot(page, "runanytime_oauth_session_not_established")
+								return False, {"error": "runanytime oauth ok but session not established"}
+
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None
 						# runanytime 新版是 /console 路径 + 福利站兑换逻辑，此处不再尝试旧的 /app/me 签到按钮与表格解析
@@ -867,6 +1040,12 @@ class LinuxDoSignIn:
 						result: dict = {"cookies": user_cookies, "api_user": api_user}
 						if user_info:
 							result["user_info"] = user_info
+
+						# 将 provider 侧 cookies 持久化到 cache_file（包含 runanytime session）
+						try:
+							await page.context.storage_state(path=cache_file_path)
+						except Exception:
+							pass
 
 						return True, result
 
