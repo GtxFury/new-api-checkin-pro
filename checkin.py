@@ -323,6 +323,118 @@ class CheckIn:
         except Exception:
             pass
 
+    async def _linuxdo_login_if_needed(self, page, linuxdo_username: str, linuxdo_password: str) -> None:
+        """在 linux.do 登录页（若出现）自动填表提交，兼容近期 selector 变更。"""
+        try:
+            u = page.url or ""
+        except Exception:
+            u = ""
+        if "linux.do/login" not in u:
+            return
+
+        # linux.do 登录页可能出现 Turnstile/Interstitial
+        try:
+            if linuxdo_solve_captcha is not None:
+                try:
+                    await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+                except Exception:
+                    pass
+                try:
+                    await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        async def _set_value(selectors: list[str], value: str) -> bool:
+            for sel in selectors:
+                try:
+                    ok = await page.evaluate(
+                        """({ sel, value }) => {
+                            try {
+                                const el = document.querySelector(sel);
+                                if (!el) return false;
+                                el.focus();
+                                el.value = value;
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                                return true;
+                            } catch (e) {
+                                return false;
+                            }
+                        }""",
+                        {"sel": sel, "value": value},
+                    )
+                    if ok:
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        user_ok = await _set_value(
+            [
+                "#login-account-name",
+                "#signin_username",
+                'input[name="login"]',
+                'input[name="username"]',
+                'input[type="email"]',
+                'input[autocomplete="username"]',
+            ],
+            linuxdo_username,
+        )
+        pwd_ok = await _set_value(
+            [
+                "#login-account-password",
+                "#signin_password",
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[autocomplete="current-password"]',
+            ],
+            linuxdo_password,
+        )
+        if not user_ok or not pwd_ok:
+            await self._take_screenshot(page, "linuxdo_login_inputs_not_found")
+            raise RuntimeError("linux.do 登录页未找到可输入的账号/密码框")
+
+        clicked = False
+        for sel in [
+            "#signin-button",
+            "#login-button",
+            'button:has-text("登录")',
+            'button[type="submit"]',
+            'input[type="submit"]',
+        ]:
+            try:
+                btn = await page.query_selector(sel)
+                if btn:
+                    await btn.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            try:
+                await page.keyboard.press("Enter")
+            except Exception:
+                pass
+
+        # 等待跳出 /login（或出现授权按钮）
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const u = location.href || '';
+                    if (u.includes('/oauth2/authorize')) return true;
+                    if (!u.includes('/login')) return true;
+                    const t = document.body ? (document.body.innerText || '') : '';
+                    return t.includes('授权') || t.includes('Authorize') || t.includes('/oauth2/approve');
+                }""",
+                timeout=30000,
+            )
+        except Exception:
+            await self._take_screenshot(page, "linuxdo_login_timeout")
+            raise RuntimeError("linux.do 登录提交超时")
+
     async def _ensure_fuli_logged_in(self, page, linuxdo_username: str, linuxdo_password: str) -> None:
         # 先尝试直接打开主页，若已登录则无需走 OAuth
         try:
@@ -358,15 +470,7 @@ class CheckIn:
 
         # 处理 Linux.do 登录（可能因为缓存已登录而跳过）
         try:
-            if "linux.do/login" in page.url:
-                await page.wait_for_selector("#login-account-name", timeout=30000)
-                await page.fill("#login-account-name", linuxdo_username)
-                await page.wait_for_timeout(500)
-                await page.fill("#login-account-password", linuxdo_password)
-                await page.wait_for_timeout(500)
-                await page.click("#login-button")
-                await page.wait_for_timeout(5000)
-                print(f"ℹ️ {self.account_name}: fuli linux.do login submitted (url={page.url})")
+            await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
 
             # 授权页：点击“允许”
             if "connect.linux.do/oauth2/authorize" in page.url:
@@ -564,13 +668,7 @@ class CheckIn:
         # 3) Linux.do 登录或授权
         try:
             if "linux.do/login" in (page.url or ""):
-                await page.wait_for_selector("#login-account-name", timeout=30000)
-                await page.fill("#login-account-name", linuxdo_username)
-                await page.wait_for_timeout(400)
-                await page.fill("#login-account-password", linuxdo_password)
-                await page.wait_for_timeout(400)
-                await page.click("#login-button")
-                await page.wait_for_timeout(1200)
+                await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
 
             # 授权页常见是 /oauth2/authorize，然后页面上有 approve 链接
             try:
@@ -634,6 +732,9 @@ class CheckIn:
             pass
 
         try:
+            origin = (self.provider_config.origin or "").rstrip("/")
+            if not origin:
+                return
             cur = page.url or ""
             if cur.startswith(origin) and "/oauth/linuxdo" in cur and "code=" in cur:
                 parsed = urlparse(cur)
@@ -1170,8 +1271,101 @@ class CheckIn:
         linuxdo_password: str,
         linuxdo_cache_file_path: str,
     ) -> tuple[bool, dict]:
-        """runanytime 新签到：在 fuli 获取兑换码并到 /console/topup 兑换。"""
+        """runanytime 新签到：在 fuli 获取兑换码并通过 API 兑换，再读取余额。
+
+        关键点：
+        - fuli 侧：用浏览器完成 linux.do OAuth（必要时），然后用 API 获取签到/转盘兑换码（更快更稳）。
+        - runanytime 侧：完全用 API 兑换与读取余额，避免 SPA /console 重定向导致的 N/A。
+        """
         print(f"ℹ️ {self.account_name}: runanytime requires fuli exchange codes, starting browser flow")
+
+        origin = (self.provider_config.origin or "").rstrip("/")
+        if not origin:
+            return False, {"error": "missing provider origin"}
+
+        # runanytime API client（兑换与余额）
+        run_client = httpx.Client(http2=True, timeout=30.0, proxy=self.http_proxy_config)
+        try:
+            run_client.cookies.update(runanytime_cookies or {})
+        except Exception:
+            pass
+
+        def _run_headers(referer: str) -> dict:
+            headers = {
+                "User-Agent": get_random_user_agent(),
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Origin": origin,
+                "Referer": referer,
+            }
+            self._inject_api_user_headers(headers, api_user)
+            return headers
+
+        def _run_get_user_info() -> dict | None:
+            try:
+                resp = run_client.get(f"{origin}/api/user/self", headers=_run_headers(f"{origin}/console"))
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: runanytime /api/user/self 请求异常: {e}")
+                return {"success": False, "error": f"request_error: {e}"}
+            if resp.status_code != 200:
+                body = (resp.text or "")[:200]
+                print(f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {resp.status_code}: {body}")
+                return {"success": False, "error": f"HTTP {resp.status_code}: {body}", "status_code": resp.status_code}
+            data = self._check_and_handle_response(resp, "runanytime_user_self")
+            if not isinstance(data, dict) or not data.get("success"):
+                msg = ""
+                if isinstance(data, dict):
+                    msg = data.get("message") or data.get("msg") or ""
+                return {"success": False, "error": msg or "response_success=false"}
+            user_data = data.get("data", {}) or {}
+            try:
+                quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+                used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+            except Exception:
+                return {"success": False, "error": "parse_quota_failed"}
+            print(f"✅ {self.account_name}: runanytime 余额: 🏃‍♂️{quota:.2f}, 历史消耗: 🏃‍♂️{used_quota:.2f}")
+            return {
+                "success": True,
+                "quota": quota,
+                "used_quota": used_quota,
+                "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
+            }
+
+        def _run_topup(code: str) -> dict:
+            try:
+                resp = run_client.post(
+                    f"{origin}/api/user/topup",
+                    headers=_run_headers(f"{origin}/console/topup"),
+                    json={"key": code},
+                )
+            except Exception as e:
+                return {"success": False, "error": f"topup 请求异常: {e}", "code": code}
+
+            data = self._check_and_handle_response(resp, "runanytime_topup")
+            if resp.status_code not in (200, 400) or not isinstance(data, dict):
+                return {
+                    "success": False,
+                    "error": f"topup HTTP {resp.status_code}",
+                    "code": code,
+                }
+
+            if data.get("success"):
+                return {
+                    "success": True,
+                    "message": data.get("message", "Topup successful"),
+                    "data": data.get("data"),
+                    "status_code": resp.status_code,
+                }
+
+            msg = data.get("message") or data.get("msg") or "Unknown error"
+            already_used = any(k in msg for k in ["已被使用", "已使用", "already"])
+            if already_used:
+                return {"success": True, "already_used": True, "message": msg, "status_code": resp.status_code}
+            return {"success": False, "error": msg, "status_code": resp.status_code}
+
+        before_info = _run_get_user_info()
 
         async with AsyncCamoufox(
             headless=False,
@@ -1190,86 +1384,214 @@ class CheckIn:
             )
             context = await browser.new_context(storage_state=storage_state)
 
-            # 注入 runanytime cookies + 已缓存的 Cloudflare cookies，尽量避免再次触发挑战
-            try:
-                await context.add_cookies(
-                    self._cookie_dict_to_browser_cookies(runanytime_cookies, self.provider_config.origin)
-                )
-            except Exception as e:
-                print(f"⚠️ {self.account_name}: Failed to add runanytime cookies to browser context: {e}")
-
-            try:
-                cached_cf = self._load_cf_cookies_from_cache()
-                if cached_cf:
-                    await context.add_cookies(cached_cf)
-            except Exception:
-                pass
-
-            # 关键：用同一个 context 开两个 page
-            # - runanytime_page 常驻：读余额/兑换，避免来回跳转导致 SPA 状态/本地存储丢失
-            # - fuli_page 专职：签到/转盘
-            runanytime_page = await context.new_page()
             fuli_page = await context.new_page()
             try:
-                # 先确保 runanytime 登录，否则余额/兑换接口会 401（未登录且未提供 access token）
-                await self._ensure_runanytime_logged_in(
-                    runanytime_page, linuxdo_username, linuxdo_password, api_user=api_user
-                )
-                # 注入 cookie 的新上下文没有 localStorage.user，会导致 /console 直接跳 /login 或余额 NaN
-                await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
-                # 余额优先用“浏览器内 fetch /api/user/self”（同源+带 new-api-user），失败再回退 UI 解析
-                before_info = await self._runanytime_get_balance_via_browser_fetch(runanytime_page, api_user=api_user)
-                if not (before_info and before_info.get("success")):
-                    before_info = await self._runanytime_get_balance_from_app_me(
-                        runanytime_page, api_user=api_user
-                    )
-
                 await self._ensure_fuli_logged_in(fuli_page, linuxdo_username, linuxdo_password)
-                checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(fuli_page)
-                wheel_codes, wheel_msg = await self._fuli_wheel_get_codes(fuli_page, max_times=3)
+                # 用 API 获取 fuli cookies（更稳定且不用解析弹窗 DOM）
+                try:
+                    all_cookies = await context.cookies()
+                except Exception:
+                    all_cookies = []
+                from utils.browser_utils import filter_cookies  # 避免循环引用
 
-                print(
-                    f"ℹ️ {self.account_name}: fuli check-in: {checkin_msg}, wheel: {wheel_msg}, "
-                    f"checkin_code={'yes' if bool(checkin_code) else 'no'}, wheel_codes={len(wheel_codes)}"
-                )
+                fuli_cookies = filter_cookies(all_cookies, self.FULI_ORIGIN)
+                if not fuli_cookies:
+                    await self._take_screenshot(fuli_page, "fuli_no_cookies_after_login")
+                    raise RuntimeError("fuli 登录后未能获取到可用 cookies")
 
+                fuli_client = httpx.Client(http2=True, timeout=30.0, proxy=self.http_proxy_config)
+                try:
+                    fuli_client.cookies.update(fuli_cookies)
+                except Exception:
+                    pass
+
+                def _fuli_headers(referer: str) -> dict:
+                    return {
+                        "User-Agent": get_random_user_agent(),
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                        "Cache-Control": "no-store",
+                        "Pragma": "no-cache",
+                        "Origin": self.FULI_ORIGIN,
+                        "Referer": referer,
+                    }
+
+                def _fuli_get_checkin_status() -> tuple[bool, bool, str]:
+                    resp = fuli_client.get(f"{self.FULI_ORIGIN}/api/checkin/status", headers=_fuli_headers(self.FULI_ORIGIN + "/"))
+                    if resp.status_code != 200:
+                        return False, False, f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_checkin_status")
+                    if not isinstance(data, dict):
+                        return False, False, "响应解析失败"
+                    checked = bool(data.get("checked", False))
+                    return True, checked, "ok"
+
+                def _fuli_execute_checkin() -> tuple[bool, str, str]:
+                    resp = fuli_client.post(f"{self.FULI_ORIGIN}/api/checkin", headers=_fuli_headers(self.FULI_ORIGIN + "/"), content=b"")
+                    if resp.status_code not in (200, 400):
+                        return False, "", f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_checkin")
+                    if not isinstance(data, dict):
+                        return False, "", "响应解析失败"
+                    msg = data.get("message") or data.get("msg") or ""
+                    if data.get("success"):
+                        code = str(data.get("code") or "")
+                        streak = data.get("streak")
+                        expire_seconds = data.get("expireSeconds")
+                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                        print(
+                            f"✅ {self.account_name}: fuli 签到成功: code={code}, prize={prize}, "
+                            f"streak={streak}, expireSeconds={expire_seconds}"
+                        )
+                        return True, code, msg or "签到成功"
+                    # already checked in
+                    if any(k in (msg or "") for k in ["already", "已经", "已签", "今日已签到"]):
+                        return True, "", "今日已签到"
+                    return False, "", msg or "签到失败"
+
+                def _fuli_get_wheel_status() -> tuple[bool, int, str]:
+                    resp = fuli_client.get(
+                        f"{self.FULI_ORIGIN}/api/wheel/status", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel")
+                    )
+                    if resp.status_code != 200:
+                        return False, 0, f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_wheel_status")
+                    if not isinstance(data, dict):
+                        return False, 0, "响应解析失败"
+                    try:
+                        remaining = int(data.get("remaining", 0) or 0)
+                    except Exception:
+                        remaining = 0
+                    return True, remaining, "ok"
+
+                def _fuli_execute_wheel() -> tuple[bool, str, int, str]:
+                    resp = fuli_client.post(
+                        f"{self.FULI_ORIGIN}/api/wheel", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel"), content=b""
+                    )
+                    if resp.status_code not in (200, 400):
+                        return False, "", 0, f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_wheel")
+                    if not isinstance(data, dict):
+                        return False, "", 0, "响应解析失败"
+                    msg = data.get("message") or data.get("msg") or ""
+                    if data.get("success"):
+                        expire_seconds = data.get("expireSeconds")
+                        try:
+                            remaining = int(data.get("remaining", 0) or 0)
+                        except Exception:
+                            remaining = 0
+                        code = str(data.get("code") or "")
+                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                        print(
+                            f"✅ {self.account_name}: fuli 转盘成功: code={code}, prize={prize}, "
+                            f"remaining={remaining}, expireSeconds={expire_seconds}"
+                        )
+                        return True, code, remaining, msg or "转盘成功"
+                    if any(k in (msg or "") for k in ["already", "次数", "用完", "已用完"]):
+                        return True, "", 0, "次数已用完"
+                    return False, "", 0, msg or "转盘失败"
+
+                # 1) fuli 签到：先 status，再 checkin
+                status_ok, checked, status_msg = _fuli_get_checkin_status()
+                if status_ok and checked:
+                    checkin_ok, checkin_code, checkin_msg = True, "", "今日已签到"
+                else:
+                    checkin_ok, checkin_code, checkin_msg = _fuli_execute_checkin()
+                    # API 失败时回退浏览器 DOM 流程（避免误判为未签到）
+                    if not checkin_ok and not status_ok:
+                        try:
+                            print(f"⚠️ {self.account_name}: fuli API 签到失败({status_msg}/{checkin_msg})，回退浏览器流程")
+                            checkin_ok, checkin_code2, checkin_msg2 = await self._fuli_daily_checkin_get_code(fuli_page)
+                            if checkin_code2:
+                                checkin_code = checkin_code2
+                            checkin_msg = checkin_msg2
+                        except Exception:
+                            pass
+
+                if checkin_code:
+                    print(f"✅ {self.account_name}: fuli 今日签到兑换码: {checkin_code}")
+                else:
+                    print(f"ℹ️ {self.account_name}: fuli 今日签到结果: {checkin_msg}")
+
+                # 2) fuli 转盘：最多 3 次（若接口返回 remaining 则以它为准）
+                wheel_codes: list[str] = []
+                wheel_msg = "未执行"
+                wheel_used_browser_fallback = False
+                wheel_status_ok, remaining, wheel_status_msg = _fuli_get_wheel_status()
+                if wheel_status_ok:
+                    wheel_msg = f"剩余 {remaining} 次"
+                else:
+                    # API 失败则回退浏览器转盘（避免误判“次数已用完”）
+                    try:
+                        print(f"⚠️ {self.account_name}: fuli API 转盘状态获取失败({wheel_status_msg})，回退浏览器流程")
+                        wheel_codes, wheel_msg = await self._fuli_wheel_get_codes(fuli_page, max_times=3)
+                        wheel_used_browser_fallback = True
+                        remaining = 0
+                    except Exception:
+                        wheel_msg = f"状态获取失败({wheel_status_msg})"
+                        remaining = 0
+
+                if not wheel_used_browser_fallback:
+                    initial_remaining = max(int(remaining or 0), 0)
+                    last_remaining = initial_remaining
+                    spins = min(max(remaining, 0), 3)
+                    if spins <= 0:
+                        wheel_msg = "次数已用完"
+                    else:
+                        spun = 0
+                        for i in range(spins):
+                            ok, code, remaining2, msg = _fuli_execute_wheel()
+                            wheel_msg = msg
+                            if ok and code:
+                                wheel_codes.append(code)
+                                spun += 1
+                                last_remaining = max(int(remaining2 or 0), 0)
+                                print(
+                                    f"✅ {self.account_name}: fuli 转盘第 {i+1}/{spins} 次兑换码: {code} (remaining={remaining2})"
+                                )
+                            elif ok:
+                                wheel_msg = "次数已用完"
+                                last_remaining = 0
+                                break
+                            else:
+                                print(f"⚠️ {self.account_name}: fuli 转盘第 {i+1}/{spins} 次失败: {msg}")
+                                # 允许少量失败，继续尝试
+                        # 如果还有次数但本次只转 3 次，明确写入日志，避免误以为“脚本漏转”
+                        if spins == 3 and initial_remaining > 3 and last_remaining > 0:
+                            wheel_msg = f"已转 {spun} 次(上限3次)，剩余 {last_remaining} 次"
+
+                # 3) 汇总兑换码（全部打印到日志，避免“抽到了但没兑换”）
                 codes: list[str] = []
                 if checkin_code:
                     codes.append(checkin_code)
-                codes.extend(wheel_codes)
-                if codes:
-                    print(f"ℹ️ {self.account_name}: fuli codes collected: {self._mask_codes(codes)}")
-                else:
-                    print(f"ℹ️ {self.account_name}: fuli returned no codes (checkin={checkin_msg}, wheel={wheel_msg})")
+                codes.extend([c for c in wheel_codes if c])
 
-                redeem_results = []
+                if codes:
+                    print(f"ℹ️ {self.account_name}: fuli 本次获取兑换码 {len(codes)} 个: {codes}")
+                else:
+                    print(f"ℹ️ {self.account_name}: fuli 本次无可兑换码 (checkin={checkin_msg}, wheel={wheel_msg})")
+
+                # 4) runanytime 兑换
+                redeem_results: list[dict] = []
                 success_redeem = 0
                 for code in codes:
-                    # 兑换前再确保一次 runanytime 已登录（但这次不会因跳转到 fuli 而丢 page 状态）
-                    await self._ensure_runanytime_logged_in(
-                        runanytime_page, linuxdo_username, linuxdo_password, api_user=api_user
-                    )
-                    await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
-                    print(f"ℹ️ {self.account_name}: redeeming code {self._mask_code(code)} ...")
-                    ok, msg = await self._runanytime_redeem_code_via_browser(runanytime_page, code)
-                    redeem_results.append({"code": code, "success": ok, "message": msg})
+                    print(f"💰 {self.account_name}: runanytime 兑换中: {code}")
+                    result = _run_topup(code)
+                    ok = bool(result.get("success"))
+                    redeem_results.append({"code": code, **result})
                     if ok:
                         success_redeem += 1
+                        extra = result.get("data")
+                        extra_str = ""
+                        if extra is not None:
+                            extra_str = f" | data={str(extra)[:180]}"
                         print(
-                            f"✅ {self.account_name}: redeemed {self._mask_code(code)} ok: "
-                            f"{(msg or '').strip()[:120]}"
+                            f"✅ {self.account_name}: runanytime 兑换成功: {code} | {result.get('message','')}{extra_str}"
                         )
                     else:
-                        print(
-                            f"❌ {self.account_name}: redeemed {self._mask_code(code)} failed: "
-                            f"{(msg or '').strip()[:120]}"
-                        )
+                        print(f"❌ {self.account_name}: runanytime 兑换失败: {code} | {result.get('error','')}")
 
-                after_info = await self._runanytime_get_balance_via_browser_fetch(runanytime_page, api_user=api_user)
-                if not (after_info and after_info.get("success")):
-                    after_info = await self._runanytime_get_balance_from_app_me(
-                        runanytime_page, api_user=api_user
-                    )
+                after_info = _run_get_user_info()
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
@@ -1292,6 +1614,14 @@ class CheckIn:
                     f"当前余额: {_fmt_quota(cur_quota)} | 历史消耗: {_fmt_quota(cur_used)} | "
                     f"变动: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
                 )
+                # 若余额获取失败，给出最后一次错误信息（避免通知里只有 N/A）
+                balance_err = ""
+                for info in [after_info, before_info]:
+                    if isinstance(info, dict) and not info.get("success") and info.get("error"):
+                        balance_err = str(info.get("error"))[:120]
+                        break
+                if balance_err:
+                    summary += f" | 余额获取失败: {balance_err}"
 
                 base_info = None
                 if after_info and after_info.get("success"):
@@ -1336,24 +1666,24 @@ class CheckIn:
                 return True, user_info
             except Exception as e:
                 try:
-                    await self._take_screenshot(runanytime_page, "runanytime_fuli_flow_error_runanytime")
-                except Exception:
-                    pass
-                try:
                     await self._take_screenshot(fuli_page, "runanytime_fuli_flow_error_fuli")
                 except Exception:
                     pass
                 return False, {"error": f"runanytime fuli/topup flow error: {e}"}
             finally:
                 try:
-                    await runanytime_page.close()
-                except Exception:
-                    pass
-                try:
                     await fuli_page.close()
                 except Exception:
                     pass
                 await context.close()
+                try:
+                    fuli_client.close()
+                except Exception:
+                    pass
+        try:
+            run_client.close()
+        except Exception:
+            pass
 
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
         """检查响应类型，如果是 HTML 则保存为文件，否则返回 JSON 数据
@@ -2865,10 +3195,17 @@ class CheckIn:
                             if api_user:
                                 print(f"✅ {self.account_name}: Got api_user from callback: {api_user}")
 
-                                # 提取 cookies
-                                user_cookies = {}
-                                for cookie in response.cookies.jar:
-                                    user_cookies[cookie.name] = cookie.value
+                                # 提取 cookies：使用 client 当前 cookie jar（包含回调前已有的 cf_clearance 等），
+                                # 避免只拿到 response.set-cookie 的子集导致后续 /api/user/self 401/重定向。
+                                try:
+                                    user_cookies = dict(client.cookies)
+                                except Exception:
+                                    user_cookies = {}
+                                    try:
+                                        for cookie in client.cookies.jar:
+                                            user_cookies[cookie.name] = cookie.value
+                                    except Exception:
+                                        pass
 
                                 print(
                                     f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} user cookies: "
