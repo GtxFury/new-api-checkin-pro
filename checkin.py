@@ -599,142 +599,120 @@ class CheckIn:
         return all_codes, f"转盘已尝试 {attempted}/{spins} 次"
 
     async def _runanytime_get_balance_from_app_me(self, page, api_user: str | int | None = None) -> dict | None:
+        """获取 runanytime/new-api 的余额与消耗。
+
+        经验结论（MCP 实测）：
+        - `/console` 的 `document.body.innerText` 结构稳定：`当前余额\\n🏃‍♂️369.59`、`历史消耗\\n🏃‍♂️26.75`
+        - `/console/topup` 初次渲染可能是 `🏃‍♂️NaN`，不适合作为首选解析入口
+        - `/api/user/self` 需要携带正确的 `new-api-user`（登录用户 id），速度快且最稳定
+        """
+        origin = (self.provider_config.origin or "").rstrip("/")
+        if not origin:
+            return None
+
+        def _parse_amount(text: str) -> float | None:
+            if not text:
+                return None
+            t = text.replace("￥", "").replace("$", "").replace(",", "").strip()
+            t = re.sub(r"[^0-9.\\-]", "", t)
+            try:
+                return float(t)
+            except Exception:
+                return None
+
+        def _mk_result(quota: float, used_quota: float) -> dict:
+            q = round(float(quota), 2)
+            u = round(float(used_quota), 2)
+            return {
+                "success": True,
+                "quota": q,
+                "used_quota": u,
+                "display": f"Current balance: 🏃‍♂️{q:.2f}, Used: 🏃‍♂️{u:.2f}",
+            }
+
+        # 先打开 /console 确保同源（否则 fetch 可能被 CORS 拦截），且该页面可作为 UI 兜底解析来源。
         try:
-            # runanytime/new-api 新版控制台将额度信息展示在 /console（/app/me 可能不存在或被 CF 拦截）。
-            # 但 SPA 有时会先渲染 NaN/占位，需等待真实数值出现；若 /console 失败则回退到 /console/topup。
-            for path in ("/console", "/console/topup"):
-                target_url = f"{self.provider_config.origin}{path}"
-                await page.goto(target_url, wait_until="networkidle")
-                await self._maybe_solve_cloudflare_interstitial(page)
-                await page.wait_for_timeout(800)
-
-                # 优先用 API 获取余额（比解析页面稳定），需要 api_user 作为 header
-                if api_user is not None:
-                    try:
-                        header_keys = self._get_api_user_header_keys()
-                        api_headers = {k: str(api_user) for k in header_keys}
-                        api_headers.setdefault("Accept", "application/json, text/plain, */*")
-                        api_headers.setdefault("Content-Type", "application/json")
-
-                        api_result = await page.evaluate(
-                            """async ({ url, headers }) => {
-                                try {
-                                    const r = await fetch(url, { credentials: 'include', headers });
-                                    const t = await r.text();
-                                    return { ok: r.ok, status: r.status, text: t };
-                                } catch (e) {
-                                    return { ok: false, status: 0, text: String(e) };
-                                }
-                            }""",
-                            {
-                                "url": f"{self.provider_config.origin}/api/user/self",
-                                "headers": api_headers,
-                            },
-                        )
-
-                        status = (api_result or {}).get("status", 0)
-                        text = (api_result or {}).get("text", "") or ""
-                        if status == 200 and text:
-                            data = json.loads(text)
-                            if isinstance(data, dict) and data.get("success"):
-                                user_data = data.get("data", {}) or {}
-                                quota = round(float(user_data.get("quota", 0)) / 500000, 2)
-                                used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
-                                return {
-                                    "success": True,
-                                    "quota": quota,
-                                    "used_quota": used_quota,
-                                    "display": f"Current balance: 🏃‍♂️{quota}, Used: 🏃‍♂️{used_quota}",
-                                }
-                    except Exception:
-                        pass
-
-                try:
-                    await page.wait_for_function(
-                        """() => {
-                            const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                            if (!t.includes('当前余额')) return false;
-                            if (t.includes('NaN')) return false;
-                            return /\\d/.test(t);
-                        }""",
-                        timeout=8000,
-                    )
-                except Exception:
-                    pass
-
-                # 优先按 DOM 结构提取：很多页面是 “数值在上、标签在下” 或反之，parentElement 通常只包含这一项
-                def _parse_amount(s: str) -> float:
-                    s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
-                    s = re.sub(r"[^0-9.\\-]", "", s)
-                    try:
-                        return float(s)
-                    except Exception:
-                        return 0.0
-
-                extracted = await page.evaluate(
-                    """() => {
-                        function findValue(label) {
-                            const nodes = Array.from(document.querySelectorAll('*'));
-                            const el = nodes.find(n => {
-                                const t = (n.innerText || '').trim();
-                                return t === label || t.includes(label);
-                            });
-                            if (!el) return null;
-                            const p = el.parentElement;
-                            const text = p ? (p.innerText || '') : (el.innerText || '');
-                            return (text || '').trim();
-                        }
-
-                        return {
-                            balance: findValue('当前余额'),
-                            used: findValue('历史消耗'),
-                        };
-                    }"""
-                )
-
-                balance_text = (extracted or {}).get("balance") if isinstance(extracted, dict) else None
-                used_text = (extracted or {}).get("used") if isinstance(extracted, dict) else None
-
-                # 回退：用整页文本匹配（允许同一行或换行）
-                body_text = await page.evaluate(
-                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
-                )
-
-                def _match_amount_from_text(label: str) -> str | None:
-                    if not body_text:
-                        return None
-                    m = re.search(rf"{re.escape(label)}\\s*[:：]?\\s*(?:\\n\\s*)?([^\\n\\r]{{1,40}})", body_text)
-                    if not m:
-                        return None
-                    return m.group(1).strip()
-
-                balance_str = _match_amount_from_text("当前余额")
-                used_str = _match_amount_from_text("历史消耗")
-
-                # 如果 DOM 提取到的文本里包含数值，优先用它
-                if balance_text and re.search(r"\\d", balance_text):
-                    balance_str = balance_str or balance_text
-                if used_text and re.search(r"\\d", used_text):
-                    used_str = used_str or used_text
-
-                if not balance_str or not re.search(r"\\d", balance_str):
-                    continue
-                if not used_str or not re.search(r"\\d", used_str):
-                    used_str = "0"
-
-                quota = _parse_amount(balance_str)
-                used_quota = _parse_amount(used_str)
-                return {
-                    "success": True,
-                    "quota": quota,
-                    "used_quota": used_quota,
-                    "display": f"Current balance: 🏃‍♂️{quota}, Used: 🏃‍♂️{used_quota}",
-                }
-
-            return None
-
+            await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+            await self._maybe_solve_cloudflare_interstitial(page)
         except Exception:
+            pass
+
+        # 1) 优先：直接调 API 获取（不依赖 localStorage/hydration，速度最快且最稳定）
+        if api_user is not None:
+            try:
+                header_keys = self._get_api_user_header_keys()
+                api_headers = {k: str(api_user) for k in header_keys}
+                api_headers.setdefault("Accept", "application/json, text/plain, */*")
+
+                api_result = await page.evaluate(
+                    """async ({ headers }) => {
+                        try {
+                            const r = await fetch('/api/user/self', { credentials: 'include', headers });
+                            const t = await r.text();
+                            return { status: r.status, text: t };
+                        } catch (e) {
+                            return { status: 0, text: String(e) };
+                        }
+                    }""",
+                    {"headers": api_headers},
+                )
+
+                status = (api_result or {}).get("status", 0)
+                text = (api_result or {}).get("text", "") or ""
+                if status == 200 and text:
+                    data = json.loads(text)
+                    if isinstance(data, dict) and data.get("success"):
+                        user_data = data.get("data", {}) or {}
+                        quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+                        used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+                        return _mk_result(quota, used_quota)
+                if status and status != 200:
+                    # 记录一条轻量日志，方便定位 header 不匹配 / session 丢失等问题
+                    msg = text[:200].replace("\n", " ")
+                    print(f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {status}: {msg}")
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: runanytime /api/user/self fetch error: {e}")
+
+        # 2) 兜底：解析 /console 的文本（不走 /console/topup，避免 NaN 占位导致误判）
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                    if (!t.includes('当前余额')) return false;
+                    const m = t.match(/当前余额\\s*\\n\\s*([^\\n\\r]+)/);
+                    return !!(m && m[1] && /\\d/.test(m[1]));
+                }""",
+                timeout=8000,
+            )
+        except Exception:
+            pass
+
+        try:
+            body_text = await page.evaluate(
+                "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+            )
+        except Exception:
+            body_text = ""
+
+        if not body_text:
             return None
+
+        balance_line = None
+        used_line = None
+        m1 = re.search(r"当前余额\\s*\\n\\s*([^\\n\\r]+)", body_text)
+        if m1:
+            balance_line = m1.group(1).strip()
+        m2 = re.search(r"历史消耗\\s*\\n\\s*([^\\n\\r]+)", body_text)
+        if m2:
+            used_line = m2.group(1).strip()
+
+        quota = _parse_amount(balance_line or "")
+        used_quota = _parse_amount(used_line or "")
+        if quota is None:
+            return None
+        if used_quota is None:
+            used_quota = 0.0
+        return _mk_result(quota, used_quota)
 
     async def _runanytime_redeem_code_via_browser(self, page, code: str) -> tuple[bool, str]:
         await page.goto(f"{self.provider_config.origin}/console/topup", wait_until="networkidle")
@@ -898,12 +876,14 @@ class CheckIn:
 
                 cur_quota = after_quota if isinstance(after_quota, (int, float)) else before_quota
                 cur_used = after_used if isinstance(after_used, (int, float)) else before_used
+                if not isinstance(cur_used, (int, float)):
+                    cur_used = 0.0
 
                 summary = (
                     f"RunAnytime 兑换 {success_redeem}/{len(codes)} 个 | "
                     f"fuli: {checkin_msg}, {wheel_msg} | "
-                    f"余额: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)} | "
-                    f"当前: {_fmt_quota(cur_quota)} | 消耗: {_fmt_quota(cur_used)}"
+                    f"当前余额: {_fmt_quota(cur_quota)} | 历史消耗: {_fmt_quota(cur_used)} | "
+                    f"变动: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
                 )
 
                 base_info = None
@@ -938,6 +918,11 @@ class CheckIn:
                         "redeem_results": redeem_results,
                     }
                 )
+                # 通知/余额 hash 依赖 quota/used_quota，保证写入“当前值”（即使 before/after 有缺失）
+                if isinstance(cur_quota, (int, float)):
+                    user_info["quota"] = float(cur_quota)
+                if isinstance(cur_used, (int, float)):
+                    user_info["used_quota"] = float(cur_used)
 
                 if not overall_success:
                     return False, user_info
