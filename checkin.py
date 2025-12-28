@@ -276,6 +276,21 @@ class CheckIn:
                         }
                     } catch (e) {}
 
+                    // 重点兼容：转盘弹窗里兑换码经常在 <p class="font-mono ..."> 或纯文本块中展示
+                    try {
+                        const dialogs = Array.from(document.querySelectorAll('div'));
+                        const dialog = dialogs.find(d => {
+                            const t = (d.innerText || '').trim();
+                            return t.includes('兑换码') && (t.includes('复制兑换码') || t.includes('复制') || t.includes('关闭'));
+                        });
+                        if (dialog) {
+                            const mono = dialog.querySelector('p.font-mono') || dialog.querySelector('[class*=\"font-mono\"]');
+                            if (mono && (mono.innerText || '').trim()) parts.push((mono.innerText || '').trim());
+                            const t = (dialog.innerText || '').trim();
+                            if (t) parts.push(t);
+                        }
+                    } catch (e) {}
+
                     return parts.join('\\n');
                 }"""
             )
@@ -427,11 +442,37 @@ class CheckIn:
         await self._maybe_solve_cloudflare_interstitial(page)
         print(f"ℹ️ {self.account_name}: fuli wheel page opened (url={page.url})")
 
-        body_text = ""
+        def _parse_remaining(text: str) -> tuple[int, int] | None:
+            if not text:
+                return None
+            matches = re.findall(r"今日剩余\\s*(\\d+)\\s*/\\s*(\\d+)\\s*次", text)
+            if not matches:
+                return None
+            pairs: list[tuple[int, int]] = []
+            for r, t in matches:
+                try:
+                    pairs.append((int(r), int(t)))
+                except Exception:
+                    continue
+            if not pairs:
+                return None
+            # 页面 hydration 前可能出现占位的 0/0，优先选择 total 最大的一组（通常是 /3）
+            return max(pairs, key=lambda x: (x[1], x[0]))
+
+        # 转盘页是 SPA，会先渲染“0/0 + 次数已用完”占位，稍后才更新为真实的“x/3 + 开始抽奖”
+        # 这里先等到 total != 0（或至少出现开始按钮），避免误判“没有次数”。
         try:
-            body_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
+            await page.wait_for_function(
+                """() => {
+                    const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                    const m = t.match(/今日剩余\\s*(\\d+)\\s*\\/\\s*(\\d+)\\s*次/);
+                    if (m && m[2] && m[2] !== '0') return true;
+                    return t.includes('开始抽奖') || t.includes('次数已用完');
+                }""",
+                timeout=8000,
+            )
         except Exception:
-            body_text = ""
+            pass
 
         remaining = None
         try:
@@ -441,11 +482,11 @@ class CheckIn:
                     return el ? (el.innerText || '') : '';
                 }"""
             )
+            body_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
             info_text = info_text or body_text
-            # 兼容：0/3 次、0 / 3次、今日剩余0/3次 等
-            m = re.search(r"今日剩余\\s*(\\d+)\\s*/\\s*(\\d+)\\s*次", info_text or "")
-            if m:
-                remaining = int(m.group(1))
+            parsed = _parse_remaining(info_text or "")
+            if parsed:
+                remaining = parsed[0]
         except Exception:
             remaining = None
 
@@ -458,6 +499,12 @@ class CheckIn:
         attempted = 0
         for i in range(spins):
             try:
+                # 每次循环刷新一次页面文本（次数会变化，且占位渲染可能在第一次读取时未更新）
+                try:
+                    body_text = await page.evaluate("() => document.body ? (document.body.innerText || '') : ''")
+                except Exception:
+                    body_text = ""
+
                 # 保险：如果上一次弹窗还没关，先尝试关闭，避免挡住下一次按钮点击
                 try:
                     close_btn = await page.query_selector('button:has-text("关闭")')
@@ -486,14 +533,26 @@ class CheckIn:
 
                 if not btn:
                     # 如果页面明确提示次数用完，直接按幂等成功处理
-                    if "次数已用完" in (body_text or "") or "今日剩余 0 / 3 次" in (body_text or ""):
+                    if "次数已用完" in (body_text or ""):
+                        return all_codes, "次数已用完"
+                    parsed_now = _parse_remaining(body_text or "")
+                    if parsed_now and parsed_now[0] <= 0:
                         return all_codes, "次数已用完"
 
                     await self._take_screenshot(page, "fuli_wheel_button_not_found")
                     return all_codes, "未找到转盘按钮"
 
+                # 抽奖前再抓一次（避免隐藏元素/历史记录造成误判）
                 before_codes = set(await self._extract_exchange_codes_from_page(page))
-                await btn.click()
+
+                try:
+                    await btn.click()
+                except Exception:
+                    # 有时按钮在 overlay 下无法 click，退化为坐标点击
+                    box = await btn.bounding_box()
+                    if not box:
+                        raise
+                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 attempted += 1
 
                 # 等待开奖结果弹窗出现（或轮盘动画结束），兑换码可能在 input.value 中
@@ -519,6 +578,12 @@ class CheckIn:
                             break
                 except Exception:
                     pass
+
+                # 关闭弹窗后等待剩余次数文本更新，避免下一次循环拿到旧状态
+                try:
+                    await page.wait_for_timeout(800)
+                except Exception:
+                    pass
             except Exception:
                 await self._take_screenshot(page, f"fuli_wheel_error_{i+1}")
                 # 异常时也尝试把弹窗里的兑换码捞出来，避免“抽到了但没记到”
@@ -535,51 +600,97 @@ class CheckIn:
 
     async def _runanytime_get_balance_from_app_me(self, page) -> dict | None:
         try:
-            # runanytime/new-api 新版控制台将额度信息展示在 /console 首页（/app/me 可能不存在或被 CF 拦截）
-            target_url = f"{self.provider_config.origin}/console"
-            await page.goto(target_url, wait_until="networkidle")
-            await page.wait_for_timeout(1000)
+            # runanytime/new-api 新版控制台将额度信息展示在 /console（/app/me 可能不存在或被 CF 拦截）。
+            # 但 SPA 有时会先渲染 NaN/占位，需等待真实数值出现；若 /console 失败则回退到 /console/topup。
+            for path in ("/console", "/console/topup"):
+                target_url = f"{self.provider_config.origin}{path}"
+                await page.goto(target_url, wait_until="networkidle")
+                await page.wait_for_timeout(800)
 
-            body_text = await page.evaluate(
-                "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
-            )
-            if not body_text:
-                return None
-
-            # 示例：
-            # 当前余额\n🏃‍♂️349.59
-            # 历史消耗\n🏃‍♂️26.75
-            def _match_amount(label: str) -> str | None:
-                m = re.search(rf"{re.escape(label)}\\s*\\n\\s*([^\\n]+)", body_text)
-                if not m:
-                    return None
-                return m.group(1).strip()
-
-            balance_str = _match_amount("当前余额")
-            used_str = _match_amount("历史消耗")
-
-            if balance_str is None:
-                return None
-            if used_str is None:
-                used_str = "0"
-
-            def _parse_amount(s: str) -> float:
-                # 去掉货币符号/自定义符号（如 🏃‍♂️）、逗号等，仅保留数字/小数点/负号
-                s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
-                s = re.sub(r"[^0-9.\\-]", "", s)
                 try:
-                    return float(s)
+                    await page.wait_for_function(
+                        """() => {
+                            const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                            if (!t.includes('当前余额')) return false;
+                            if (t.includes('NaN')) return false;
+                            return /\\d/.test(t);
+                        }""",
+                        timeout=8000,
+                    )
                 except Exception:
-                    return 0.0
+                    pass
 
-            quota = _parse_amount(balance_str)
-            used_quota = _parse_amount(used_str)
-            return {
-                "success": True,
-                "quota": quota,
-                "used_quota": used_quota,
-                "display": f"Current balance: ${quota}, Used: ${used_quota}",
-            }
+                # 优先按 DOM 结构提取：很多页面是 “数值在上、标签在下” 或反之，parentElement 通常只包含这一项
+                def _parse_amount(s: str) -> float:
+                    s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
+                    s = re.sub(r"[^0-9.\\-]", "", s)
+                    try:
+                        return float(s)
+                    except Exception:
+                        return 0.0
+
+                extracted = await page.evaluate(
+                    """() => {
+                        function findValue(label) {
+                            const nodes = Array.from(document.querySelectorAll('*'));
+                            const el = nodes.find(n => {
+                                const t = (n.innerText || '').trim();
+                                return t === label || t.includes(label);
+                            });
+                            if (!el) return null;
+                            const p = el.parentElement;
+                            const text = p ? (p.innerText || '') : (el.innerText || '');
+                            return (text || '').trim();
+                        }
+
+                        return {
+                            balance: findValue('当前余额'),
+                            used: findValue('历史消耗'),
+                        };
+                    }"""
+                )
+
+                balance_text = (extracted or {}).get("balance") if isinstance(extracted, dict) else None
+                used_text = (extracted or {}).get("used") if isinstance(extracted, dict) else None
+
+                # 回退：用整页文本匹配（允许同一行或换行）
+                body_text = await page.evaluate(
+                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                )
+
+                def _match_amount_from_text(label: str) -> str | None:
+                    if not body_text:
+                        return None
+                    m = re.search(rf"{re.escape(label)}\\s*[:：]?\\s*(?:\\n\\s*)?([^\\n\\r]{{1,40}})", body_text)
+                    if not m:
+                        return None
+                    return m.group(1).strip()
+
+                balance_str = _match_amount_from_text("当前余额")
+                used_str = _match_amount_from_text("历史消耗")
+
+                # 如果 DOM 提取到的文本里包含数值，优先用它
+                if balance_text and re.search(r"\\d", balance_text):
+                    balance_str = balance_str or balance_text
+                if used_text and re.search(r"\\d", used_text):
+                    used_str = used_str or used_text
+
+                if not balance_str or not re.search(r"\\d", balance_str):
+                    continue
+                if not used_str or not re.search(r"\\d", used_str):
+                    used_str = "0"
+
+                quota = _parse_amount(balance_str)
+                used_quota = _parse_amount(used_str)
+                return {
+                    "success": True,
+                    "quota": quota,
+                    "used_quota": used_quota,
+                    "display": f"Current balance: {quota}, Used: {used_quota}",
+                }
+
+            return None
+
         except Exception:
             return None
 
@@ -719,6 +830,9 @@ class CheckIn:
                 if checkin_code:
                     codes.append(checkin_code)
                 codes.extend(wheel_codes)
+                if codes:
+                    masked = [f"{c[:6]}...{c[-4:]}" if len(c) > 12 else c for c in codes]
+                    print(f"ℹ️ {self.account_name}: fuli codes collected: {masked}")
 
                 redeem_results = []
                 success_redeem = 0
