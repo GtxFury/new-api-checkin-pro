@@ -441,8 +441,11 @@ class CheckIn:
         try:
             login_btn = None
             for sel in [
+                'button:has-text("使用 LinuxDO 继续")',
+                'button:has-text("使用 LinuxDO")',
                 'button:has-text("使用 Linux Do 登录")',
                 'button:has-text("Linux Do")',
+                'button:has-text("LinuxDO")',
                 'a:has-text("Linux Do")',
                 'a:has-text("使用 Linux Do 登录")',
                 'a[href*="linuxdo" i]',
@@ -516,6 +519,36 @@ class CheckIn:
         # 4) 回到 runanytime：如果落在前端 `/oauth/linuxdo?code=...`，补打一遍后端回调
         try:
             await page.wait_for_url(f"**{origin}/**", timeout=30000)
+        except Exception:
+            pass
+
+    async def _seed_runanytime_local_storage_user(self, page, api_user: str | int) -> None:
+        """为 runanytime/new-api 写入 localStorage.user。
+
+        MCP 实测：当 localStorage 缺少 `user` 时，访问 `/console` 会直接跳到 `/login`；
+        UI 也依赖 `user.id` 来拼接 `new-api-user` 请求头，否则余额会长期停留在 NaN。
+        """
+        try:
+            await page.evaluate(
+                """(apiUser) => {
+                    try {
+                        const key = 'user';
+                        const cur = localStorage.getItem(key);
+                        if (cur) return;
+                        const id = typeof apiUser === 'string' ? parseInt(apiUser, 10) : apiUser;
+                        const user = {
+                            id: id,
+                            username: `linuxdo_${id}`,
+                            role: 1,
+                            status: 1,
+                            group: 'default',
+                            display_name: 'None',
+                        };
+                        localStorage.setItem(key, JSON.stringify(user));
+                    } catch (e) {}
+                }""",
+                str(api_user),
+            )
         except Exception:
             pass
 
@@ -813,6 +846,14 @@ class CheckIn:
             except Exception:
                 continue
 
+            # 如果被重定向到登录页，说明 localStorage/user 或 session 失效
+            try:
+                if "/login" in (page.url or ""):
+                    await self._take_screenshot(page, "runanytime_balance_redirected_to_login")
+                    continue
+            except Exception:
+                pass
+
             # 等待 SPA 渲染出数值（topup 页可能先 NaN）
             try:
                 await page.wait_for_function(
@@ -986,6 +1027,8 @@ class CheckIn:
             try:
                 # 先确保 runanytime 登录，否则余额/兑换接口会 401（未登录且未提供 access token）
                 await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
+                # 注入 cookie 的新上下文没有 localStorage.user，会导致 /console 直接跳 /login 或余额 NaN
+                await self._seed_runanytime_local_storage_user(page, api_user)
                 before_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
 
                 await self._ensure_fuli_logged_in(page, linuxdo_username, linuxdo_password)
@@ -1010,6 +1053,7 @@ class CheckIn:
                 for code in codes:
                     # 兑换前再确保一次 runanytime 已登录（避免中途跳转到 fuli 导致 session 失效）
                     await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
+                    await self._seed_runanytime_local_storage_user(page, api_user)
                     ok, msg = await self._runanytime_redeem_code_via_browser(page, code)
                     redeem_results.append({"code": code, "success": ok, "message": msg})
                     if ok:
