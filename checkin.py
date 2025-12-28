@@ -388,6 +388,37 @@ class CheckIn:
         if not origin:
             return
 
+        async def _looks_like_login_page() -> bool:
+            try:
+                if "/login" in (page.url or ""):
+                    return True
+            except Exception:
+                pass
+            try:
+                t = await page.evaluate(
+                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                )
+            except Exception:
+                t = ""
+            if "登 录" in (t or "") and "使用 LinuxDO" in (t or ""):
+                return True
+            return False
+
+        async def _has_balance_numbers() -> bool:
+            try:
+                t = await page.evaluate(
+                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                )
+            except Exception:
+                t = ""
+            if not t or "当前余额" not in t or "历史消耗" not in t:
+                return False
+            if "NaN" in t:
+                return False
+            # “当前余额”附近必须出现数字
+            m = re.search(r"当前余额[\\s\\S]{0,60}(\\d)", t)
+            return bool(m)
+
         async def _is_logged_in() -> bool:
             try:
                 t = await page.evaluate(
@@ -395,7 +426,13 @@ class CheckIn:
                 )
             except Exception:
                 t = ""
+            # 明确的过期/未登录提示
+            if "未登录或登录已过期" in (t or "") or "expired=true" in (page.url or ""):
+                return False
+            if await _looks_like_login_page():
+                return False
             if "当前余额" in (t or "") and "历史消耗" in (t or ""):
+                # 允许短暂 NaN（加载中），但如果一直 NaN 会在后续再次校验触发登录流程
                 return True
             return False
 
@@ -406,8 +443,27 @@ class CheckIn:
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
             if await _is_logged_in():
-                print(f"ℹ️ {self.account_name}: runanytime already logged in (url={page.url})")
-                return
+                # 已登录不等于余额可用：runanytime 会先渲染 NaN，必须等到出现数字才算“可用态”
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                            if (!t.includes('当前余额') || !t.includes('历史消耗')) return false;
+                            if (t.includes('NaN')) return false;
+                            return /当前余额[\\s\\S]{0,60}\\d/.test(t);
+                        }""",
+                        timeout=8000,
+                    )
+                except Exception:
+                    pass
+
+                if await _has_balance_numbers():
+                    print(f"ℹ️ {self.account_name}: runanytime session ok (url={page.url})")
+                    return
+
+                print(
+                    f"⚠️ {self.account_name}: runanytime appears logged in but balance stuck (NaN/empty), will re-login (url={page.url})"
+                )
             if "/login" not in (page.url or "") and page.url.startswith(origin):
                 # 某些情况下首页/控制台会懒加载，给一点时间
                 try:
@@ -421,8 +477,20 @@ class CheckIn:
                 except Exception:
                     pass
                 if await _is_logged_in():
-                    print(f"ℹ️ {self.account_name}: runanytime logged in after short wait (url={page.url})")
-                    return
+                    try:
+                        await page.wait_for_function(
+                            """() => {
+                                const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                                if (t.includes('NaN')) return false;
+                                return /当前余额[\\s\\S]{0,60}\\d/.test(t);
+                            }""",
+                            timeout=6000,
+                        )
+                    except Exception:
+                        pass
+                    if await _has_balance_numbers():
+                        print(f"ℹ️ {self.account_name}: runanytime session ok after short wait (url={page.url})")
+                        return
         except Exception:
             pass
 
@@ -573,7 +641,20 @@ class CheckIn:
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
-            if await _is_logged_in():
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                        if (!t.includes('当前余额')) return false;
+                        if (t.includes('NaN')) return false;
+                        return /当前余额[\\s\\S]{0,60}\\d/.test(t);
+                    }""",
+                    timeout=12000,
+                )
+            except Exception:
+                pass
+
+            if await _has_balance_numbers():
                 print(f"ℹ️ {self.account_name}: runanytime login finished (url={page.url})")
                 return
             print(f"⚠️ {self.account_name}: runanytime login not confirmed (url={page.url})")
@@ -838,7 +919,8 @@ class CheckIn:
                 "display": f"Current balance: 🏃‍♂️{q:.2f}, Used: 🏃‍♂️{u:.2f}",
             }
 
-        for path, timeout_ms in (("/console", 8000), ("/console/topup", 10000)):
+        # runanytime 控制台是 SPA：首次加载经常先渲染 NaN，再异步拉取用户信息，适当放宽等待时间
+        for path, timeout_ms in (("/console", 20000), ("/console/topup", 25000)):
             try:
                 await page.goto(f"{origin}{path}", wait_until="domcontentloaded")
                 await self._maybe_solve_cloudflare_interstitial(page)
@@ -869,30 +951,71 @@ class CheckIn:
             except Exception:
                 pass
 
+            extracted = None
             try:
-                body_text = await page.evaluate(
-                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                extracted = await page.evaluate(
+                    """() => {
+                        const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+
+                        function pickByLabel(label) {
+                            const nodes = Array.from(document.querySelectorAll('*'));
+                            // 先找“文本精确等于 label”的节点，优先取其父容器里的金额
+                            const exact = nodes.find(n => ((n.innerText || '').trim() === label));
+                            if (exact && exact.parentElement) {
+                                const t = (exact.parentElement.innerText || '').trim();
+                                if (t.includes('🏃‍♂️') || t.includes('$') || t.includes('￥')) return t;
+                            }
+                            // 再找包含 label 且包含货币符号的最短块（通常就是卡片）
+                            const candidates = nodes
+                                .map(n => (n.innerText || '').trim())
+                                .filter(t => t && t.includes(label) && (t.includes('🏃‍♂️') || t.includes('$') || t.includes('￥')))
+                                .sort((a, b) => a.length - b.length);
+                            return candidates[0] || null;
+                        }
+
+                        return {
+                            url: location.href,
+                            bodyText,
+                            balanceBlock: pickByLabel('当前余额'),
+                            usedBlock: pickByLabel('历史消耗'),
+                        };
+                    }"""
                 )
             except Exception:
-                body_text = ""
+                extracted = None
+
+            body_text = ""
+            balance_block = ""
+            used_block = ""
+            if isinstance(extracted, dict):
+                body_text = extracted.get("bodyText") or ""
+                balance_block = extracted.get("balanceBlock") or ""
+                used_block = extracted.get("usedBlock") or ""
             if not body_text:
                 continue
 
-            balance_line = None
-            used_line = None
+            def _extract_amount_from_block(label: str, block: str) -> str | None:
+                if not block:
+                    return None
+                # 1) 优先取 label 后紧跟的金额（同一块里可能有多个 🏃‍♂️）
+                m = re.search(rf"{re.escape(label)}\\s*[\\n\\r\\t ]+([\\s\\S]{{0,40}})", block)
+                if m and m.group(1):
+                    seg = m.group(1)
+                    m2 = re.search(r"(🏃‍♂️\\s*[-0-9.,]+|\\$\\s*[-0-9.,]+|￥\\s*[-0-9.,]+)", seg)
+                    if m2:
+                        return m2.group(1).strip()
+                # 2) 兜底：取块内第一个金额
+                m3 = re.search(r"(🏃‍♂️\\s*[-0-9.,]+|\\$\\s*[-0-9.,]+|￥\\s*[-0-9.,]+)", block)
+                if m3:
+                    return m3.group(1).strip()
+                return None
 
-            # 兼容“下一行是数值”以及“同一行包含数值”的两种布局
-            m1 = re.search(r"当前余额\\s*\\n\\s*([^\\n\\r]+)", body_text)
-            if not m1:
-                m1 = re.search(r"当前余额\\s*[:：]?\\s*([^\\n\\r]+)", body_text)
-            if m1:
-                balance_line = m1.group(1).strip()
-
-            m2 = re.search(r"历史消耗\\s*\\n\\s*([^\\n\\r]+)", body_text)
-            if not m2:
-                m2 = re.search(r"历史消耗\\s*[:：]?\\s*([^\\n\\r]+)", body_text)
-            if m2:
-                used_line = m2.group(1).strip()
+            balance_line = _extract_amount_from_block("当前余额", balance_block) or _extract_amount_from_block(
+                "当前余额", body_text
+            )
+            used_line = _extract_amount_from_block("历史消耗", used_block) or _extract_amount_from_block(
+                "历史消耗", body_text
+            )
 
             quota = _parse_amount(balance_line or "")
             used_quota = _parse_amount(used_line or "")
@@ -1023,17 +1146,21 @@ class CheckIn:
             except Exception:
                 pass
 
-            page = await context.new_page()
+            # 关键：用同一个 context 开两个 page
+            # - runanytime_page 常驻：读余额/兑换，避免来回跳转导致 SPA 状态/本地存储丢失
+            # - fuli_page 专职：签到/转盘
+            runanytime_page = await context.new_page()
+            fuli_page = await context.new_page()
             try:
                 # 先确保 runanytime 登录，否则余额/兑换接口会 401（未登录且未提供 access token）
-                await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
+                await self._ensure_runanytime_logged_in(runanytime_page, linuxdo_username, linuxdo_password)
                 # 注入 cookie 的新上下文没有 localStorage.user，会导致 /console 直接跳 /login 或余额 NaN
-                await self._seed_runanytime_local_storage_user(page, api_user)
-                before_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
+                await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
+                before_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
 
-                await self._ensure_fuli_logged_in(page, linuxdo_username, linuxdo_password)
-                checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(page)
-                wheel_codes, wheel_msg = await self._fuli_wheel_get_codes(page, max_times=3)
+                await self._ensure_fuli_logged_in(fuli_page, linuxdo_username, linuxdo_password)
+                checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(fuli_page)
+                wheel_codes, wheel_msg = await self._fuli_wheel_get_codes(fuli_page, max_times=3)
 
                 print(
                     f"ℹ️ {self.account_name}: fuli check-in: {checkin_msg}, wheel: {wheel_msg}, "
@@ -1051,15 +1178,15 @@ class CheckIn:
                 redeem_results = []
                 success_redeem = 0
                 for code in codes:
-                    # 兑换前再确保一次 runanytime 已登录（避免中途跳转到 fuli 导致 session 失效）
-                    await self._ensure_runanytime_logged_in(page, linuxdo_username, linuxdo_password)
-                    await self._seed_runanytime_local_storage_user(page, api_user)
-                    ok, msg = await self._runanytime_redeem_code_via_browser(page, code)
+                    # 兑换前再确保一次 runanytime 已登录（但这次不会因跳转到 fuli 而丢 page 状态）
+                    await self._ensure_runanytime_logged_in(runanytime_page, linuxdo_username, linuxdo_password)
+                    await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
+                    ok, msg = await self._runanytime_redeem_code_via_browser(runanytime_page, code)
                     redeem_results.append({"code": code, "success": ok, "message": msg})
                     if ok:
                         success_redeem += 1
 
-                after_info = await self._runanytime_get_balance_from_app_me(page, api_user=api_user)
+                after_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
@@ -1125,10 +1252,24 @@ class CheckIn:
                     return False, user_info
                 return True, user_info
             except Exception as e:
-                await self._take_screenshot(page, "runanytime_fuli_flow_error")
+                try:
+                    await self._take_screenshot(runanytime_page, "runanytime_fuli_flow_error_runanytime")
+                except Exception:
+                    pass
+                try:
+                    await self._take_screenshot(fuli_page, "runanytime_fuli_flow_error_fuli")
+                except Exception:
+                    pass
                 return False, {"error": f"runanytime fuli/topup flow error: {e}"}
             finally:
-                await page.close()
+                try:
+                    await runanytime_page.close()
+                except Exception:
+                    pass
+                try:
+                    await fuli_page.close()
+                except Exception:
+                    pass
                 await context.close()
 
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
