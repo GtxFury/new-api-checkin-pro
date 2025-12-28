@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs, quote
 import httpx
 from camoufox.async_api import AsyncCamoufox
 from utils.config import AccountConfig, ProviderConfig
-from utils.browser_utils import parse_cookies, get_random_user_agent, filter_cookies
+from utils.browser_utils import parse_cookies, get_random_user_agent
 
 # 复用 LinuxDoSignIn 中的 playwright-captcha 解决方案（如果可用）
 try:  # pragma: no cover - 仅在存在 playwright-captcha 时生效
@@ -373,11 +373,35 @@ class CheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: fuli 登录流程可能未完全成功: {e}")
 
+    async def _runanytime_fetch_user_self_raw(self, page, api_user: str | int) -> dict:
+        """在浏览器同源上下文里 fetch /api/user/self，返回 {status,text}。"""
+        try:
+            headers = {k: str(api_user) for k in self._get_api_user_header_keys()}
+            headers.setdefault("Accept", "application/json, text/plain, */*")
+            resp = await page.evaluate(
+                """async ({ headers }) => {
+                    try {
+                        const r = await fetch('/api/user/self', { credentials: 'include', headers });
+                        const t = await r.text();
+                        return { status: r.status, text: t };
+                    } catch (e) {
+                        return { status: 0, text: String(e) };
+                    }
+                }""",
+                {"headers": headers},
+            )
+            if isinstance(resp, dict):
+                return resp
+            return {"status": 0, "text": str(resp)}
+        except Exception as e:
+            return {"status": 0, "text": str(e)}
+
     async def _ensure_runanytime_logged_in(
         self,
         page,
         linuxdo_username: str,
         linuxdo_password: str,
+        api_user: str | int | None = None,
     ) -> None:
         """确保 runanytime 已登录（否则余额/API 会 401）。
 
@@ -404,21 +428,6 @@ class CheckIn:
                 return True
             return False
 
-        async def _has_balance_numbers() -> bool:
-            try:
-                t = await page.evaluate(
-                    "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
-                )
-            except Exception:
-                t = ""
-            if not t or "当前余额" not in t or "历史消耗" not in t:
-                return False
-            if "NaN" in t:
-                return False
-            # “当前余额”附近必须出现数字
-            m = re.search(r"当前余额[\\s\\S]{0,60}(\\d)", t)
-            return bool(m)
-
         async def _is_logged_in() -> bool:
             try:
                 t = await page.evaluate(
@@ -431,10 +440,8 @@ class CheckIn:
                 return False
             if await _looks_like_login_page():
                 return False
-            if "当前余额" in (t or "") and "历史消耗" in (t or ""):
-                # 允许短暂 NaN（加载中），但如果一直 NaN 会在后续再次校验触发登录流程
-                return True
-            return False
+            # 只要没落到登录页，就先视为“可能已登录”；最终用 /api/user/self（带 new-api-user）确认
+            return True
 
         # 1) 快速探测：如果已登录则直接返回
         try:
@@ -443,27 +450,24 @@ class CheckIn:
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
             if await _is_logged_in():
-                # 已登录不等于余额可用：runanytime 会先渲染 NaN，必须等到出现数字才算“可用态”
-                try:
-                    await page.wait_for_function(
-                        """() => {
-                            const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                            if (!t.includes('当前余额') || !t.includes('历史消耗')) return false;
-                            if (t.includes('NaN')) return false;
-                            return /当前余额[\\s\\S]{0,60}\\d/.test(t);
-                        }""",
-                        timeout=8000,
-                    )
-                except Exception:
-                    pass
-
-                if await _has_balance_numbers():
-                    print(f"ℹ️ {self.account_name}: runanytime session ok (url={page.url})")
+                if api_user is not None:
+                    raw = await self._runanytime_fetch_user_self_raw(page, api_user)
+                    status = int(raw.get("status", 0) or 0)
+                    if status == 200:
+                        print(f"ℹ️ {self.account_name}: runanytime session ok via /api/user/self (url={page.url})")
+                        return
+                    # 401：典型是 session 失效/未登录
+                    if status == 401:
+                        print(
+                            f"⚠️ {self.account_name}: runanytime /api/user/self=401, will re-login (url={page.url})"
+                        )
+                    else:
+                        print(
+                            f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {status}, will try re-login"
+                        )
+                else:
+                    print(f"ℹ️ {self.account_name}: runanytime page accessible (url={page.url})")
                     return
-
-                print(
-                    f"⚠️ {self.account_name}: runanytime appears logged in but balance stuck (NaN/empty), will re-login (url={page.url})"
-                )
             if "/login" not in (page.url or "") and page.url.startswith(origin):
                 # 某些情况下首页/控制台会懒加载，给一点时间
                 try:
@@ -477,20 +481,14 @@ class CheckIn:
                 except Exception:
                     pass
                 if await _is_logged_in():
-                    try:
-                        await page.wait_for_function(
-                            """() => {
-                                const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                                if (t.includes('NaN')) return false;
-                                return /当前余额[\\s\\S]{0,60}\\d/.test(t);
-                            }""",
-                            timeout=6000,
-                        )
-                    except Exception:
-                        pass
-                    if await _has_balance_numbers():
-                        print(f"ℹ️ {self.account_name}: runanytime session ok after short wait (url={page.url})")
-                        return
+                    if api_user is not None:
+                        raw = await self._runanytime_fetch_user_self_raw(page, api_user)
+                        status = int(raw.get("status", 0) or 0)
+                        if status == 200:
+                            print(
+                                f"ℹ️ {self.account_name}: runanytime session ok via /api/user/self after wait (url={page.url})"
+                            )
+                            return
         except Exception:
             pass
 
@@ -641,22 +639,12 @@ class CheckIn:
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
             await self._maybe_solve_cloudflare_interstitial(page)
             await page.wait_for_timeout(600)
-            try:
-                await page.wait_for_function(
-                    """() => {
-                        const t = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                        if (!t.includes('当前余额')) return false;
-                        if (t.includes('NaN')) return false;
-                        return /当前余额[\\s\\S]{0,60}\\d/.test(t);
-                    }""",
-                    timeout=12000,
-                )
-            except Exception:
-                pass
-
-            if await _has_balance_numbers():
-                print(f"ℹ️ {self.account_name}: runanytime login finished (url={page.url})")
-                return
+            if api_user is not None:
+                raw = await self._runanytime_fetch_user_self_raw(page, api_user)
+                status = int(raw.get("status", 0) or 0)
+                if status == 200:
+                    print(f"ℹ️ {self.account_name}: runanytime login finished (api ok, url={page.url})")
+                    return
             print(f"⚠️ {self.account_name}: runanytime login not confirmed (url={page.url})")
             await self._take_screenshot(page, "runanytime_login_not_confirmed")
         except Exception:
@@ -1027,48 +1015,31 @@ class CheckIn:
 
         return None
 
-    async def _runanytime_get_balance_via_httpx(self, cookies: dict, api_user: str | int) -> dict | None:
-        """像 wzw 一样走 /api/user/self 获取余额（优先使用浏览器上下文里导出的 cookie）。"""
-        if not cookies:
+    async def _runanytime_get_balance_via_browser_fetch(self, page, api_user: str | int) -> dict | None:
+        """在 runanytime 页面内用 fetch('/api/user/self') 获取余额（稳定且不依赖 UI 是否 NaN）。"""
+        raw = await self._runanytime_fetch_user_self_raw(page, api_user)
+        status = int(raw.get("status", 0) or 0)
+        text = raw.get("text", "") or ""
+        if status != 200 or not text:
             return None
         try:
-            client = httpx.Client(http2=True, timeout=30.0, proxy=self.http_proxy_config)
-            client.cookies.update(cookies)
-
-            headers = {
-                "User-Agent": get_random_user_agent(),
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "Referer": f"{self.provider_config.origin}/console",
-                "Origin": self.provider_config.origin,
-                "Connection": "keep-alive",
-            }
-            self._inject_api_user_headers(headers, api_user)
-
-            resp = client.get(self.provider_config.get_user_info_url(), headers=headers)
-            if resp.status_code != 200:
-                return None
-
-            data = self._check_and_handle_response(resp, "runanytime_user_self")
-            if not data or not data.get("success"):
-                return None
-
-            user_data = data.get("data", {}) or {}
-            quota = round(float(user_data.get("quota", 0)) / 500000, 2)
-            used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
-            return {
-                "success": True,
-                "quota": quota,
-                "used_quota": used_quota,
-                "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
-            }
+            data = json.loads(text)
         except Exception:
             return None
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+        if not isinstance(data, dict) or not data.get("success"):
+            return None
+        user_data = data.get("data", {}) or {}
+        try:
+            quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+            used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+        except Exception:
+            return None
+        return {
+            "success": True,
+            "quota": quota,
+            "used_quota": used_quota,
+            "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
+        }
 
     async def _runanytime_redeem_code_via_browser(self, page, code: str) -> tuple[bool, str]:
         await page.goto(f"{self.provider_config.origin}/console/topup", wait_until="networkidle")
@@ -1196,17 +1167,17 @@ class CheckIn:
             fuli_page = await context.new_page()
             try:
                 # 先确保 runanytime 登录，否则余额/兑换接口会 401（未登录且未提供 access token）
-                await self._ensure_runanytime_logged_in(runanytime_page, linuxdo_username, linuxdo_password)
+                await self._ensure_runanytime_logged_in(
+                    runanytime_page, linuxdo_username, linuxdo_password, api_user=api_user
+                )
                 # 注入 cookie 的新上下文没有 localStorage.user，会导致 /console 直接跳 /login 或余额 NaN
                 await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
-                # 余额优先按 wzw 的方式走 /api/user/self；失败再回退 UI 解析
-                try:
-                    exported = filter_cookies(await context.cookies(), self.provider_config.origin)
-                except Exception:
-                    exported = runanytime_cookies or {}
-                before_info = await self._runanytime_get_balance_via_httpx(exported, api_user=api_user)
+                # 余额优先用“浏览器内 fetch /api/user/self”（同源+带 new-api-user），失败再回退 UI 解析
+                before_info = await self._runanytime_get_balance_via_browser_fetch(runanytime_page, api_user=api_user)
                 if not (before_info and before_info.get("success")):
-                    before_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
+                    before_info = await self._runanytime_get_balance_from_app_me(
+                        runanytime_page, api_user=api_user
+                    )
 
                 await self._ensure_fuli_logged_in(fuli_page, linuxdo_username, linuxdo_password)
                 checkin_ok, checkin_code, checkin_msg = await self._fuli_daily_checkin_get_code(fuli_page)
@@ -1229,20 +1200,20 @@ class CheckIn:
                 success_redeem = 0
                 for code in codes:
                     # 兑换前再确保一次 runanytime 已登录（但这次不会因跳转到 fuli 而丢 page 状态）
-                    await self._ensure_runanytime_logged_in(runanytime_page, linuxdo_username, linuxdo_password)
+                    await self._ensure_runanytime_logged_in(
+                        runanytime_page, linuxdo_username, linuxdo_password, api_user=api_user
+                    )
                     await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
                     ok, msg = await self._runanytime_redeem_code_via_browser(runanytime_page, code)
                     redeem_results.append({"code": code, "success": ok, "message": msg})
                     if ok:
                         success_redeem += 1
 
-                try:
-                    exported_after = filter_cookies(await context.cookies(), self.provider_config.origin)
-                except Exception:
-                    exported_after = exported
-                after_info = await self._runanytime_get_balance_via_httpx(exported_after, api_user=api_user)
+                after_info = await self._runanytime_get_balance_via_browser_fetch(runanytime_page, api_user=api_user)
                 if not (after_info and after_info.get("success")):
-                    after_info = await self._runanytime_get_balance_from_app_me(runanytime_page, api_user=api_user)
+                    after_info = await self._runanytime_get_balance_from_app_me(
+                        runanytime_page, api_user=api_user
+                    )
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
