@@ -60,6 +60,19 @@ class CheckIn:
         os.makedirs(self.storage_state_dir, exist_ok=True)
 
     @staticmethod
+    def _mask_code(code: str) -> str:
+        if not code:
+            return ""
+        if len(code) <= 12:
+            return code
+        return f"{code[:6]}...{code[-4:]}"
+
+    def _mask_codes(self, codes: list[str]) -> str:
+        if not codes:
+            return "[]"
+        return "[" + ", ".join(self._mask_code(c) for c in codes) + "]"
+
+    @staticmethod
     def _get_http_proxy(proxy_config: dict | None = None) -> httpx.URL | None:
         """将 proxy_config 转换为 httpx.URL 格式的代理 URL
 
@@ -707,12 +720,25 @@ class CheckIn:
 
             codes = await self._extract_exchange_codes_from_page(page)
             if codes:
+                print(f"✅ {self.account_name}: fuli daily check-in code found: {self._mask_code(codes[0])}")
                 return True, codes[0], "签到成功"
 
             # 兜底：无法识别兑换码时，也不要直接判失败（站点 UI 可能变化或兑换码不再展示）
+            print(f"⚠️ {self.account_name}: fuli daily check-in done but no code detected")
             return True, None, "已执行签到动作（未识别到兑换码）"
         except Exception as e:
             await self._take_screenshot(page, "fuli_checkin_error")
+            # 异常时也尝试从页面捞一次兑换码，避免“弹窗出来了但脚本报错没记到”
+            try:
+                codes = await self._extract_exchange_codes_from_page(page)
+                if codes:
+                    print(
+                        f"⚠️ {self.account_name}: fuli daily check-in error but code extracted: "
+                        f"{self._mask_codes(codes)}"
+                    )
+                    return True, codes[0], "签到成功（异常兜底提取兑换码）"
+            except Exception:
+                pass
             return False, None, f"签到异常: {e}"
 
     async def _fuli_wheel_get_codes(self, page, max_times: int = 3) -> tuple[list[str], str]:
@@ -843,6 +869,13 @@ class CheckIn:
                 after_codes = await self._extract_exchange_codes_from_page(page)
                 new_codes = [c for c in after_codes if c not in before_codes and c not in all_codes]
                 all_codes.extend(new_codes)
+                if new_codes:
+                    print(
+                        f"✅ {self.account_name}: fuli wheel spin {i+1}/{spins} new code(s): "
+                        f"{self._mask_codes(new_codes)}"
+                    )
+                else:
+                    print(f"ℹ️ {self.account_name}: fuli wheel spin {i+1}/{spins} no new code detected")
 
                 # 尝试关闭弹窗
                 try:
@@ -871,6 +904,11 @@ class CheckIn:
                     for c in fallback_codes:
                         if c not in all_codes:
                             all_codes.append(c)
+                    if fallback_codes:
+                        print(
+                            f"⚠️ {self.account_name}: fuli wheel error {i+1}/{spins}, extracted code(s): "
+                            f"{self._mask_codes(fallback_codes)}"
+                        )
                 except Exception:
                     pass
                 continue
@@ -1023,6 +1061,8 @@ class CheckIn:
         status = int(raw.get("status", 0) or 0)
         text = raw.get("text", "") or ""
         if status != 200 or not text:
+            if status:
+                print(f"⚠️ {self.account_name}: runanytime balance fetch HTTP {status} (browser fetch)")
             return None
         try:
             data = json.loads(text)
@@ -1036,6 +1076,9 @@ class CheckIn:
             used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
         except Exception:
             return None
+        print(
+            f"✅ {self.account_name}: runanytime balance fetched: 🏃‍♂️{quota:.2f} (used 🏃‍♂️{used_quota:.2f})"
+        )
         return {
             "success": True,
             "quota": quota,
@@ -1195,8 +1238,9 @@ class CheckIn:
                     codes.append(checkin_code)
                 codes.extend(wheel_codes)
                 if codes:
-                    masked = [f"{c[:6]}...{c[-4:]}" if len(c) > 12 else c for c in codes]
-                    print(f"ℹ️ {self.account_name}: fuli codes collected: {masked}")
+                    print(f"ℹ️ {self.account_name}: fuli codes collected: {self._mask_codes(codes)}")
+                else:
+                    print(f"ℹ️ {self.account_name}: fuli returned no codes (checkin={checkin_msg}, wheel={wheel_msg})")
 
                 redeem_results = []
                 success_redeem = 0
@@ -1206,10 +1250,20 @@ class CheckIn:
                         runanytime_page, linuxdo_username, linuxdo_password, api_user=api_user
                     )
                     await self._seed_runanytime_local_storage_user(runanytime_page, api_user)
+                    print(f"ℹ️ {self.account_name}: redeeming code {self._mask_code(code)} ...")
                     ok, msg = await self._runanytime_redeem_code_via_browser(runanytime_page, code)
                     redeem_results.append({"code": code, "success": ok, "message": msg})
                     if ok:
                         success_redeem += 1
+                        print(
+                            f"✅ {self.account_name}: redeemed {self._mask_code(code)} ok: "
+                            f"{(msg or '').strip()[:120]}"
+                        )
+                    else:
+                        print(
+                            f"❌ {self.account_name}: redeemed {self._mask_code(code)} failed: "
+                            f"{(msg or '').strip()[:120]}"
+                        )
 
                 after_info = await self._runanytime_get_balance_via_browser_fetch(runanytime_page, api_user=api_user)
                 if not (after_info and after_info.get("success")):
