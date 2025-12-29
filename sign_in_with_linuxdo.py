@@ -374,9 +374,16 @@ class LinuxDoSignIn:
 	async def _browser_check_in_with_turnstile(self, page) -> None:
 		"""在 provider 的页面中执行带 Turnstile 的每日签到"""
 		try:
-			for path in self.PROFILE_PATH_CANDIDATES:
+			# 如果配置了签到页面路径，优先使用
+			checkin_paths = []
+			if getattr(self.provider_config, "checkin_page_path", None):
+				checkin_paths.append(self.provider_config.checkin_page_path)
+			# 回退到原有的候选路径
+			checkin_paths.extend(self.PROFILE_PATH_CANDIDATES)
+
+			for path in checkin_paths:
 				target_url = f"{self.provider_config.origin}{path}"
-				print(f"ℹ️ {self.account_name}: Navigating to profile page for check-in: {target_url}")
+				print(f"ℹ️ {self.account_name}: Navigating to check-in page: {target_url}")
 				await page.goto(target_url, wait_until="networkidle")
 
 				try:

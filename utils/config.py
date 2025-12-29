@@ -31,6 +31,8 @@ class ProviderConfig:
     turnstile_check: bool = False
     # 可选的签到状态接口路径（如 /api/user/check_in_status）
     check_in_status_path: str | None = None
+    # 可选的签到页面路径（如 /console/checkin），用于浏览器签到
+    checkin_page_path: str | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -57,6 +59,7 @@ class ProviderConfig:
             bypass_method=data.get("bypass_method"),
             turnstile_check=data.get("turnstile_check", False),
             check_in_status_path=data.get("check_in_status_path"),
+            checkin_page_path=data.get("checkin_page_path"),
         )
 
     def needs_waf_cookies(self) -> bool:
@@ -197,7 +200,7 @@ class AppConfig:
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
-                # 与 runanytime 一样：签到在前端 /app/me 完成，后端通过 check_in_status 确认
+                # 与 runanytime 一样：签到在前端完成，后端通过 check_in_status 确认
                 sign_in_path=None,
                 user_info_path="/api/user/self",
                 # Veloera 站点约定使用 Veloera-User 作为用户标识头
@@ -209,9 +212,11 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
-                # 和 runanytime 类似，在浏览器中执行每日签到，并通过 /api/user/check_in_status 校验
+                # 在浏览器中执行每日签到，并通过 /api/user/check_in_status 校验
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
+                # elysiver 签到页面路径（2024-12 更新）
+                checkin_page_path="/console/checkin",
             ),
         }
 
