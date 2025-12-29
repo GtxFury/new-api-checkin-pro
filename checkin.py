@@ -2676,15 +2676,8 @@ class CheckIn:
                 "error": f"Failed to get auth state with browser, {browser_err}",
             }
 
-    async def get_user_info_with_browser(self, auth_cookies: list[dict]) -> dict:
-        """使用 Camoufox 获取用户信息
-
-        对于启用了 Turnstile 的站点（如 runanytime / elysiver），优先从 /app/me 页面
-        的静态表格中解析当前余额和历史消耗，避免再次触发 Cloudflare / WAF 对 API 的拦截。
-
-        Returns:
-            包含 success、quota、used_quota 或 error 的字典
-        """
+    async def get_user_info_with_browser(self, auth_cookies: list[dict], api_user: str | int | None = None) -> dict:
+        """使用 Camoufox 获取用户信息（优先 localStorage，其次页面解析，再次浏览器内 API fetch）。"""
         print(
             f"ℹ️ {self.account_name}: Starting browser to get user info (using proxy: {'true' if self.camoufox_proxy_config else 'false'})"
         )
@@ -2708,91 +2701,210 @@ class CheckIn:
                     print(f"⚠️ {self.account_name}: Failed to add auth cookies to browser context: {e}")
 
                 try:
-                    # 对于启用了 Turnstile 的站点（如 runanytime / elysiver），
-                    # 直接从 /app/me 页面上解析“当前余额 / 历史消耗”等静态文本。
-                    if getattr(self.provider_config, "turnstile_check", False):
-                        target_url = f"{self.provider_config.origin}/app/me"
-                        print(f"ℹ️ {self.account_name}: Opening profile page for browser-based user info: {target_url}")
-                        await page.goto(target_url, wait_until="networkidle")
+                    origin = (self.provider_config.origin or "").rstrip("/")
+                    if not origin:
+                        return {"success": False, "error": "missing provider origin"}
 
-                        try:
-                            await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-                        except Exception:
-                            await page.wait_for_timeout(3000)
+                    # 打开控制台/主页，让站点前端有机会写入 localStorage
+                    try:
+                        await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+                    except Exception:
+                        await page.goto(origin, wait_until="domcontentloaded")
+                    await self._ensure_page_past_cloudflare(page)
 
-                        # 从页面表格中提取“当前余额”和“历史消耗”两行
-                        summary = await page.evaluate(
+                    # 0) new-api 站点优先从 localStorage.user 读取额度（站点可能改路由，/app/me 不再稳定）
+                    try:
+                        # 如果已知 api_user，补种最小 user 结构，避免控制台一直停在 /login
+                        if api_user is not None:
+                            await page.evaluate(
+                                """(apiUser) => {
+                                    try {
+                                        const key = 'user';
+                                        const cur = localStorage.getItem(key);
+                                        if (cur) return;
+                                        const id = typeof apiUser === 'string' ? parseInt(apiUser, 10) : apiUser;
+                                        const user = { id, username: `linuxdo_${id}`, role: 1, status: 1, group: 'default', display_name: 'None' };
+                                        localStorage.setItem(key, JSON.stringify(user));
+                                    } catch (e) {}
+                                }""",
+                                str(api_user),
+                            )
+                            await page.reload(wait_until="domcontentloaded")
+                            await self._ensure_page_past_cloudflare(page)
+                        await page.wait_for_timeout(800)
+                        ls_user = await page.evaluate(
                             """() => {
                                 try {
-                                    const rows = Array.from(document.querySelectorAll('table tr'));
+                                    const v = localStorage.getItem('user');
+                                    if (!v) return null;
+                                    const obj = JSON.parse(v);
+                                    return obj && typeof obj === 'object' ? obj : null;
+                                } catch (e) { return null; }
+                            }"""
+                        )
+                    except Exception:
+                        ls_user = None
+
+                    if isinstance(ls_user, dict) and ("quota" in ls_user or "used_quota" in ls_user):
+                        try:
+                            quota = round(float(ls_user.get("quota", 0) or 0) / 500000, 2)
+                            used_quota = round(float(ls_user.get("used_quota", 0) or 0) / 500000, 2)
+                            bonus_quota = round(float(ls_user.get("bonus_quota", 0) or 0) / 500000, 2)
+                        except Exception:
+                            quota = None
+                        if isinstance(quota, (int, float)):
+                            print(
+                                f"✅ {self.account_name}: Current balance: ${quota}, Used: ${used_quota}, Bonus: ${bonus_quota}"
+                            )
+                            return {
+                                "success": True,
+                                "quota": float(quota),
+                                "used_quota": float(used_quota),
+                                "bonus_quota": float(bonus_quota),
+                                "display": f"Current balance: ${quota}, Used: ${used_quota}, Bonus: ${bonus_quota}",
+                            }
+
+                    # 1) 页面解析（兼容新控制台卡片/表格）
+                    candidates: list[str] = []
+                    configured = getattr(self.provider_config, "checkin_page_path", None)
+                    if configured:
+                        candidates.append(str(configured))
+
+                    if self.provider_config.name == "elysiver":
+                        candidates.extend(
+                            [
+                                "/console",
+                                "/console/personal",
+                                "/console/profile",
+                                "/console/checkin",
+                                "/app/me",
+                                "/app",
+                            ]
+                        )
+                    else:
+                        candidates.extend(["/app/me", "/console", "/app"])
+
+                    seen: set[str] = set()
+                    candidates = [p for p in candidates if p and not (p in seen or seen.add(p))]
+
+                    def _parse_amount(s: str) -> float:
+                        s = str(s or "").replace(",", "").strip()
+                        m = re.search(r"(-?\\d+(?:\\.\\d+)?)", s)
+                        if not m:
+                            return 0.0
+                        try:
+                            return float(m.group(1))
+                        except Exception:
+                            return 0.0
+
+                    quota_labels = ("当前余额", "当前额度", "剩余额度", "余额", "可用额度", "Current balance", "Balance")
+                    used_labels = ("历史消耗", "历史消费", "已用额度", "消耗", "Used", "Usage")
+                    login_markers = ("使用 linuxdo 继续", "使用邮箱或用户名登录", "登录", "注册")
+
+                    async def _looks_like_login_page() -> bool:
+                        try:
+                            body_text = await page.evaluate(
+                                "() => document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+                            )
+                        except Exception:
+                            body_text = ""
+                        low = (body_text or "").lower()
+                        return any(m in low for m in login_markers)
+
+                    async def _extract_summary() -> dict | None:
+                        return await page.evaluate(
+                            """() => {
+                                try {
                                     const result = {};
-                                    for (const row of rows) {
-                                        const header = row.querySelector('th, [role="rowheader"]');
-                                        const cell = row.querySelector('td, [role="cell"]');
-                                        if (!header || !cell) continue;
-                                        const label = header.innerText.trim();
-                                        const value = cell.innerText.trim();
-                                        result[label] = value;
+                                    const textOf = (el) => (el && (el.innerText || el.textContent) || '').trim();
+
+                                    // cards: "当前余额" + 数值
+                                    const all = Array.from(document.querySelectorAll('*'));
+                                    for (const el of all) {
+                                        const t = textOf(el);
+                                        if (!t) continue;
+                                        if (t.includes('当前余额') || t.includes('历史消耗')) {
+                                            // 把父容器文本作为候选
+                                            const p = el.closest('div') || el.parentElement;
+                                            const pt = textOf(p);
+                                            if (pt) result['__block__'] = (result['__block__'] || '') + '\\n' + pt;
+                                        }
                                     }
-                                    return result;
+
+                                    // table
+                                    for (const row of Array.from(document.querySelectorAll('table tr'))) {
+                                        const header = row.querySelector('th, [role=\"rowheader\"]');
+                                        const cell = row.querySelector('td, [role=\"cell\"]');
+                                        const label = textOf(header);
+                                        const value = textOf(cell);
+                                        if (label && value) result[label] = value;
+                                    }
+
+                                    // Ant descriptions
+                                    for (const item of Array.from(document.querySelectorAll('.ant-descriptions-item'))) {
+                                        const labelEl = item.querySelector('.ant-descriptions-item-label');
+                                        const contentEl = item.querySelector('.ant-descriptions-item-content');
+                                        const label = textOf(labelEl);
+                                        const value = textOf(contentEl);
+                                        if (label && value) result[label] = value;
+                                    }
+
+                                    return Object.keys(result).length ? result : null;
                                 } catch (e) {
                                     return null;
                                 }
                             }"""
                         )
 
-                        if summary:
-                            balance_str = summary.get("当前余额")
-                            used_str = summary.get("历史消耗")
+                    for path in candidates:
+                        target_url = f"{origin}{path}"
+                        print(f"ℹ️ {self.account_name}: Opening profile page for browser-based user info: {target_url}")
+                        try:
+                            await page.goto(target_url, wait_until="networkidle")
+                            await self._ensure_page_past_cloudflare(page)
+                        except Exception:
+                            continue
 
-                            if balance_str is not None and used_str is not None:
-                                def _parse_amount(s: str) -> float:
-                                    s = s.replace("￥", "").replace("$", "").replace(",", "").strip()
-                                    try:
-                                        return float(s)
-                                    except Exception:
-                                        return 0.0
+                        try:
+                            await page.wait_for_function("document.readyState === 'complete'", timeout=5000)
+                        except Exception:
+                            await page.wait_for_timeout(1200)
 
-                                quota = _parse_amount(balance_str)
-                                used_quota = _parse_amount(used_str)
+                        if await _looks_like_login_page():
+                            continue
 
-                                print(
-                                    f"✅ {self.account_name}: Parsed balance from /app/me - "
-                                    f"Current balance: ${quota}, Used: ${used_quota}"
-                                )
-                                return {
-                                    "success": True,
-                                    "quota": quota,
-                                    "used_quota": used_quota,
-                                    "display": f"Current balance: ${quota}, Used: ${used_quota}",
-                                }
-                        # 如果未能成功解析，则继续尝试通过 API 获取
-                        print(
-                            f"⚠️ {self.account_name}: Failed to parse balance from /app/me, "
-                            "will try API-based user info in browser"
-                        )
+                        summary = await _extract_summary()
+                        if not isinstance(summary, dict):
+                            continue
 
-                    # 默认分支：在浏览器中直接调用用户信息 API
-                    print(f"ℹ️ {self.account_name}: Fetching user info via browser fetch API")
-                    response = await page.evaluate(
-                        f"""async () => {{
-                           try {{
-                               const response = await fetch('{self.provider_config.get_user_info_url()}', {{
-                                   credentials: 'include',
-                               }});
-                               const data = await response.json();
-                               return data;
-                           }} catch (e) {{
-                               return {{ error: String(e) }};
-                           }}
-                        }}"""
-                    )
+                        bal = None
+                        used = None
+                        for k in quota_labels:
+                            if summary.get(k):
+                                bal = summary.get(k)
+                                break
+                        for k in used_labels:
+                            if summary.get(k):
+                                used = summary.get(k)
+                                break
 
-                    if response and "data" in response:
-                        user_data = response.get("data", {})
-                        quota = round(user_data.get("quota", 0) / 500000, 2)
-                        used_quota = round(user_data.get("used_quota", 0) / 500000, 2)
-                        print(f"✅ {self.account_name}: " f"Current balance: ${quota}, Used: ${used_quota}")
+                        # 兜底：从 __block__ 中用正则提取
+                        block = summary.get("__block__") if isinstance(summary.get("__block__"), str) else ""
+                        if bal is None and block:
+                            m = re.search(r"(?:当前余额|余额)\\s*[:：]?\\s*([\\s\\S]{0,32})", block)
+                            if m:
+                                bal = m.group(1)
+                        if used is None and block:
+                            m = re.search(r"(?:历史消耗|消耗)\\s*[:：]?\\s*([\\s\\S]{0,32})", block)
+                            if m:
+                                used = m.group(1)
+
+                        if bal is None:
+                            continue
+
+                        quota = _parse_amount(bal)
+                        used_quota = _parse_amount(used) if used is not None else 0.0
+                        print(f"✅ {self.account_name}: Current balance: ${quota}, Used: ${used_quota}")
                         return {
                             "success": True,
                             "quota": quota,
@@ -2800,10 +2912,49 @@ class CheckIn:
                             "display": f"Current balance: ${quota}, Used: ${used_quota}",
                         }
 
-                    return {
-                        "success": False,
-                        "error": f"Failed to get user info, \n{json.dumps(response, indent=2)}",
-                    }
+                    # 2) 浏览器内 API fetch（避免 response.json 直接炸）
+                    headers: dict = {"Accept": "application/json, text/plain, */*"}
+                    if api_user is not None:
+                        self._inject_api_user_headers(headers, api_user)
+
+                    resp = await self._browser_fetch_json(
+                        page,
+                        self.provider_config.get_user_info_url(),
+                        method="GET",
+                        headers=headers,
+                    )
+                    status = int(resp.get("status", 0) or 0)
+                    text_snip = (resp.get("text") or "")[:200]
+
+                    if status in (403, 429, 503) and self._looks_like_cloudflare_interstitial_html(text_snip):
+                        await self._ensure_page_past_cloudflare(page)
+                        resp = await self._browser_fetch_json(
+                            page,
+                            self.provider_config.get_user_info_url(),
+                            method="GET",
+                            headers=headers,
+                        )
+                        status = int(resp.get("status", 0) or 0)
+                        text_snip = (resp.get("text") or "")[:200]
+
+                    data = resp.get("json")
+                    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                        user_data = data.get("data", {}) or {}
+                        quota = round(float(user_data.get("quota", 0) or 0) / 500000, 2)
+                        used_quota = round(float(user_data.get("used_quota", 0) or 0) / 500000, 2)
+                        bonus_quota = round(float(user_data.get("bonus_quota", 0) or 0) / 500000, 2)
+                        print(
+                            f"✅ {self.account_name}: Current balance: ${quota}, Used: ${used_quota}, Bonus: ${bonus_quota}"
+                        )
+                        return {
+                            "success": True,
+                            "quota": quota,
+                            "used_quota": used_quota,
+                            "bonus_quota": bonus_quota,
+                            "display": f"Current balance: ${quota}, Used: ${used_quota}, Bonus: ${bonus_quota}",
+                        }
+
+                    return {"success": False, "error": f"Failed to get user info, HTTP {status}, body: {text_snip}"}
 
                 except Exception as e:
                     print(f"❌ {self.account_name}: Failed to get user info, {e}")
@@ -3040,7 +3191,7 @@ class CheckIn:
 
                             camoufox_cookies.append(cookie_dict)
 
-                        browser_user_info = await self.get_user_info_with_browser(camoufox_cookies)
+                        browser_user_info = await self.get_user_info_with_browser(camoufox_cookies, api_user)
                         if browser_user_info and browser_user_info.get("success"):
                             print(
                                 f"✅ {self.account_name}: Got user info via browser fallback: "
