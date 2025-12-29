@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -322,6 +323,128 @@ class CheckIn:
             await page.wait_for_timeout(3000)
         except Exception:
             pass
+
+    async def _maybe_solve_cloudflare_turnstile(self, page) -> None:
+        if linuxdo_solve_captcha is None:
+            return
+        try:
+            await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+            await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _looks_like_cloudflare_interstitial_html(body: str) -> bool:
+        if not body:
+            return False
+        low = body.lower()
+        return (
+            ("just a moment" in low)
+            or ("challenges.cloudflare.com" in low)
+            or ("cf-browser-verification" in low)
+            or ("__cf_chl" in low)
+            or ("cf-chl" in low)
+        )
+
+    async def _browser_fetch_json(
+        self,
+        page,
+        url: str,
+        *,
+        method: str = "GET",
+        headers: dict | None = None,
+        json_body: dict | None = None,
+    ) -> dict:
+        """在浏览器上下文内发起 fetch（带 cookies），并尽量解析 JSON。
+
+        返回结构：
+        - ok: bool
+        - status: int
+        - text: str
+        - json: dict | list | None
+        - content_type: str
+        """
+        headers = headers or {}
+        try:
+            resp = await page.evaluate(
+                """async ({ url, method, headers, jsonBody }) => {
+                    try {
+                        const init = { method, credentials: 'include', headers: headers || {} };
+                        if (jsonBody !== undefined && jsonBody !== null) {
+                            init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
+                            init.body = JSON.stringify(jsonBody);
+                        }
+                        const r = await fetch(url, init);
+                        const ct = r.headers.get('content-type') || '';
+                        const text = await r.text();
+                        let parsed = null;
+                        if (ct.includes('application/json')) {
+                            try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+                        }
+                        return { ok: r.ok, status: r.status, text, json: parsed, contentType: ct };
+                    } catch (e) {
+                        return { ok: false, status: 0, text: String(e), json: null, contentType: '' };
+                    }
+                }""",
+                {"url": url, "method": method, "headers": headers, "jsonBody": json_body},
+            )
+        except Exception as e:
+            return {"ok": False, "status": 0, "text": str(e), "json": None, "content_type": ""}
+
+        return {
+            "ok": bool((resp or {}).get("ok")),
+            "status": int((resp or {}).get("status", 0) or 0),
+            "text": str((resp or {}).get("text") or ""),
+            "json": (resp or {}).get("json"),
+            "content_type": str((resp or {}).get("contentType") or ""),
+        }
+
+    async def _ensure_page_past_cloudflare(self, page, *, timeout_ms: int = 45000) -> bool:
+        """尽量等待/处理 Cloudflare interstitial，避免后续 fetch 一直 403/503。"""
+        deadline = time.monotonic() + max(timeout_ms, 1) / 1000
+        attempted = False
+        while time.monotonic() < deadline:
+            try:
+                url = page.url or ""
+            except Exception:
+                url = ""
+            try:
+                title = await page.title()
+            except Exception:
+                title = ""
+
+            # 轻量判断：URL/标题/小片段 HTML
+            is_cf = ("challenges.cloudflare.com" in url) or ("Just a moment" in (title or ""))
+            if not is_cf:
+                try:
+                    snippet = await page.evaluate(
+                        """() => {
+                            try {
+                                const t = document.title || '';
+                                const b = document.body ? (document.body.innerText || '') : '';
+                                return (t + '\\n' + b).slice(0, 800);
+                            } catch (e) {
+                                return '';
+                            }
+                        }"""
+                    )
+                except Exception:
+                    snippet = ""
+                is_cf = self._looks_like_cloudflare_interstitial_html(snippet or "")
+
+            if not is_cf:
+                return True
+
+            if not attempted:
+                attempted = True
+                await self._maybe_solve_cloudflare_interstitial(page)
+                await self._maybe_solve_cloudflare_turnstile(page)
+
+            try:
+                await page.wait_for_timeout(1000)
+            except Exception:
+                break
+        return False
 
     async def _linuxdo_login_if_needed(self, page, linuxdo_username: str, linuxdo_password: str) -> None:
         """在 linux.do 登录页（若出现）自动填表提交，兼容近期 selector 变更。"""
@@ -1212,6 +1335,7 @@ class CheckIn:
     async def _runanytime_redeem_code_via_browser(self, page, code: str) -> tuple[bool, str]:
         await page.goto(f"{self.provider_config.origin}/console/topup", wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        await self._ensure_page_past_cloudflare(page)
 
         input_ele = None
         for selector in [
@@ -1305,16 +1429,10 @@ class CheckIn:
         if not origin:
             return False, {"error": "missing provider origin"}
 
-        # runanytime API client（兑换与余额）
-        run_client = httpx.Client(http2=True, timeout=30.0, proxy=self.http_proxy_config)
-        try:
-            run_client.cookies.update(runanytime_cookies or {})
-        except Exception:
-            pass
-
         def _run_headers(referer: str) -> dict:
+            # 注意：浏览器 fetch 不能自定义 User-Agent，且 Cloudflare clearance 往往与浏览器指纹绑定；
+            # 因此这里不要在浏览器路径中塞随机 UA。
             headers = {
-                "User-Agent": get_random_user_agent(),
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                 "Cache-Control": "no-store",
@@ -1325,69 +1443,7 @@ class CheckIn:
             self._inject_api_user_headers(headers, api_user)
             return headers
 
-        def _run_get_user_info() -> dict | None:
-            try:
-                resp = run_client.get(f"{origin}/api/user/self", headers=_run_headers(f"{origin}/console"))
-            except Exception as e:
-                print(f"⚠️ {self.account_name}: runanytime /api/user/self 请求异常: {e}")
-                return {"success": False, "error": f"request_error: {e}"}
-            if resp.status_code != 200:
-                body = (resp.text or "")[:200]
-                print(f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {resp.status_code}: {body}")
-                return {"success": False, "error": f"HTTP {resp.status_code}: {body}", "status_code": resp.status_code}
-            data = self._check_and_handle_response(resp, "runanytime_user_self")
-            if not isinstance(data, dict) or not data.get("success"):
-                msg = ""
-                if isinstance(data, dict):
-                    msg = data.get("message") or data.get("msg") or ""
-                return {"success": False, "error": msg or "response_success=false"}
-            user_data = data.get("data", {}) or {}
-            try:
-                quota = round(float(user_data.get("quota", 0)) / 500000, 2)
-                used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
-            except Exception:
-                return {"success": False, "error": "parse_quota_failed"}
-            print(f"✅ {self.account_name}: runanytime 余额: 🏃‍♂️{quota:.2f}, 历史消耗: 🏃‍♂️{used_quota:.2f}")
-            return {
-                "success": True,
-                "quota": quota,
-                "used_quota": used_quota,
-                "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
-            }
-
-        def _run_topup(code: str) -> dict:
-            try:
-                resp = run_client.post(
-                    f"{origin}/api/user/topup",
-                    headers=_run_headers(f"{origin}/console/topup"),
-                    json={"key": code},
-                )
-            except Exception as e:
-                return {"success": False, "error": f"topup 请求异常: {e}", "code": code}
-
-            data = self._check_and_handle_response(resp, "runanytime_topup")
-            if resp.status_code not in (200, 400) or not isinstance(data, dict):
-                return {
-                    "success": False,
-                    "error": f"topup HTTP {resp.status_code}",
-                    "code": code,
-                }
-
-            if data.get("success"):
-                return {
-                    "success": True,
-                    "message": data.get("message", "Topup successful"),
-                    "data": data.get("data"),
-                    "status_code": resp.status_code,
-                }
-
-            msg = data.get("message") or data.get("msg") or "Unknown error"
-            already_used = any(k in msg for k in ["已被使用", "已使用", "already"])
-            if already_used:
-                return {"success": True, "already_used": True, "message": msg, "status_code": resp.status_code}
-            return {"success": False, "error": msg, "status_code": resp.status_code}
-
-        before_info = _run_get_user_info()
+        before_info: dict | None = None
 
         async with AsyncCamoufox(
             headless=False,
@@ -1407,7 +1463,134 @@ class CheckIn:
             context = await browser.new_context(storage_state=storage_state)
 
             fuli_page = await context.new_page()
+            run_page = await context.new_page()
             try:
+                # 尝试复用本地缓存的 Cloudflare cookie（可降低频繁弹验证的概率）
+                try:
+                    cached_cf = self._load_cf_cookies_from_cache() or []
+                    if cached_cf:
+                        await context.add_cookies(cached_cf)
+                except Exception:
+                    pass
+
+                # 注入 runanytime cookies（包含 session/cf_clearance 等），确保后续在浏览器上下文内可直接 fetch API
+                try:
+                    await context.add_cookies(self._cookie_dict_to_browser_cookies(runanytime_cookies or {}, origin))
+                except Exception:
+                    pass
+
+                try:
+                    await run_page.goto(f"{origin}/console", wait_until="domcontentloaded")
+                except Exception:
+                    await run_page.goto(origin, wait_until="domcontentloaded")
+                await self._ensure_page_past_cloudflare(run_page)
+
+                # 刷新缓存（若本次跑通了 challenge）
+                try:
+                    self._save_cf_cookies_to_cache(await context.cookies())
+                except Exception:
+                    pass
+
+                async def _run_get_user_info_via_browser() -> dict:
+                    resp = await self._browser_fetch_json(
+                        run_page,
+                        f"{origin}/api/user/self",
+                        method="GET",
+                        headers=_run_headers(f"{origin}/console"),
+                    )
+                    status = int(resp.get("status", 0) or 0)
+                    text = (resp.get("text") or "")[:200]
+
+                    if status != 200:
+                        if status in (403, 503) and self._looks_like_cloudflare_interstitial_html(text):
+                            await self._ensure_page_past_cloudflare(run_page)
+                            resp = await self._browser_fetch_json(
+                                run_page,
+                                f"{origin}/api/user/self",
+                                method="GET",
+                                headers=_run_headers(f"{origin}/console"),
+                            )
+                            status = int(resp.get("status", 0) or 0)
+                            text = (resp.get("text") or "")[:200]
+                        if status:
+                            print(f"⚠️ {self.account_name}: runanytime /api/user/self HTTP {status}: {text}")
+                            return {"success": False, "error": f"HTTP {status}: {text}", "status_code": status}
+                        return {"success": False, "error": f"request_error: {resp.get('text')}"}
+
+                    data = resp.get("json")
+                    if not isinstance(data, dict):
+                        return {"success": False, "error": "response_not_json"}
+                    if not data.get("success"):
+                        msg = data.get("message") or data.get("msg") or ""
+                        return {"success": False, "error": msg or "response_success=false"}
+
+                    user_data = data.get("data", {}) or {}
+                    try:
+                        quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+                        used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+                    except Exception:
+                        return {"success": False, "error": "parse_quota_failed"}
+                    print(f"✅ {self.account_name}: runanytime 余额: 🏃‍♂️{quota:.2f}, 历史消耗: 🏃‍♂️{used_quota:.2f}")
+                    return {
+                        "success": True,
+                        "quota": quota,
+                        "used_quota": used_quota,
+                        "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
+                    }
+
+                async def _run_topup_via_browser(code: str) -> dict:
+                    resp = await self._browser_fetch_json(
+                        run_page,
+                        f"{origin}/api/user/topup",
+                        method="POST",
+                        headers=_run_headers(f"{origin}/console/topup"),
+                        json_body={"key": code},
+                    )
+                    status = int(resp.get("status", 0) or 0)
+                    text_snip = (resp.get("text") or "")[:200]
+                    data = resp.get("json")
+
+                    # Cloudflare interstitial：尝试处理后重试一次
+                    if status in (403, 503) and self._looks_like_cloudflare_interstitial_html(text_snip):
+                        await self._ensure_page_past_cloudflare(run_page)
+                        resp = await self._browser_fetch_json(
+                            run_page,
+                            f"{origin}/api/user/topup",
+                            method="POST",
+                            headers=_run_headers(f"{origin}/console/topup"),
+                            json_body={"key": code},
+                        )
+                        status = int(resp.get("status", 0) or 0)
+                        text_snip = (resp.get("text") or "")[:200]
+                        data = resp.get("json")
+
+                    # 解析 JSON
+                    if status in (200, 400) and isinstance(data, dict):
+                        if data.get("success"):
+                            return {
+                                "success": True,
+                                "message": data.get("message", "Topup successful"),
+                                "data": data.get("data"),
+                                "status_code": status,
+                            }
+                        msg = data.get("message") or data.get("msg") or "Unknown error"
+                        already_used = any(k in msg for k in ["已被使用", "已使用", "already"])
+                        if already_used:
+                            return {"success": True, "already_used": True, "message": msg, "status_code": status}
+                        return {"success": False, "error": msg, "status_code": status}
+
+                    # 兜底：API 不通/被拦截时回退到浏览器 UI 兑换（更抗站点改动）
+                    if status:
+                        err = f"topup HTTP {status}: {text_snip}"
+                    else:
+                        err = f"topup request_error: {resp.get('text')}"
+                    ok, msg = await self._runanytime_redeem_code_via_browser(run_page, code)
+                    if ok:
+                        return {"success": True, "message": msg or "兑换成功(浏览器回退)", "status_code": status or 200}
+                    return {"success": False, "error": msg or err, "status_code": status or 0}
+
+                before_info = await _run_get_user_info_via_browser()
+
                 await self._ensure_fuli_logged_in(fuli_page, linuxdo_username, linuxdo_password)
                 # 用 API 获取 fuli cookies（更稳定且不用解析弹窗 DOM）
                 try:
@@ -1598,7 +1781,7 @@ class CheckIn:
                 success_redeem = 0
                 for code in codes:
                     print(f"💰 {self.account_name}: runanytime 兑换中: {code}")
-                    result = _run_topup(code)
+                    result = await _run_topup_via_browser(code)
                     ok = bool(result.get("success"))
                     redeem_results.append({"code": code, **result})
                     if ok:
@@ -1613,7 +1796,7 @@ class CheckIn:
                     else:
                         print(f"❌ {self.account_name}: runanytime 兑换失败: {code} | {result.get('error','')}")
 
-                after_info = _run_get_user_info()
+                after_info = await _run_get_user_info_via_browser()
 
                 before_quota = before_info.get("quota") if before_info else None
                 after_quota = after_info.get("quota") if after_info else None
@@ -1697,15 +1880,16 @@ class CheckIn:
                     await fuli_page.close()
                 except Exception:
                     pass
+                try:
+                    await run_page.close()
+                except Exception:
+                    pass
                 await context.close()
                 try:
                     fuli_client.close()
                 except Exception:
                     pass
-        try:
-            run_client.close()
-        except Exception:
-            pass
+        # runanytime 兑换/余额走浏览器上下文，不需要额外 httpx client
 
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
         """检查响应类型，如果是 HTML 则保存为文件，否则返回 JSON 数据
