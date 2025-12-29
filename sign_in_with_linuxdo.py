@@ -45,6 +45,45 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 		)
 		return False
 
+	# 预检测：很多情况下页面并没有 Cloudflare iframe（例如已经通过校验、或被其他 WAF/401 页面拦截），
+	# 直接调用 ClickSolver 会反复抛出 “Cloudflare iframes not found” 并产生大量堆栈输出，造成“卡死/刷屏”。
+	# 这里先做轻量判断：只有检测到 Cloudflare 相关元素/标记时才进入 solver。
+	try:
+		# 1) 快速 DOM 证据（Turnstile/Challenge iframe 或表单）
+		has_cf_evidence = await page.evaluate(
+			"""() => {
+				try {
+					const hasIframe = !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');
+					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
+					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
+					const title = (document.title || '').toLowerCase();
+					const titleLooks = title.includes('just a moment') || title.includes('attention required');
+					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
+				} catch (e) {
+					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
+				}
+			}"""
+		)
+		if not isinstance(has_cf_evidence, dict):
+			has_cf_evidence = {}
+
+		# 2) 若标题疑似 CF，但 iframe 尚未渲染，给一个短等待窗口
+		if bool(has_cf_evidence.get("titleLooks")) and not bool(has_cf_evidence.get("hasIframe")):
+			try:
+				await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=6000)
+				has_cf_evidence["hasIframe"] = True
+			except Exception:
+				pass
+
+		# 仅在确实存在可点击/可识别的挑战元素时才进入 solver；title 只是辅助信号，不作为触发条件，
+		# 避免 “Just a moment” 之类页面尚未渲染 iframe 时反复刷屏报错。
+		has_any = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput") or has_cf_evidence.get("hasChlForm"))
+		if not has_any:
+			return False
+	except Exception:
+		# 预检测失败时不影响原流程：继续尝试 solver（保持行为兼容）
+		pass
+
 	try:
 		framework = FrameworkType.CAMOUFOX  # 当前项目在 Camoufox 上运行
 
@@ -917,7 +956,15 @@ class LinuxDoSignIn:
 						return False, {"error": "Linux.do allow button not found"}
 
 					print(f"ℹ️ {self.account_name}: Clicking authorization button...")
-					await allow_btn_ele.click()
+					try:
+						# 避免 click 自带的“等待导航/网络空闲”导致超时（linux.do 有时会被挑战页/风控卡住）
+						await allow_btn_ele.click(no_wait_after=True, timeout=30000)
+					except Exception:
+						# 兜底：走 JS click，不等待任何后续事件
+						try:
+							await page.evaluate("(el) => el && el.click && el.click()", allow_btn_ele)
+						except Exception:
+							raise
 					# 等待跳转到 provider 的 OAuth 回调页面，并保存第一次匹配到的 OAuth URL，
 					# 便于后续在站点发生二次重定向（例如跳转到 /app 或 /login）后依然能够解析到
 					# 原始的 code/state 参数。
@@ -989,7 +1036,7 @@ class LinuxDoSignIn:
 									result_fast: dict = {"cookies": user_cookies, "api_user": api_user_fast}
 									if user_info_fast:
 										result_fast["user_info"] = user_info_fast
-										return True, result_fast
+									return True, result_fast
 								# fetch 失败时，尝试用"页面导航回调"确保 session cookie 写入（Veloera 分支已优先走过）
 								if not self._prefer_callback_navigation():
 									api_user_nav = await self._call_provider_linuxdo_callback_via_navigation(
@@ -1155,39 +1202,45 @@ class LinuxDoSignIn:
 							f"ℹ️ {self.account_name}: No captured OAuth redirect URL, fallback to current page URL: "
 							f"{page.url}"
 						)
-						parsed_url = urlparse(source_url)
-						query_params = parse_qs(parsed_url.query)
 
-						code_values = query_params.get("code")
-						if code_values:
-							code = code_values[0]
-							print(f"✅ {self.account_name}: OAuth code received: {code}")
+					parsed_url = urlparse(source_url)
+					query_params = parse_qs(parsed_url.query)
 
-						# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
-						if callback_attempted and self._prefer_callback_navigation():
-							return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
+					code_values = query_params.get("code")
+					code = code_values[0] if code_values else None
+					if code:
+						print(f"✅ {self.account_name}: OAuth code received: {code}")
+					else:
+						print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+						return False, {
+							"error": "Linux.do OAuth failed - no code in callback",
+						}
 
-						try:
-							callback_attempted = True
-							if self._prefer_callback_navigation():
-								api_user_fast2 = await self._call_provider_linuxdo_callback_via_navigation(
-									page, code, auth_state
-								)
-							else:
-								api_user_fast2 = await self._call_provider_linuxdo_callback_fast(
-									page, code, auth_state
-								)
-							if api_user_fast2:
-								print(
-									f"✅ {self.account_name}: Got api_user from fast callback fetch: {api_user_fast2}"
-								)
-								restore_cookies_fast2 = await page.context.cookies()
-								user_cookies_fast2 = filter_cookies(
-									restore_cookies_fast2, self.provider_config.origin
-								)
-								return True, {"cookies": user_cookies_fast2, "api_user": api_user_fast2}
-						except Exception:
-							pass
+					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
+					if callback_attempted and self._prefer_callback_navigation():
+						return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
+
+					try:
+						callback_attempted = True
+						if self._prefer_callback_navigation():
+							api_user_fast2 = await self._call_provider_linuxdo_callback_via_navigation(
+								page, code, auth_state
+							)
+						else:
+							api_user_fast2 = await self._call_provider_linuxdo_callback_fast(
+								page, code, auth_state
+							)
+						if api_user_fast2:
+							print(
+								f"✅ {self.account_name}: Got api_user from fast callback fetch: {api_user_fast2}"
+							)
+							restore_cookies_fast2 = await page.context.cookies()
+							user_cookies_fast2 = filter_cookies(
+								restore_cookies_fast2, self.provider_config.origin
+							)
+							return True, {"cookies": user_cookies_fast2, "api_user": api_user_fast2}
+					except Exception:
+						pass
 
 						# 对于启用了 Turnstile 校验的站点（如 runanytime / elysiver），
 						# 不再手动调用 Linux.do 回调接口，而是依赖前端完成 OAuth，
