@@ -262,12 +262,13 @@ class CheckIn:
         codes: list[str] = []
 
         # 优先抓取 “兑换码：XXXX” 一类的结构
-        for match in re.findall(r"(?:兑换码|兑奖码|激活码|兑换券)[:：\\s]*([A-Za-z0-9-]{6,64})", text):
+        # 注意：部分站点兑换码可能包含下划线（_），这里做兼容。
+        for match in re.findall(r"(?:兑换码|兑奖码|激活码|兑换券)[:：\\s]*([A-Za-z0-9_-]{6,128})", text):
             if match and match not in codes:
                 codes.append(match)
 
         # 兜底：抓取高置信度的长 token（避免把普通数字/日期误判为兑换码）
-        for match in re.findall(r"\\b[A-Za-z0-9][A-Za-z0-9-]{11,63}\\b", text):
+        for match in re.findall(r"\\b[A-Za-z0-9][A-Za-z0-9_-]{11,127}\\b", text):
             if match and match not in codes:
                 codes.append(match)
 
@@ -279,20 +280,9 @@ class CheckIn:
             combined = await page.evaluate(
                 """() => {
                     const parts = [];
-                    try {
-                        const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                        if (bodyText) parts.push(bodyText);
-                    } catch (e) {}
 
-                    try {
-                        const inputs = Array.from(document.querySelectorAll('input, textarea'));
-                        for (const el of inputs) {
-                            const v = el && typeof el.value === 'string' ? el.value.trim() : '';
-                            if (v) parts.push(v);
-                        }
-                    } catch (e) {}
-
-                    // 重点兼容：转盘弹窗里兑换码经常在 <p class="font-mono ..."> 或纯文本块中展示
+                    // 重点兼容：弹窗里兑换码经常在 <p class="font-mono ..."> 或纯文本块中展示。
+                    // 注意：把弹窗内容优先放到前面，避免页面“抽奖记录/历史记录”里的旧兑换码抢先匹配。
                     try {
                         const dialogs = Array.from(document.querySelectorAll('div'));
                         const dialog = dialogs.find(d => {
@@ -305,6 +295,19 @@ class CheckIn:
                             const t = (dialog.innerText || '').trim();
                             if (t) parts.push(t);
                         }
+                    } catch (e) {}
+
+                    try {
+                        const inputs = Array.from(document.querySelectorAll('input, textarea'));
+                        for (const el of inputs) {
+                            const v = el && typeof el.value === 'string' ? el.value.trim() : '';
+                            if (v) parts.push(v);
+                        }
+                    } catch (e) {}
+
+                    try {
+                        const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                        if (bodyText) parts.push(bodyText);
                     } catch (e) {}
 
                     return parts.join('\\n');
@@ -912,6 +915,12 @@ class CheckIn:
                 pass
         print(f"ℹ️ {self.account_name}: fuli check-in page opened (url={page.url})")
 
+        # 抽取“操作前”页面已有的兑换码，用于后续 diff（避免历史记录里的旧码被误判为新码）
+        try:
+            before_codes = set(await self._extract_exchange_codes_from_page(page))
+        except Exception:
+            before_codes = set()
+
         # 已签到：按钮禁用
         try:
             already_btn = await page.query_selector('button:has-text("今日已签到")')
@@ -945,24 +954,119 @@ class CheckIn:
             if not box:
                 raise RuntimeError("签到按钮无法获取坐标")
 
-            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-            await page.mouse.down()
-            await page.wait_for_timeout(1600)
-            await page.mouse.up()
+            def _pick_code_from_payload(payload: dict) -> str:
+                for k in ("code", "key", "exchangeCode", "exchange_code", "redeemCode", "redeem_code"):
+                    v = payload.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                    if isinstance(v, (int, float)) and str(v).strip():
+                        return str(v).strip()
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    return _pick_code_from_payload(data)
+                if isinstance(data, str) and data.strip():
+                    return data.strip()
+                msg = payload.get("message") or payload.get("msg") or ""
+                if isinstance(msg, str) and msg.strip():
+                    codes = self._extract_exchange_codes(msg)
+                    if codes:
+                        return codes[0]
+                return ""
 
-            await page.wait_for_timeout(1500)
-            # 先判断是否已变为“今日已签到”（有些情况下不会弹出/展示兑换码，但签到已生效）
+            # 优先从“浏览器内的 API 响应”抓兑换码：比 DOM 稳（httpx 会被 CF 403，但浏览器通常能过）。
+            resp_payload = None
+            did_press = False
+            async def _do_long_press() -> None:
+                nonlocal did_press
+                if did_press:
+                    return
+                await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                await page.mouse.down()
+                await page.wait_for_timeout(1600)
+                await page.mouse.up()
+                did_press = True
+
+            if hasattr(page, "expect_response"):
+                try:
+                    async with page.expect_response(
+                        lambda r: ("/api/checkin" in (r.url or "")) and ((r.request.method or "") == "POST"),
+                        timeout=20000,
+                    ) as resp_info:
+                        await _do_long_press()
+                    resp = await resp_info.value
+                    try:
+                        resp_payload = await resp.json()
+                    except Exception:
+                        resp_payload = None
+                except Exception:
+                    if not did_press:
+                        try:
+                            await _do_long_press()
+                        except Exception:
+                            pass
+                    resp_payload = None
+            else:
+                await _do_long_press()
+
+            if isinstance(resp_payload, dict):
+                msg = resp_payload.get("message") or resp_payload.get("msg") or ""
+                if resp_payload.get("success"):
+                    code = _pick_code_from_payload(resp_payload)
+                    if code:
+                        print(f"✅ {self.account_name}: fuli daily check-in code found (api): {self._mask_code(code)}")
+                        return True, code, "签到成功"
+                if isinstance(msg, str) and msg and any(k in msg for k in ["already", "已经", "已签", "今日已签到"]):
+                    return True, None, "今日已签到"
+
+            # 等待兑换码弹窗/文案出现：不同实现可能“先切按钮再弹窗”或相反；用更稳的条件 + diff 兜底。
+            try:
+                before_list = list(before_codes)
+                await page.wait_for_function(
+                    """(beforeCodes) => {
+                        try {
+                            const body = document.body;
+                            const text = (body ? (body.innerText || body.textContent || '') : '') || '';
+
+                            if (text.includes('复制兑换码')) return true;
+                            if (text.includes('恭喜获得')) return true;
+                            if (text.includes('将在') && text.includes('秒后过期')) return true;
+
+                            const tokens = text.match(/\\b[A-Za-z0-9][A-Za-z0-9_-]{11,127}\\b/g) || [];
+                            const before = new Set((beforeCodes || []).map(String));
+                            for (const tok of tokens) {
+                              if (!before.has(tok)) return true;
+                            }
+                            return false;
+                        } catch (e) {
+                            return false;
+                        }
+                    }""",
+                    before_list,
+                    timeout=15000,
+                )
+            except Exception:
+                pass
+
+            # 轮询一小段时间，给 SPA/弹窗渲染留余量
+            for _ in range(10):
+                try:
+                    after_codes = await self._extract_exchange_codes_from_page(page)
+                except Exception:
+                    after_codes = []
+                new_codes = [c for c in after_codes if c not in before_codes]
+                if new_codes:
+                    code = new_codes[0]
+                    print(f"✅ {self.account_name}: fuli daily check-in code found: {self._mask_code(code)}")
+                    return True, code, "签到成功"
+                await page.wait_for_timeout(500)
+
+            # 再判断是否已变为“今日已签到”（有些情况下不会弹出/展示兑换码，但签到已生效）
             try:
                 already_btn_after = await page.query_selector('button:has-text("今日已签到")')
                 if already_btn_after:
                     return True, None, "今日已签到"
             except Exception:
                 pass
-
-            codes = await self._extract_exchange_codes_from_page(page)
-            if codes:
-                print(f"✅ {self.account_name}: fuli daily check-in code found: {self._mask_code(codes[0])}")
-                return True, codes[0], "签到成功"
 
             # 兜底：无法识别兑换码时，也不要直接判失败（站点 UI 可能变化或兑换码不再展示）
             print(f"⚠️ {self.account_name}: fuli daily check-in done but no code detected")
@@ -1096,14 +1200,65 @@ class CheckIn:
                 # 抽奖前再抓一次（避免隐藏元素/历史记录造成误判）
                 before_codes = set(await self._extract_exchange_codes_from_page(page))
 
-                try:
-                    await btn.click()
-                except Exception:
-                    # 有时按钮在 overlay 下无法 click，退化为坐标点击
-                    box = await btn.bounding_box()
-                    if not box:
-                        raise
-                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                # 优先从“浏览器内的 API 响应”抓兑换码：比 DOM 稳（httpx 会被 CF 403，但浏览器通常能过）。
+                wheel_payload = None
+                did_click = False
+
+                async def _do_click() -> None:
+                    nonlocal did_click
+                    if did_click:
+                        return
+                    try:
+                        await btn.click()
+                    except Exception:
+                        # 有时按钮在 overlay 下无法 click，退化为坐标点击
+                        box = await btn.bounding_box()
+                        if not box:
+                            raise
+                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    did_click = True
+
+                if hasattr(page, "expect_response"):
+                    try:
+                        async with page.expect_response(
+                            lambda r: (
+                                ("/api/wheel" in (r.url or ""))
+                                and ("/api/wheel/status" not in (r.url or ""))
+                                and ((r.request.method or "") == "POST")
+                            ),
+                            timeout=20000,
+                        ) as resp_info:
+                            await _do_click()
+                        resp = await resp_info.value
+                        try:
+                            wheel_payload = await resp.json()
+                        except Exception:
+                            wheel_payload = None
+                    except Exception:
+                        if not did_click:
+                            try:
+                                await _do_click()
+                            except Exception:
+                                pass
+                        wheel_payload = None
+                else:
+                    await _do_click()
+
+                if isinstance(wheel_payload, dict) and wheel_payload.get("success"):
+                    api_code = ""
+                    for k in ("code", "key", "exchangeCode", "exchange_code", "redeemCode", "redeem_code"):
+                        v = wheel_payload.get(k)
+                        if isinstance(v, str) and v.strip():
+                            api_code = v.strip()
+                            break
+                    if not api_code:
+                        msg = wheel_payload.get("message") or wheel_payload.get("msg") or ""
+                        if isinstance(msg, str) and msg.strip():
+                            codes = self._extract_exchange_codes(msg)
+                            if codes:
+                                api_code = codes[0]
+                    if api_code and api_code not in all_codes:
+                        all_codes.append(api_code)
                 attempted += 1
 
                 # 等待开奖结果弹窗出现（或轮盘动画结束）。
@@ -1129,7 +1284,7 @@ class CheckIn:
                                 if (btnTexts.some(t => t.includes('复制兑换码') || t === '关闭')) return true;
 
                                 // 兜底：页面上出现了新的高置信 token（兑换码）
-                                const tokens = text.match(/\\b[A-Za-z0-9][A-Za-z0-9-]{11,63}\\b/g) || [];
+                                const tokens = text.match(/\\b[A-Za-z0-9][A-Za-z0-9_-]{11,127}\\b/g) || [];
                                 const before = new Set((beforeCodes || []).map(String));
                                 for (const tok of tokens) {
                                   if (!before.has(tok)) return true;
@@ -1664,6 +1819,51 @@ class CheckIn:
                         "Referer": referer,
                     }
 
+                def _fuli_pick_code(payload) -> str:
+                    """从 fuli API 响应中尽量提取兑换码（兼容字段/结构变更）。"""
+                    if not payload:
+                        return ""
+                    if isinstance(payload, str):
+                        return payload.strip()
+                    if not isinstance(payload, dict):
+                        return ""
+
+                    # 常见字段：code/key；有些实现会把兑换码放到 data 里
+                    for k in ("code", "key", "exchangeCode", "exchange_code", "redeemCode", "redeem_code"):
+                        v = payload.get(k)
+                        if isinstance(v, str) and v.strip():
+                            return v.strip()
+                        if isinstance(v, (int, float)) and str(v).strip():
+                            return str(v).strip()
+
+                    # 少数实现会返回 codes/keys 列表
+                    for lk in ("codes", "keys", "exchangeCodes", "exchange_codes", "redeemCodes", "redeem_codes"):
+                        lv = payload.get(lk)
+                        if isinstance(lv, list):
+                            for item in lv:
+                                if isinstance(item, str) and item.strip():
+                                    return item.strip()
+                                if isinstance(item, (int, float)) and str(item).strip():
+                                    return str(item).strip()
+
+                    data = payload.get("data")
+                    if isinstance(data, (str, dict)):
+                        nested = _fuli_pick_code(data)
+                        if nested:
+                            return nested
+                    if isinstance(data, list):
+                        for item in data:
+                            nested = _fuli_pick_code(item)
+                            if nested:
+                                return nested
+
+                    msg = payload.get("message") or payload.get("msg") or ""
+                    if isinstance(msg, str) and msg.strip():
+                        codes = self._extract_exchange_codes(msg)
+                        if codes:
+                            return codes[0]
+                    return ""
+
                 def _fuli_get_checkin_status() -> tuple[bool, bool, str]:
                     resp = fuli_client.get(f"{self.FULI_ORIGIN}/api/checkin/status", headers=_fuli_headers(self.FULI_ORIGIN + "/"))
                     if resp.status_code != 200:
@@ -1674,24 +1874,34 @@ class CheckIn:
                     checked = bool(data.get("checked", False))
                     return True, checked, "ok"
 
-                def _fuli_execute_checkin() -> tuple[bool, str, str]:
-                    resp = fuli_client.post(f"{self.FULI_ORIGIN}/api/checkin", headers=_fuli_headers(self.FULI_ORIGIN + "/"), content=b"")
-                    if resp.status_code not in (200, 400):
-                        return False, "", f"HTTP {resp.status_code}"
-                    data = self._check_and_handle_response(resp, "fuli_checkin")
-                    if not isinstance(data, dict):
-                        return False, "", "响应解析失败"
-                    msg = data.get("message") or data.get("msg") or ""
-                    if data.get("success"):
-                        code = str(data.get("code") or "")
-                        streak = data.get("streak")
-                        expire_seconds = data.get("expireSeconds")
-                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
-                        print(
-                            f"✅ {self.account_name}: fuli 签到成功: code={code}, prize={prize}, "
-                            f"streak={streak}, expireSeconds={expire_seconds}"
-                        )
-                        return True, code, msg or "签到成功"
+                    def _fuli_execute_checkin() -> tuple[bool, str, str]:
+                        resp = fuli_client.post(f"{self.FULI_ORIGIN}/api/checkin", headers=_fuli_headers(self.FULI_ORIGIN + "/"), content=b"")
+                        if resp.status_code not in (200, 400):
+                            return False, "", f"HTTP {resp.status_code}"
+                        data = self._check_and_handle_response(resp, "fuli_checkin")
+                        if not isinstance(data, dict):
+                            return False, "", "响应解析失败"
+                        msg = data.get("message") or data.get("msg") or ""
+                        if data.get("success"):
+                            code = _fuli_pick_code(data)
+                            if not code:
+                                try:
+                                    os.makedirs("logs", exist_ok=True)
+                                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_checkin_success_no_code.json")
+                                    with open(p, "w", encoding="utf-8") as f:
+                                        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                                    print(f"⚠️ {self.account_name}: fuli 签到成功但未解析到兑换码，已保存响应: {p}")
+                                except Exception:
+                                    pass
+                            streak = data.get("streak")
+                            expire_seconds = data.get("expireSeconds")
+                            prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                            print(
+                                f"✅ {self.account_name}: fuli 签到成功: code={code}, prize={prize}, "
+                                f"streak={streak}, expireSeconds={expire_seconds}"
+                            )
+                            return True, code, msg or "签到成功"
                     # already checked in
                     if any(k in (msg or "") for k in ["already", "已经", "已签", "今日已签到"]):
                         return True, "", "今日已签到"
@@ -1712,29 +1922,39 @@ class CheckIn:
                         remaining = 0
                     return True, remaining, "ok"
 
-                def _fuli_execute_wheel() -> tuple[bool, str, int, str]:
-                    resp = fuli_client.post(
-                        f"{self.FULI_ORIGIN}/api/wheel", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel"), content=b""
-                    )
-                    if resp.status_code not in (200, 400):
-                        return False, "", 0, f"HTTP {resp.status_code}"
-                    data = self._check_and_handle_response(resp, "fuli_wheel")
-                    if not isinstance(data, dict):
-                        return False, "", 0, "响应解析失败"
-                    msg = data.get("message") or data.get("msg") or ""
-                    if data.get("success"):
-                        expire_seconds = data.get("expireSeconds")
-                        try:
-                            remaining = int(data.get("remaining", 0) or 0)
-                        except Exception:
-                            remaining = 0
-                        code = str(data.get("code") or "")
-                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
-                        print(
-                            f"✅ {self.account_name}: fuli 转盘成功: code={code}, prize={prize}, "
-                            f"remaining={remaining}, expireSeconds={expire_seconds}"
+                    def _fuli_execute_wheel() -> tuple[bool, str, int, str]:
+                        resp = fuli_client.post(
+                            f"{self.FULI_ORIGIN}/api/wheel", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel"), content=b""
                         )
-                        return True, code, remaining, msg or "转盘成功"
+                        if resp.status_code not in (200, 400):
+                            return False, "", 0, f"HTTP {resp.status_code}"
+                        data = self._check_and_handle_response(resp, "fuli_wheel")
+                        if not isinstance(data, dict):
+                            return False, "", 0, "响应解析失败"
+                        msg = data.get("message") or data.get("msg") or ""
+                        if data.get("success"):
+                            expire_seconds = data.get("expireSeconds")
+                            try:
+                                remaining = int(data.get("remaining", 0) or 0)
+                            except Exception:
+                                remaining = 0
+                            code = _fuli_pick_code(data)
+                            if not code:
+                                try:
+                                    os.makedirs("logs", exist_ok=True)
+                                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_wheel_success_no_code.json")
+                                    with open(p, "w", encoding="utf-8") as f:
+                                        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                                    print(f"⚠️ {self.account_name}: fuli 转盘成功但未解析到兑换码，已保存响应: {p}")
+                                except Exception:
+                                    pass
+                            prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                            print(
+                                f"✅ {self.account_name}: fuli 转盘成功: code={code}, prize={prize}, "
+                                f"remaining={remaining}, expireSeconds={expire_seconds}"
+                            )
+                            return True, code, remaining, msg or "转盘成功"
                     if any(k in (msg or "") for k in ["already", "次数", "用完", "已用完"]):
                         return True, "", 0, "次数已用完"
                     return False, "", 0, msg or "转盘失败"
