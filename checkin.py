@@ -439,6 +439,13 @@ class CheckIn:
         # 先尝试直接打开主页，若已登录则无需走 OAuth
         try:
             await page.goto(self.FULI_ORIGIN, wait_until="networkidle")
+            # 解决 Cloudflare 验证码
+            await self._maybe_solve_cloudflare_interstitial(page)
+            if linuxdo_solve_captcha is not None:
+                try:
+                    await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+                except Exception:
+                    pass
             await page.wait_for_timeout(1000)
             has_nav = await page.evaluate(
                 """() => {
@@ -454,6 +461,11 @@ class CheckIn:
 
         await page.goto(self.FULI_LOGIN_URL, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        if linuxdo_solve_captcha is not None:
+            try:
+                await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+            except Exception:
+                pass
         print(f"ℹ️ {self.account_name}: fuli login page opened (url={page.url})")
 
         # 点击 “使用 Linux Do 登录”
@@ -770,6 +782,11 @@ class CheckIn:
         """在 fuli 主站执行每日签到，返回 (是否完成, 兑换码, 提示信息)。"""
         await page.goto(self.FULI_ORIGIN, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        if linuxdo_solve_captcha is not None:
+            try:
+                await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+            except Exception:
+                pass
         print(f"ℹ️ {self.account_name}: fuli check-in page opened (url={page.url})")
 
         # 已签到：按钮禁用
@@ -846,6 +863,11 @@ class CheckIn:
         """在 fuli 转盘抽奖，返回 (兑换码列表, 提示信息)。"""
         await page.goto(self.FULI_WHEEL_URL, wait_until="networkidle")
         await self._maybe_solve_cloudflare_interstitial(page)
+        if linuxdo_solve_captcha is not None:
+            try:
+                await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+            except Exception:
+                pass
         print(f"ℹ️ {self.account_name}: fuli wheel page opened (url={page.url})")
 
         def _parse_remaining(text: str) -> tuple[int, int] | None:
