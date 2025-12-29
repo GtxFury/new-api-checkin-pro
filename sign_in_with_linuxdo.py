@@ -911,6 +911,12 @@ class LinuxDoSignIn:
 									print(
 										f"✅ {self.account_name}: Got api user from fast callback fetch: {api_user_fast}"
 									)
+									# elysiver: 需要在浏览器中执行签到
+									user_info_fast = None
+									if self.provider_config.name == "elysiver":
+										await self._browser_check_in_with_turnstile(page)
+										user_info_fast = await self._extract_balance_from_profile(page)
+
 									restore_cookies = await page.context.cookies()
 									user_cookies = filter_cookies(
 										restore_cookies, self.provider_config.origin
@@ -920,8 +926,11 @@ class LinuxDoSignIn:
 										await page.context.storage_state(path=cache_file_path)
 									except Exception:
 										pass
-									return True, {"cookies": user_cookies, "api_user": api_user_fast}
-								# fast fetch 失败时，尝试用“页面导航回调”确保 session cookie 写入
+									result_fast: dict = {"cookies": user_cookies, "api_user": api_user_fast}
+									if user_info_fast:
+										result_fast["user_info"] = user_info_fast
+									return True, result_fast
+								# fast fetch 失败时，尝试用"页面导航回调"确保 session cookie 写入
 								api_user_nav = await self._call_provider_linuxdo_callback_via_navigation(
 									page, code_fast, auth_state
 								)
@@ -929,6 +938,12 @@ class LinuxDoSignIn:
 									print(
 										f"✅ {self.account_name}: Got api user from callback navigation: {api_user_nav}"
 									)
+									# elysiver: 需要在浏览器中执行签到
+									user_info_nav = None
+									if self.provider_config.name == "elysiver":
+										await self._browser_check_in_with_turnstile(page)
+										user_info_nav = await self._extract_balance_from_profile(page)
+
 									restore_cookies = await page.context.cookies()
 									user_cookies = filter_cookies(
 										restore_cookies, self.provider_config.origin
@@ -937,7 +952,10 @@ class LinuxDoSignIn:
 										await page.context.storage_state(path=cache_file_path)
 									except Exception:
 										pass
-									return True, {"cookies": user_cookies, "api_user": api_user_nav}
+									result_nav: dict = {"cookies": user_cookies, "api_user": api_user_nav}
+									if user_info_nav:
+										result_nav["user_info"] = user_info_nav
+									return True, result_nav
 						except Exception:
 							pass
 
