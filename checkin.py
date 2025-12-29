@@ -2963,6 +2963,120 @@ class CheckIn:
                 finally:
                     await page.close()
 
+    async def confirm_check_in_with_browser(self, auth_cookies: list[dict], api_user: str | int | None = None) -> dict:
+        """用浏览器 DOM 确认今日是否已签到（用于 turnstile_check 站点在 API 被 403 时的兜底）。"""
+        print(
+            f"ℹ️ {self.account_name}: Starting browser to confirm check-in status (using proxy: {'true' if self.camoufox_proxy_config else 'false'})"
+        )
+
+        origin = (self.provider_config.origin or "").rstrip("/")
+        if not origin:
+            return {"success": False, "error": "missing provider origin"}
+
+        with tempfile.TemporaryDirectory(prefix=f"camoufox_{self.safe_account_name}_checkin_status_") as tmp_dir:
+            print(f"ℹ️ {self.account_name}: Using temporary directory: {tmp_dir}")
+            async with AsyncCamoufox(
+                user_data_dir=tmp_dir,
+                persistent_context=True,
+                headless=False,
+                humanize=True,
+                locale="zh-CN",
+                geoip=True if self.camoufox_proxy_config else False,
+                proxy=self.camoufox_proxy_config,
+                disable_coop=True,
+                config={"forceScopeAccess": True},
+                i_know_what_im_doing=True,
+            ) as browser:
+                page = await browser.new_page()
+                try:
+                    try:
+                        await browser.add_cookies(auth_cookies)
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to add auth cookies to browser context: {e}")
+
+                    # 进入控制台/签到页
+                    paths = []
+                    configured = getattr(self.provider_config, "checkin_page_path", None)
+                    if configured:
+                        paths.append(str(configured))
+                    paths.extend(["/console/checkin", "/console"])
+
+                    seen: set[str] = set()
+                    paths = [p for p in paths if p and not (p in seen or seen.add(p))]
+
+                    for path in paths:
+                        target_url = f"{origin}{path}"
+                        print(f"ℹ️ {self.account_name}: Opening check-in page for confirmation: {target_url}")
+                        try:
+                            await page.goto(target_url, wait_until="networkidle")
+                        except Exception:
+                            continue
+
+                        await self._ensure_page_past_cloudflare(page)
+
+                        # 需要时补种 localStorage.user（新前端有时仅靠 cookie 不渲染控制台）
+                        if api_user is not None:
+                            try:
+                                await page.evaluate(
+                                    """(apiUser) => {
+                                        try {
+                                            const key = 'user';
+                                            const cur = localStorage.getItem(key);
+                                            if (cur) return;
+                                            const id = typeof apiUser === 'string' ? parseInt(apiUser, 10) : apiUser;
+                                            const user = { id, username: `linuxdo_${id}`, role: 1, status: 1, group: 'default', display_name: 'None' };
+                                            localStorage.setItem(key, JSON.stringify(user));
+                                        } catch (e) {}
+                                    }""",
+                                    str(api_user),
+                                )
+                                await page.reload(wait_until="domcontentloaded")
+                                await self._ensure_page_past_cloudflare(page)
+                            except Exception:
+                                pass
+
+                        try:
+                            await page.wait_for_timeout(800)
+                        except Exception:
+                            pass
+
+                        # DOM 判定：按钮“今日已签到”通常 disabled；同时兼容文本提示
+                        try:
+                            result = await page.evaluate(
+                                """() => {
+                                    try {
+                                        const text = (document.body ? (document.body.innerText || document.body.textContent || '') : '') || '';
+                                        const low = text.toLowerCase();
+                                        const hasDoneText = low.includes('今日已签到') || low.includes('已签到') || low.includes('already checked');
+                                        const btn = Array.from(document.querySelectorAll('button, [role=\"button\"], a'))
+                                            .find(el => ((el.innerText || '').includes('今日已签到') || (el.innerText || '').includes('已签到')));
+                                        const disabled = !!(btn && (btn.disabled || (btn.getAttribute && btn.getAttribute('aria-disabled') === 'true')));
+                                        return { hasDoneText, disabled, title: document.title || '' };
+                                    } catch (e) {
+                                        return { hasDoneText: false, disabled: false, title: '' };
+                                    }
+                                }"""
+                            )
+                        except Exception:
+                            result = None
+
+                        if isinstance(result, dict) and (result.get("disabled") or result.get("hasDoneText")):
+                            print(f"✅ {self.account_name}: Check-in confirmed by browser DOM")
+                            return {"success": True, "checked_in": True}
+
+                    return {"success": False, "error": "check-in not confirmed by browser DOM"}
+                except Exception as e:
+                    try:
+                        await self._take_screenshot(page, "check_in_confirm_error")
+                    except Exception:
+                        pass
+                    return {"success": False, "error": f"browser confirm error: {e}"}
+                finally:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
     async def get_user_info(self, client: httpx.Client, headers: dict) -> dict:
         """获取用户信息"""
         try:
@@ -3245,7 +3359,18 @@ class CheckIn:
                             "error": "Check-in status indicates not checked in yet (can_check_in=true)"
                         }
 
-                # 无法获取签到状态时，保守起见按失败处理，避免误报成功
+                # API 被 Cloudflare/WAF 拦截时：回退到浏览器 DOM 确认（例如 elysiver /console/checkin 显示“今日已签到”）
+                try:
+                    camoufox_cookies = self._cookie_dict_to_browser_cookies(cookies, self.provider_config.origin)
+                    confirm = await self.confirm_check_in_with_browser(camoufox_cookies, api_user)
+                    if confirm and confirm.get("success") and confirm.get("checked_in") is True:
+                        print(
+                            f"✅ {self.account_name}: Check-in confirmed by browser DOM fallback"
+                        )
+                        return True, user_info if user_info else confirm
+                except Exception:
+                    pass
+
                 print(
                     f"❌ {self.account_name}: Unable to confirm check-in status for provider "
                     f"'{self.provider_config.name}'"
