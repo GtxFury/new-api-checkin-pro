@@ -8,6 +8,8 @@
 import json
 import os
 import sys
+import time
+import random
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, quote, urlencode
@@ -104,6 +106,26 @@ class LinuxDoSignIn:
 		self.username = username
 		self.password = password
 
+	@staticmethod
+	def _looks_like_cloudflare_interstitial_html(body: str) -> bool:
+		if not body:
+			return False
+		low = body.lower()
+		return (
+			("just a moment" in low)
+			or ("challenges.cloudflare.com" in low)
+			or ("cf-browser-verification" in low)
+			or ("__cf_chl" in low)
+			or ("cf-chl" in low)
+		)
+
+	def _prefer_callback_navigation(self) -> bool:
+		# Veloera 系站点（如 elysiver）在回调接口上更容易触发 WAF/CF，优先用浏览器导航跑通挑战。
+		try:
+			return str(getattr(self.provider_config, "api_user_key", "") or "").lower() == "veloera-user"
+		except Exception:
+			return False
+
 	async def _call_provider_linuxdo_callback_fast(
 		self,
 		page,
@@ -131,6 +153,8 @@ class LinuxDoSignIn:
 			# 某些站点会校验 api_user header，这里统一以 -1 作为“未登录”占位
 			headers = {
 				"Accept": "application/json, text/plain, */*",
+				"Origin": self.provider_config.origin,
+				"Referer": f"{self.provider_config.origin}/console",
 				"new-api-user": "-1",
 				"New-Api-User": "-1",
 				"Veloera-User": "-1",
@@ -151,6 +175,9 @@ class LinuxDoSignIn:
 
 			status = (resp or {}).get("status", 0)
 			text = (resp or {}).get("text", "") or ""
+			# Cloudflare interstitial：优先切到“导航回调”跑 challenge，再回来 fetch
+			if status in (403, 429, 503) and self._looks_like_cloudflare_interstitial_html(text[:4000]):
+				return None
 			if status != 200 or not text:
 				print(
 					f"⚠️ {self.account_name}: Fast callback fetch failed: HTTP {status}, body: {text[:200]}"
@@ -202,14 +229,25 @@ class LinuxDoSignIn:
 				f"{final_callback_url}"
 			)
 
-			# 允许重试一次（应对 CF interstitial）
-			for attempt in range(2):
+			# 允许重试（应对 CF interstitial / WAF 429）
+			for attempt in range(4):
+				if attempt > 0:
+					await page.wait_for_timeout(1000)
 				response = await page.goto(final_callback_url, wait_until="domcontentloaded")
 				status = response.status if response else 0
 				try:
 					text = await response.text() if response else ""
 				except Exception:
 					text = ""
+
+				if status == 429:
+					# 避免立刻重试触发更严格的限流
+					backoff = min(30, 6 * (2**attempt)) + random.uniform(0, 2)
+					print(
+						f"⚠️ {self.account_name}: Callback got HTTP 429, backing off {backoff:.1f}s before retry"
+					)
+					await page.wait_for_timeout(int(backoff * 1000))
+					continue
 
 				if status == 200 and text:
 					try:
@@ -222,7 +260,7 @@ class LinuxDoSignIn:
 						if api_user:
 							return str(api_user)
 
-				# 若遇到挑战页，尝试解决后重试一次
+				# 若遇到挑战页，尝试解决后重试
 				try:
 					html = (await page.content())[:5000]
 				except Exception:
@@ -231,8 +269,9 @@ class LinuxDoSignIn:
 					"challenges.cloudflare.com" in (page.url or "")
 					or "Just a moment" in html
 					or "cf-browser-verification" in html
+					or self._looks_like_cloudflare_interstitial_html(text[:4000])
 				)
-				if is_cf and attempt == 0:
+				if is_cf:
 					print(
 						f"⚠️ {self.account_name}: Cloudflare interstitial detected on callback page, attempting to solve"
 					)
@@ -240,7 +279,11 @@ class LinuxDoSignIn:
 						await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
 					except Exception:
 						pass
-					await page.wait_for_timeout(8000)
+					try:
+						await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+					except Exception:
+						pass
+					await page.wait_for_timeout(12000)
 					continue
 				break
 
@@ -831,6 +874,7 @@ class LinuxDoSignIn:
 				try:
 					oauth_redirect_url: str | None = None
 					observed_oauth_urls: list[str] = []
+					callback_attempted = False
 
 					def _record_provider_url(u: str) -> None:
 						try:
@@ -909,9 +953,16 @@ class LinuxDoSignIn:
 							code_fast_vals = q_fast.get("code")
 							code_fast = code_fast_vals[0] if code_fast_vals else None
 							if code_fast:
-								api_user_fast = await self._call_provider_linuxdo_callback_fast(
-									page, code_fast, auth_state
-								)
+								callback_attempted = True
+								# Veloera 系站点（如 elysiver）更容易在回调接口触发 CF/WAF，避免先用 fetch 反复打回调导致 429
+								if self._prefer_callback_navigation():
+									api_user_fast = await self._call_provider_linuxdo_callback_via_navigation(
+										page, code_fast, auth_state
+									)
+								else:
+									api_user_fast = await self._call_provider_linuxdo_callback_fast(
+										page, code_fast, auth_state
+									)
 								if api_user_fast:
 									print(
 										f"✅ {self.account_name}: Got api user from fast callback fetch: {api_user_fast}"
@@ -938,37 +989,38 @@ class LinuxDoSignIn:
 									result_fast: dict = {"cookies": user_cookies, "api_user": api_user_fast}
 									if user_info_fast:
 										result_fast["user_info"] = user_info_fast
-									return True, result_fast
-								# fast fetch 失败时，尝试用"页面导航回调"确保 session cookie 写入
-								api_user_nav = await self._call_provider_linuxdo_callback_via_navigation(
-									page, code_fast, auth_state
-								)
-								if api_user_nav:
-									print(
-										f"✅ {self.account_name}: Got api user from callback navigation: {api_user_nav}"
+										return True, result_fast
+								# fetch 失败时，尝试用"页面导航回调"确保 session cookie 写入（Veloera 分支已优先走过）
+								if not self._prefer_callback_navigation():
+									api_user_nav = await self._call_provider_linuxdo_callback_via_navigation(
+										page, code_fast, auth_state
 									)
-									# elysiver: 需要在浏览器中执行签到
-									user_info_nav = None
-									if self.provider_config.name == "elysiver":
-										# 先导航到控制台页面，确保 session 生效
-										print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
-										await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-										await page.wait_for_timeout(2000)
-										await self._browser_check_in_with_turnstile(page)
-										user_info_nav = await self._extract_balance_from_profile(page)
+									if api_user_nav:
+										print(
+											f"✅ {self.account_name}: Got api user from callback navigation: {api_user_nav}"
+										)
+										# elysiver: 需要在浏览器中执行签到
+										user_info_nav = None
+										if self.provider_config.name == "elysiver":
+											# 先导航到控制台页面，确保 session 生效
+											print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
+											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+											await page.wait_for_timeout(2000)
+											await self._browser_check_in_with_turnstile(page)
+											user_info_nav = await self._extract_balance_from_profile(page)
 
-									restore_cookies = await page.context.cookies()
-									user_cookies = filter_cookies(
-										restore_cookies, self.provider_config.origin
-									)
-									try:
-										await page.context.storage_state(path=cache_file_path)
-									except Exception:
-										pass
-									result_nav: dict = {"cookies": user_cookies, "api_user": api_user_nav}
-									if user_info_nav:
-										result_nav["user_info"] = user_info_nav
-									return True, result_nav
+										restore_cookies = await page.context.cookies()
+										user_cookies = filter_cookies(
+											restore_cookies, self.provider_config.origin
+										)
+										try:
+											await page.context.storage_state(path=cache_file_path)
+										except Exception:
+											pass
+										result_nav: dict = {"cookies": user_cookies, "api_user": api_user_nav}
+										if user_info_nav:
+											result_nav["user_info"] = user_info_nav
+										return True, result_nav
 						except Exception:
 							pass
 
@@ -1103,19 +1155,28 @@ class LinuxDoSignIn:
 							f"ℹ️ {self.account_name}: No captured OAuth redirect URL, fallback to current page URL: "
 							f"{page.url}"
 						)
-					parsed_url = urlparse(source_url)
-					query_params = parse_qs(parsed_url.query)
+						parsed_url = urlparse(source_url)
+						query_params = parse_qs(parsed_url.query)
 
-					code_values = query_params.get("code")
-					if code_values:
-						code = code_values[0]
-						print(f"✅ {self.account_name}: OAuth code received: {code}")
+						code_values = query_params.get("code")
+						if code_values:
+							code = code_values[0]
+							print(f"✅ {self.account_name}: OAuth code received: {code}")
 
 						# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
+						if callback_attempted and self._prefer_callback_navigation():
+							return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
+
 						try:
-							api_user_fast2 = await self._call_provider_linuxdo_callback_fast(
-								page, code, auth_state
-							)
+							callback_attempted = True
+							if self._prefer_callback_navigation():
+								api_user_fast2 = await self._call_provider_linuxdo_callback_via_navigation(
+									page, code, auth_state
+								)
+							else:
+								api_user_fast2 = await self._call_provider_linuxdo_callback_fast(
+									page, code, auth_state
+								)
 							if api_user_fast2:
 								print(
 									f"✅ {self.account_name}: Got api_user from fast callback fetch: {api_user_fast2}"
@@ -1354,7 +1415,12 @@ class LinuxDoSignIn:
 								f"{cb_err}"
 							)
 
-						# 浏览器回调失败，回退到返回 code/state，由上层用 httpx 调用
+						# 浏览器回调失败：对 Veloera/Turnstile 站点，回退到 httpx 基本也会被 CF/WAF 拦截，直接判定失败，
+						# 避免反复打回调触发 429 以及 code 被消耗。
+						if self._prefer_callback_navigation():
+							return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
+
+						# 非 Turnstile 站点仍保留旧逻辑：返回 code/state 由上层 httpx 调用
 						return True, query_params
 
 					print(f"❌ {self.account_name}: OAuth failed, no code in callback")
