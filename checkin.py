@@ -2964,7 +2964,11 @@ class CheckIn:
                     await page.close()
 
     async def confirm_check_in_with_browser(self, auth_cookies: list[dict], api_user: str | int | None = None) -> dict:
-        """用浏览器 DOM 确认今日是否已签到（用于 turnstile_check 站点在 API 被 403 时的兜底）。"""
+        """用浏览器确认今日是否已签到（用于 turnstile_check 站点在 API 被 403 时的兜底）。
+
+        优先在浏览器上下文内 fetch `check_in_status`（若配置存在），失败再回退到 DOM 文本/按钮判定，
+        以适配部分站点前端渲染变化导致 DOM 不稳定的情况。
+        """
         print(
             f"ℹ️ {self.account_name}: Starting browser to confirm check-in status (using proxy: {'true' if self.camoufox_proxy_config else 'false'})"
         )
@@ -2972,6 +2976,19 @@ class CheckIn:
         origin = (self.provider_config.origin or "").rstrip("/")
         if not origin:
             return {"success": False, "error": "missing provider origin"}
+
+        def _dedupe_browser_cookies(cookies: list[dict]) -> list[dict]:
+            deduped: dict[tuple[str, str, str], dict] = {}
+            for cookie in cookies or []:
+                if not isinstance(cookie, dict):
+                    continue
+                name = str(cookie.get("name") or "")
+                domain = str(cookie.get("domain") or "")
+                path = str(cookie.get("path") or "/")
+                if not name or not domain:
+                    continue
+                deduped[(name, domain, path)] = cookie
+            return list(deduped.values())
 
         with tempfile.TemporaryDirectory(prefix=f"camoufox_{self.safe_account_name}_checkin_status_") as tmp_dir:
             print(f"ℹ️ {self.account_name}: Using temporary directory: {tmp_dir}")
@@ -2989,10 +3006,21 @@ class CheckIn:
             ) as browser:
                 page = await browser.new_page()
                 try:
+                    cookies_to_add: list[dict] = list(auth_cookies or [])
+                    # 同步注入缓存的 Cloudflare cookies，避免浏览器确认路径再次被 interstitial 拦截
                     try:
-                        await browser.add_cookies(auth_cookies)
+                        cached_cf_cookies = self._load_cf_cookies_from_cache()
+                        if cached_cf_cookies:
+                            cookies_to_add.extend(cached_cf_cookies)
                     except Exception as e:
-                        print(f"⚠️ {self.account_name}: Failed to add auth cookies to browser context: {e}")
+                        print(f"⚠️ {self.account_name}: Failed to load cached Cloudflare cookies: {e}")
+
+                    cookies_to_add = _dedupe_browser_cookies(cookies_to_add)
+                    if cookies_to_add:
+                        try:
+                            await browser.add_cookies(cookies_to_add)
+                        except Exception as e:
+                            print(f"⚠️ {self.account_name}: Failed to add cookies to browser context: {e}")
 
                     # 进入控制台/签到页
                     paths = []
@@ -3004,6 +3032,7 @@ class CheckIn:
                     seen: set[str] = set()
                     paths = [p for p in paths if p and not (p in seen or seen.add(p))]
 
+                    status_url = self.provider_config.get_check_in_status_url()
                     for path in paths:
                         target_url = f"{origin}{path}"
                         print(f"ℹ️ {self.account_name}: Opening check-in page for confirmation: {target_url}")
@@ -3036,9 +3065,81 @@ class CheckIn:
                                 pass
 
                         try:
-                            await page.wait_for_timeout(800)
+                            # SPA 渲染/接口返回可能较慢（尤其是带 WAF/CF 的站点），
+                            # 只 sleep 很短时间容易导致 DOM 还没更新就误判未签到。
+                            # 这里等待“签到页关键文本/按钮”出现后再做判定。
+                            await page.wait_for_function(
+                                """() => {
+                                    try {
+                                        const body = document.body;
+                                        if (!body) return false;
+                                        const text = (body.innerText || body.textContent || '').toLowerCase();
+                                        if (!text) return false;
+
+                                        // 典型签到页元素
+                                        if (text.includes('今日已签到')) return true;
+                                        if (text.includes('签到记录')) return true;
+                                        if (text.includes('累计签到')) return true;
+                                        if (text.includes('每日签到')) return true;
+
+                                        // 按钮兜底：出现“签到”相关按钮说明页面已渲染
+                                        const btn = Array.from(document.querySelectorAll('button, [role=\"button\"], a'))
+                                          .find(el => ((el.innerText || '').includes('签到')));
+                                        return !!btn;
+                                    } catch (e) {
+                                        return false;
+                                    }
+                                }""",
+                                timeout=25000,
+                            )
                         except Exception:
-                            pass
+                            try:
+                                await page.wait_for_timeout(1500)
+                            except Exception:
+                                pass
+
+                        # 优先在浏览器上下文内调用签到状态接口（若配置存在）
+                        if status_url:
+                            try:
+                                headers: dict = {"Accept": "application/json, text/plain, */*"}
+                                if api_user is not None:
+                                    self._inject_api_user_headers(headers, api_user)
+
+                                resp = await self._browser_fetch_json(
+                                    page, status_url, method="GET", headers=headers
+                                )
+                                status = int(resp.get("status", 0) or 0)
+                                text_snip = (resp.get("text") or "")[:200]
+
+                                if status in (403, 429, 503) and self._looks_like_cloudflare_interstitial_html(
+                                    text_snip
+                                ):
+                                    await self._ensure_page_past_cloudflare(page)
+                                    resp = await self._browser_fetch_json(
+                                        page, status_url, method="GET", headers=headers
+                                    )
+                                    status = int(resp.get("status", 0) or 0)
+
+                                data = resp.get("json")
+                                if isinstance(data, dict) and data.get("success"):
+                                    payload = data.get("data", {}) or {}
+                                    can_check_in = payload.get("can_check_in")
+                                    if can_check_in is False:
+                                        print(f"✅ {self.account_name}: Check-in confirmed by browser API")
+                                        return {"success": True, "checked_in": True, "via": "browser_api"}
+                                    if can_check_in is True:
+                                        print(
+                                            f"❌ {self.account_name}: Check-in status indicates not checked in yet "
+                                            f"(can_check_in is true)"
+                                        )
+                                        return {
+                                            "success": True,
+                                            "checked_in": False,
+                                            "can_check_in": True,
+                                            "via": "browser_api",
+                                        }
+                            except Exception:
+                                pass
 
                         # DOM 判定：按钮“今日已签到”通常 disabled；同时兼容文本提示
                         try:
@@ -3337,27 +3438,51 @@ class CheckIn:
 
             # 2) 特殊站点（如 runanytime）：需要根据签到状态接口判断是否真的签到成功
             if getattr(self.provider_config, "turnstile_check", False):
-                status_data = await self.get_check_in_status(client, headers)
-                if status_data and status_data.get("success"):
-                    data = status_data.get("data", {})
-                    can_check_in = data.get("can_check_in")
-
-                    # can_check_in 为 False：表示今天已经签到过（本次或之前），视为成功
-                    if can_check_in is False:
+                # elysiver：check_in_status 的 HTTP 直连更容易触发 CF/WAF，直接用浏览器上下文确认
+                if self.provider_config.name == "elysiver":
+                    try:
+                        camoufox_cookies = self._cookie_dict_to_browser_cookies(cookies, self.provider_config.origin)
+                        confirm = await self.confirm_check_in_with_browser(camoufox_cookies, api_user)
+                        if confirm and confirm.get("success") and confirm.get("checked_in") is True:
+                            print(f"✅ {self.account_name}: Check-in confirmed by browser")
+                            return True, user_info if user_info else confirm
+                        if confirm and confirm.get("success") and confirm.get("checked_in") is False:
+                            return False, {"error": "Check-in status indicates not checked in yet"}
+                        err = confirm.get("error") if isinstance(confirm, dict) else None
                         print(
-                            f"✅ {self.account_name}: Check-in status confirmed (already checked in today)"
+                            f"❌ {self.account_name}: Unable to confirm check-in status for provider "
+                            f"'{self.provider_config.name}'"
+                            + (f": {err}" if err else "")
                         )
-                        return True, user_info if user_info else status_data
-
-                    # can_check_in 为 True：仍然可以签到，说明本次流程未真正完成签到
-                    if can_check_in is True:
+                        return False, {"error": "Unable to confirm check-in status"}
+                    except Exception as e:
                         print(
-                            f"❌ {self.account_name}: Check-in status indicates not checked in yet "
-                            f"(can_check_in is true)"
+                            f"❌ {self.account_name}: Unable to confirm check-in status for provider "
+                            f"'{self.provider_config.name}': {e}"
                         )
-                        return False, {
-                            "error": "Check-in status indicates not checked in yet (can_check_in=true)"
-                        }
+                        return False, {"error": "Unable to confirm check-in status"}
+                else:
+                    status_data = await self.get_check_in_status(client, headers)
+                    if status_data and status_data.get("success"):
+                        data = status_data.get("data", {})
+                        can_check_in = data.get("can_check_in")
+
+                        # can_check_in 为 False：表示今天已经签到过（本次或之前），视为成功
+                        if can_check_in is False:
+                            print(
+                                f"✅ {self.account_name}: Check-in status confirmed (already checked in today)"
+                            )
+                            return True, user_info if user_info else status_data
+
+                        # can_check_in 为 True：仍然可以签到，说明本次流程未真正完成签到
+                        if can_check_in is True:
+                            print(
+                                f"❌ {self.account_name}: Check-in status indicates not checked in yet "
+                                f"(can_check_in is true)"
+                            )
+                            return False, {
+                                "error": "Check-in status indicates not checked in yet (can_check_in=true)"
+                            }
 
                 # API 被 Cloudflare/WAF 拦截时：回退到浏览器 DOM 确认（例如 elysiver /console/checkin 显示“今日已签到”）
                 try:
