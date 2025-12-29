@@ -1106,11 +1106,45 @@ class CheckIn:
                     await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 attempted += 1
 
-                # 等待开奖结果弹窗出现（或轮盘动画结束），兑换码可能在 input.value 中
+                # 等待开奖结果弹窗出现（或轮盘动画结束）。
+                # 注意：转盘页的“抽奖记录”表头本身就包含“兑换码”文本，
+                # 不能用 `text=兑换码` 作为等待条件，否则会立即返回而错过真正的结果弹窗。
                 try:
-                    await page.wait_for_selector('text=兑换码', timeout=12000)
+                    before_list = list(before_codes)
+                    await page.wait_for_function(
+                        """(beforeCodes) => {
+                            try {
+                                const body = document.body;
+                                const text = (body ? (body.innerText || body.textContent || '') : '') || '';
+
+                                // 结果弹窗通常包含“恭喜获得/复制兑换码/关闭”等文本
+                                if (text.includes('恭喜获得')) return true;
+                                if (text.includes('复制兑换码')) return true;
+                                if (text.includes('将在') && text.includes('秒后过期')) return true;
+
+                                // 或者页面上出现“关闭”按钮（常见于结果弹窗）
+                                const btnTexts = Array.from(document.querySelectorAll('button'))
+                                  .map(b => (b.innerText || '').trim())
+                                  .filter(Boolean);
+                                if (btnTexts.some(t => t.includes('复制兑换码') || t === '关闭')) return true;
+
+                                // 兜底：页面上出现了新的高置信 token（兑换码）
+                                const tokens = text.match(/\\b[A-Za-z0-9][A-Za-z0-9-]{11,63}\\b/g) || [];
+                                const before = new Set((beforeCodes || []).map(String));
+                                for (const tok of tokens) {
+                                  if (!before.has(tok)) return true;
+                                }
+                                return false;
+                            } catch (e) {
+                                return false;
+                            }
+                        }""",
+                        before_list,
+                        timeout=20000,
+                    )
                 except Exception:
-                    await page.wait_for_timeout(4500)
+                    # 不强制失败，给一个保底等待
+                    await page.wait_for_timeout(6500)
 
                 after_codes = await self._extract_exchange_codes_from_page(page)
                 new_codes = [c for c in after_codes if c not in before_codes and c not in all_codes]
@@ -1158,6 +1192,15 @@ class CheckIn:
                 except Exception:
                     pass
                 continue
+
+        # 最终兜底：再扫一遍页面（抽奖记录表格可能在弹窗关闭后才完成渲染/追加）
+        try:
+            final_codes = await self._extract_exchange_codes_from_page(page)
+            for c in final_codes:
+                if c not in all_codes:
+                    all_codes.append(c)
+        except Exception:
+            pass
 
         return all_codes, f"转盘已尝试 {attempted}/{spins} 次"
 
