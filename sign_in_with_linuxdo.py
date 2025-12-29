@@ -919,6 +919,10 @@ class LinuxDoSignIn:
 									# elysiver: 需要在浏览器中执行签到
 									user_info_fast = None
 									if self.provider_config.name == "elysiver":
+										# 先导航到控制台页面，确保 session 生效
+										print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
+										await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+										await page.wait_for_timeout(2000)
 										await self._browser_check_in_with_turnstile(page)
 										user_info_fast = await self._extract_balance_from_profile(page)
 
@@ -946,6 +950,10 @@ class LinuxDoSignIn:
 									# elysiver: 需要在浏览器中执行签到
 									user_info_nav = None
 									if self.provider_config.name == "elysiver":
+										# 先导航到控制台页面，确保 session 生效
+										print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
+										await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+										await page.wait_for_timeout(2000)
 										await self._browser_check_in_with_turnstile(page)
 										user_info_nav = await self._extract_balance_from_profile(page)
 
