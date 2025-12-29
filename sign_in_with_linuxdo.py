@@ -346,7 +346,7 @@ class LinuxDoSignIn:
 					)
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: Turnstile iframe not found on page: {e}")
-					await self._take_screenshot(page, "runanytime_turnstile_iframe_not_found")
+					await self._take_screenshot(page, f"{self.provider_config.name}_turnstile_iframe_not_found")
 					return False
 
 			box = await iframe.bounding_box()
@@ -374,12 +374,12 @@ class LinuxDoSignIn:
 	async def _browser_check_in_with_turnstile(self, page) -> None:
 		"""在 provider 的页面中执行带 Turnstile 的每日签到"""
 		try:
-			# 如果配置了签到页面路径，优先使用
-			checkin_paths = []
+			# 如果配置了签到页面路径，只使用该路径
 			if getattr(self.provider_config, "checkin_page_path", None):
-				checkin_paths.append(self.provider_config.checkin_page_path)
-			# 回退到原有的候选路径
-			checkin_paths.extend(self.PROFILE_PATH_CANDIDATES)
+				checkin_paths = [self.provider_config.checkin_page_path]
+			else:
+				# 回退到原有的候选路径
+				checkin_paths = list(self.PROFILE_PATH_CANDIDATES)
 
 			for path in checkin_paths:
 				target_url = f"{self.provider_config.origin}{path}"
@@ -396,6 +396,9 @@ class LinuxDoSignIn:
 				if not solved:
 					print(f"⚠️ {self.account_name}: Turnstile solving may have failed, continue to try check-in")
 
+				# 等待页面内容加载
+				await page.wait_for_timeout(2000)
+
 				# 检查是否已经签到
 				try:
 					already_btn = await page.query_selector('button:has-text("今日已签到")')
@@ -406,9 +409,11 @@ class LinuxDoSignIn:
 					print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
 					return
 
-				# 查找“立即签到”按钮并点击
+				# 查找"立即签到"按钮并点击
 				checkin_btn = None
 				try:
+					# 先等待按钮出现
+					await page.wait_for_selector('button:has-text("立即签到")', timeout=10000)
 					checkin_btn = await page.query_selector('button:has-text("立即签到")')
 				except Exception:
 					checkin_btn = None
@@ -427,14 +432,14 @@ class LinuxDoSignIn:
 					print(
 						f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
 					)
-					await self._take_screenshot(page, "runanytime_checkin_timeout")
+					await self._take_screenshot(page, f"{self.provider_config.name}_checkin_timeout")
 				return
 
 			print(f"⚠️ {self.account_name}: Daily check-in button not found on any known profile page")
-			await self._take_screenshot(page, "runanytime_checkin_button_not_found")
+			await self._take_screenshot(page, f"{self.provider_config.name}_checkin_button_not_found")
 		except Exception as e:
 			print(f"❌ {self.account_name}: Error during browser check-in: {e}")
-			await self._take_screenshot(page, "runanytime_checkin_error")
+			await self._take_screenshot(page, f"{self.provider_config.name}_checkin_error")
 
 	async def _extract_api_user_from_localstorage(self, page) -> str | None:
 		"""尽量从 localStorage 中读取 user id（兼容不同前端存储 key/字段）。"""
