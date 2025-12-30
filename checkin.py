@@ -1866,7 +1866,12 @@ class CheckIn:
                     return ""
 
                 def _fuli_get_checkin_status() -> tuple[bool, bool, str]:
-                    resp = fuli_client.get(f"{self.FULI_ORIGIN}/api/checkin/status", headers=_fuli_headers(self.FULI_ORIGIN + "/"))
+                    try:
+                        resp = fuli_client.get(
+                            f"{self.FULI_ORIGIN}/api/checkin/status", headers=_fuli_headers(self.FULI_ORIGIN + "/")
+                        )
+                    except Exception as e:
+                        return False, False, f"request_error: {e}"
                     if resp.status_code != 200:
                         return False, False, f"HTTP {resp.status_code}"
                     data = self._check_and_handle_response(resp, "fuli_checkin_status")
@@ -1875,43 +1880,51 @@ class CheckIn:
                     checked = bool(data.get("checked", False))
                     return True, checked, "ok"
 
-                    def _fuli_execute_checkin() -> tuple[bool, str, str]:
-                        resp = fuli_client.post(f"{self.FULI_ORIGIN}/api/checkin", headers=_fuli_headers(self.FULI_ORIGIN + "/"), content=b"")
-                        if resp.status_code not in (200, 400):
-                            return False, "", f"HTTP {resp.status_code}"
-                        data = self._check_and_handle_response(resp, "fuli_checkin")
-                        if not isinstance(data, dict):
-                            return False, "", "响应解析失败"
-                        msg = data.get("message") or data.get("msg") or ""
-                        if data.get("success"):
-                            code = _fuli_pick_code(data)
-                            if not code:
-                                try:
-                                    os.makedirs("logs", exist_ok=True)
-                                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_checkin_success_no_code.json")
-                                    with open(p, "w", encoding="utf-8") as f:
-                                        f.write(json.dumps(data, ensure_ascii=False, indent=2))
-                                    print(f"⚠️ {self.account_name}: fuli 签到成功但未解析到兑换码，已保存响应: {p}")
-                                except Exception:
-                                    pass
-                            streak = data.get("streak")
-                            expire_seconds = data.get("expireSeconds")
-                            prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
-                            print(
-                                f"✅ {self.account_name}: fuli 签到成功: code={code}, prize={prize}, "
-                                f"streak={streak}, expireSeconds={expire_seconds}"
-                            )
-                            return True, code, msg or "签到成功"
+                def _fuli_execute_checkin() -> tuple[bool, str, str]:
+                    try:
+                        resp = fuli_client.post(
+                            f"{self.FULI_ORIGIN}/api/checkin", headers=_fuli_headers(self.FULI_ORIGIN + "/"), content=b""
+                        )
+                    except Exception as e:
+                        return False, "", f"request_error: {e}"
+                    if resp.status_code not in (200, 400):
+                        return False, "", f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_checkin")
+                    if not isinstance(data, dict):
+                        return False, "", "响应解析失败"
+                    msg = data.get("message") or data.get("msg") or ""
+                    if data.get("success"):
+                        code = _fuli_pick_code(data)
+                        if not code:
+                            try:
+                                os.makedirs("logs", exist_ok=True)
+                                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_checkin_success_no_code.json")
+                                with open(p, "w", encoding="utf-8") as f:
+                                    f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                                print(f"⚠️ {self.account_name}: fuli 签到成功但未解析到兑换码，已保存响应: {p}")
+                            except Exception:
+                                pass
+                        streak = data.get("streak")
+                        expire_seconds = data.get("expireSeconds")
+                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                        print(
+                            f"✅ {self.account_name}: fuli 签到成功: code={code}, prize={prize}, "
+                            f"streak={streak}, expireSeconds={expire_seconds}"
+                        )
+                        return True, code, msg or "签到成功"
                     # already checked in
                     if any(k in (msg or "") for k in ["already", "已经", "已签", "今日已签到"]):
                         return True, "", "今日已签到"
                     return False, "", msg or "签到失败"
 
                 def _fuli_get_wheel_status() -> tuple[bool, int, str]:
-                    resp = fuli_client.get(
-                        f"{self.FULI_ORIGIN}/api/wheel/status", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel")
-                    )
+                    try:
+                        resp = fuli_client.get(
+                            f"{self.FULI_ORIGIN}/api/wheel/status", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel")
+                        )
+                    except Exception as e:
+                        return False, 0, f"request_error: {e}"
                     if resp.status_code != 200:
                         return False, 0, f"HTTP {resp.status_code}"
                     data = self._check_and_handle_response(resp, "fuli_wheel_status")
@@ -1923,39 +1936,42 @@ class CheckIn:
                         remaining = 0
                     return True, remaining, "ok"
 
-                    def _fuli_execute_wheel() -> tuple[bool, str, int, str]:
+                def _fuli_execute_wheel() -> tuple[bool, str, int, str]:
+                    try:
                         resp = fuli_client.post(
                             f"{self.FULI_ORIGIN}/api/wheel", headers=_fuli_headers(self.FULI_ORIGIN + "/wheel"), content=b""
                         )
-                        if resp.status_code not in (200, 400):
-                            return False, "", 0, f"HTTP {resp.status_code}"
-                        data = self._check_and_handle_response(resp, "fuli_wheel")
-                        if not isinstance(data, dict):
-                            return False, "", 0, "响应解析失败"
-                        msg = data.get("message") or data.get("msg") or ""
-                        if data.get("success"):
-                            expire_seconds = data.get("expireSeconds")
+                    except Exception as e:
+                        return False, "", 0, f"request_error: {e}"
+                    if resp.status_code not in (200, 400):
+                        return False, "", 0, f"HTTP {resp.status_code}"
+                    data = self._check_and_handle_response(resp, "fuli_wheel")
+                    if not isinstance(data, dict):
+                        return False, "", 0, "响应解析失败"
+                    msg = data.get("message") or data.get("msg") or ""
+                    if data.get("success"):
+                        expire_seconds = data.get("expireSeconds")
+                        try:
+                            remaining = int(data.get("remaining", 0) or 0)
+                        except Exception:
+                            remaining = 0
+                        code = _fuli_pick_code(data)
+                        if not code:
                             try:
-                                remaining = int(data.get("remaining", 0) or 0)
+                                os.makedirs("logs", exist_ok=True)
+                                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_wheel_success_no_code.json")
+                                with open(p, "w", encoding="utf-8") as f:
+                                    f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                                print(f"⚠️ {self.account_name}: fuli 转盘成功但未解析到兑换码，已保存响应: {p}")
                             except Exception:
-                                remaining = 0
-                            code = _fuli_pick_code(data)
-                            if not code:
-                                try:
-                                    os.makedirs("logs", exist_ok=True)
-                                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    p = os.path.join("logs", f"{self.safe_account_name}_{ts}_fuli_wheel_success_no_code.json")
-                                    with open(p, "w", encoding="utf-8") as f:
-                                        f.write(json.dumps(data, ensure_ascii=False, indent=2))
-                                    print(f"⚠️ {self.account_name}: fuli 转盘成功但未解析到兑换码，已保存响应: {p}")
-                                except Exception:
-                                    pass
-                            prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
-                            print(
-                                f"✅ {self.account_name}: fuli 转盘成功: code={code}, prize={prize}, "
-                                f"remaining={remaining}, expireSeconds={expire_seconds}"
-                            )
-                            return True, code, remaining, msg or "转盘成功"
+                                pass
+                        prize = data.get("prize") or data.get("reward") or data.get("amount") or data.get("value")
+                        print(
+                            f"✅ {self.account_name}: fuli 转盘成功: code={code}, prize={prize}, "
+                            f"remaining={remaining}, expireSeconds={expire_seconds}"
+                        )
+                        return True, code, remaining, msg or "转盘成功"
                     if any(k in (msg or "") for k in ["already", "次数", "用完", "已用完"]):
                         return True, "", 0, "次数已用完"
                     return False, "", 0, msg or "转盘失败"
@@ -2138,6 +2154,19 @@ class CheckIn:
                     await self._take_screenshot(fuli_page, "runanytime_fuli_flow_error_fuli")
                 except Exception:
                     pass
+                # 这里经常是“已经登录到 fuli 页面但后续流程异常”，必须把异常信息打出来，避免误以为是登录失败。
+                try:
+                    import traceback
+
+                    tb = traceback.format_exc()
+                    os.makedirs("logs", exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    p = os.path.join("logs", f"{self.safe_account_name}_{ts}_runanytime_fuli_flow_error.txt")
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(tb)
+                    print(f"❌ {self.account_name}: runanytime fuli/topup flow error: {e} (traceback saved: {p})")
+                except Exception:
+                    print(f"❌ {self.account_name}: runanytime fuli/topup flow error: {e}")
                 return False, {"error": f"runanytime fuli/topup flow error: {e}"}
             finally:
                 try:
