@@ -74,7 +74,7 @@ class LinuxDoSettings:
 	max_read_seconds: int = 90
 	max_likes_per_topic: int = 2
 	skip_pinned: bool = True
-	try_turnstile_solver: bool = False
+	try_turnstile_solver: bool = True
 	headless: bool = False
 	storage_state_dir: str = "storage-states"
 
@@ -93,7 +93,7 @@ class LinuxDoSettings:
 			max_read_seconds=_clamp(_env_int("LINUXDO_MAX_READ_SECONDS", 90), 3, 7200),
 			max_likes_per_topic=_clamp(_env_int("LINUXDO_MAX_LIKES_PER_TOPIC", 2), 0, 20),
 			skip_pinned=_env_int("LINUXDO_SKIP_PINNED", 1) != 0,
-			try_turnstile_solver=_env_int("LINUXDO_TRY_TURNSTILE_SOLVER", 0) == 1,
+			try_turnstile_solver=_env_int("LINUXDO_TRY_TURNSTILE_SOLVER", 1) == 1,
 			headless=_env_int("HEADLESS", 0) == 1,
 			storage_state_dir=_env_str("STORAGE_STATE_DIR", "storage-states"),
 		)

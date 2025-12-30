@@ -33,9 +33,15 @@ except Exception as e1:  # pragma: no cover - 可选依赖
 
 
 def _should_try_turnstile_solver() -> bool:
-	# 默认关闭：在很多环境下 Turnstile 为不可见/强风控形态，click solver 会刷屏报
-	# “Cloudflare checkbox not found or not ready”，且并不能提高通过率。
-	return str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip() in {"1", "true", "True", "yes", "YES"}
+	# 默认开启：若需要关闭请设 LINUXDO_TRY_TURNSTILE_SOLVER=0/false/no/off
+	raw = str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip().lower()
+	if raw in {"0", "false", "no", "off"}:
+		return False
+	# 兼容旧语义：显式 truthy 也视为开启
+	if raw in {"1", "true", "yes", "on"}:
+		return True
+	# 未设置/未知值：默认开启
+	return True
 
 
 async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
