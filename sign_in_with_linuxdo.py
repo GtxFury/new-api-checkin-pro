@@ -499,6 +499,18 @@ class LinuxDoSignIn:
 				except Exception:
 					await page.wait_for_timeout(3000)
 
+				# 检测是否被重定向到登录页（session 可能已过期）
+				current_url = page.url or ""
+				if "/login" in current_url:
+					expired_reason = "expired=true" if "expired=true" in current_url else "session invalid"
+					print(f"⚠️ {self.account_name}: Redirected to login page ({expired_reason}), session may have expired")
+					await self._take_screenshot(page, f"{self.provider_config.name}_session_expired")
+					# 如果是 elysiver 且只有一个签到路径，直接返回避免无效尝试
+					if self.provider_config.name == "elysiver" and len(checkin_paths) == 1:
+						print(f"❌ {self.account_name}: Cannot proceed with check-in due to session expiry")
+						return
+					continue
+
 				# 先尝试解决 Turnstile（如果存在）
 				solved = await self._solve_turnstile(page)
 				if not solved:
@@ -1054,8 +1066,16 @@ class LinuxDoSignIn:
 										print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
 										await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
 										await page.wait_for_timeout(2000)
-										await self._browser_check_in_with_turnstile(page)
-										user_info_fast = await self._extract_balance_from_profile(page)
+										
+										# 检测 session 是否有效（如果被重定向到登录页则 session 已过期）
+										console_url = page.url or ""
+										if "/login" in console_url:
+											expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
+											print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, cannot proceed with check-in")
+											await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
+										else:
+											await self._browser_check_in_with_turnstile(page)
+											user_info_fast = await self._extract_balance_from_profile(page)
 
 									restore_cookies = await page.context.cookies()
 									user_cookies = filter_cookies(
@@ -1086,8 +1106,16 @@ class LinuxDoSignIn:
 											print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
 											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
 											await page.wait_for_timeout(2000)
-											await self._browser_check_in_with_turnstile(page)
-											user_info_nav = await self._extract_balance_from_profile(page)
+											
+											# 检测 session 是否有效（如果被重定向到登录页则 session 已过期）
+											console_url = page.url or ""
+											if "/login" in console_url:
+												expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
+												print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, cannot proceed with check-in")
+												await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
+											else:
+												await self._browser_check_in_with_turnstile(page)
+												user_info_nav = await self._extract_balance_from_profile(page)
 
 										restore_cookies = await page.context.cookies()
 										user_cookies = filter_cookies(
