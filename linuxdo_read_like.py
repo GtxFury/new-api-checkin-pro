@@ -72,6 +72,7 @@ class LinuxDoSettings:
 	min_read_seconds: int = 25
 	max_read_seconds: int = 90
 	max_likes_per_topic: int = 2
+	skip_pinned: bool = True
 	try_turnstile_solver: bool = False
 	headless: bool = False
 	storage_state_dir: str = "storage-states"
@@ -90,6 +91,7 @@ class LinuxDoSettings:
 			min_read_seconds=_clamp(_env_int("LINUXDO_MIN_READ_SECONDS", 25), 3, 3600),
 			max_read_seconds=_clamp(_env_int("LINUXDO_MAX_READ_SECONDS", 90), 3, 7200),
 			max_likes_per_topic=_clamp(_env_int("LINUXDO_MAX_LIKES_PER_TOPIC", 2), 0, 20),
+			skip_pinned=_env_int("LINUXDO_SKIP_PINNED", 1) != 0,
 			try_turnstile_solver=_env_int("LINUXDO_TRY_TURNSTILE_SOLVER", 0) == 1,
 			headless=_env_int("HEADLESS", 0) == 1,
 			storage_state_dir=_env_str("STORAGE_STATE_DIR", "storage-states"),
@@ -429,59 +431,118 @@ class LinuxDoAutoReadLike:
 				pass
 			await page.wait_for_timeout(random.randint(350, 850))
 
-	async def _collect_like_candidate_post_ids(self, page) -> list[int]:
-		# linux.do 可能同时存在：
-		# - discourse-reactions 的 like（btn-toggle-reaction-like）
-		# - Discourse 核心 like（toggle-like）
-		# 且按钮可能在 hover 后才显示，因此这里不做严格可见性过滤，只做“未点赞/未禁用”过滤，
-		# 真正点击时再 scroll+hover 提高成功率。
-		res = await page.evaluate(
-			"""() => {
-				const posts = Array.from(document.querySelectorAll('article[data-post-id]'));
-				const out = [];
+	async def _click_one_like_candidate(self, page, exclude_post_ids: set[int]) -> int | None:
+		"""尽量按 linux.do.js 的方式点一次赞：扫描可点击元素 -> scrollIntoView -> element.click()。
 
-				const pushIfOk = (postId, kind, btn) => {
-					if (!btn) return;
-					if (btn.disabled) return;
-					const pressed = btn.getAttribute('aria-pressed') === 'true';
-					const liked = pressed || btn.classList.contains('liked') || btn.classList.contains('has-like');
-					if (liked) return;
-					out.push({ post_id: Number(postId), kind });
+		返回被点赞的 post_id（若无法解析则返回 None）。
+		"""
+		exclude = list(exclude_post_ids)[:2000]
+		res = await page.evaluate(
+			"""({ exclude }) => {
+				const excluded = new Set(exclude || []);
+
+				const isVisible = (el) => {
+					try { return !!(el && el.offsetParent !== null); } catch { return false; }
 				};
 
-				for (const post of posts) {
-					const postId = post.getAttribute('data-post-id');
-					if (!postId) continue;
+				const isLiked = (el) => {
+					try {
+						if (!el) return true;
+						if (el.classList && (el.classList.contains('has-like') || el.classList.contains('liked'))) return true;
+						if (el.getAttribute && el.getAttribute('aria-pressed') === 'true') return true;
+						// 父/子节点可能带 liked 标记
+						const sub = el.querySelector?.('.has-like, .liked, [aria-pressed=\"true\"]');
+						return !!sub;
+					} catch {
+						return false;
+					}
+				};
 
-					// 1) discourse-reactions like
-					const reactionLike = post.querySelector(
-						'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like'
-					);
-					pushIfOk(postId, 'reaction_like', reactionLike);
+				const getPostId = (el) => {
+					try {
+						const article = el.closest?.('article[data-post-id]');
+						if (article) {
+							const v = article.getAttribute('data-post-id');
+							if (v) return Number(v);
+						}
+						const any = el.closest?.('[data-post-id]');
+						if (any) {
+							const v = any.getAttribute('data-post-id');
+							if (v) return Number(v);
+						}
+					} catch {}
+					return null;
+				};
 
-					// 2) Discourse core like
-					const coreLike = post.querySelector('button.toggle-like');
-					pushIfOk(postId, 'core_like', coreLike);
+				const pickClickable = (el) => {
+					try {
+						// discourse-reactions 容器：优先点内部 like button
+						if (el.matches?.('.discourse-reactions-reaction-button')) {
+							return el.querySelector('button.btn-toggle-reaction-like') || el;
+						}
+						// like-count / 外层容器：尽量找同一 post 内的核心 like button
+						if (el.matches?.('.like-count') || el.matches?.('[data-like-button]') || el.matches?.('.like-button')) {
+							const post = el.closest?.('.topic-post') || el.closest?.('article') || el.parentElement;
+							return post?.querySelector?.('button.toggle-like') || el;
+						}
+						return el;
+					} catch {
+						return el;
+					}
+				};
+
+				const selectors = [
+					// 与 linux.do.js: likeRandomComment 一致
+					'.like-button',
+					'.like-count',
+					'[data-like-button]',
+					'.discourse-reactions-reaction-button',
+					// 更明确的按钮（便于某些主题只渲染 button，不渲染容器可点）
+					'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like',
+					'button.toggle-like',
+				];
+
+				const nodes = [];
+				for (const sel of selectors) {
+					for (const el of document.querySelectorAll(sel)) nodes.push(el);
 				}
-				return out;
+
+				const candidates = [];
+				for (const el of nodes) {
+					const clickable = pickClickable(el);
+					if (!clickable) continue;
+					if (!isVisible(clickable)) continue;
+					if (clickable.disabled) continue;
+					if (isLiked(clickable)) continue;
+					const pid = getPostId(clickable);
+					if (pid && excluded.has(pid)) continue;
+					candidates.push({ pid, clickable });
+				}
+
+				if (!candidates.length) return { clicked: false, pid: null };
+
+				const choice = candidates[Math.floor(Math.random() * candidates.length)];
+				try {
+					choice.clickable.scrollIntoView({ behavior: 'instant', block: 'center' });
+				} catch {}
+				try {
+					choice.clickable.click();
+				} catch (e) {
+					return { clicked: false, pid: choice.pid ?? null, error: String(e) };
+				}
+				return { clicked: true, pid: choice.pid ?? null };
 			}""",
+			{"exclude": exclude},
 		)
-		if not isinstance(res, list):
-			return []
-		out: list[dict[str, Any]] = []
-		for item in res:
-			if not isinstance(item, dict):
-				continue
-			post_id = item.get("post_id")
-			kind = item.get("kind")
-			try:
-				pid = int(post_id)
-			except Exception:
-				continue
-			if kind not in {"reaction_like", "core_like"}:
-				continue
-			out.append({"post_id": pid, "kind": kind})
-		return out
+		if not isinstance(res, dict):
+			return None
+		if not res.get("clicked"):
+			return None
+		pid = res.get("pid")
+		try:
+			return int(pid) if pid else None
+		except Exception:
+			return None
 
 	def _install_like_rate_limit_listener(self, page) -> None:
 		self._like_rate_limited_until = 0.0
@@ -540,54 +601,18 @@ class LinuxDoAutoReadLike:
 		if self._like_rate_limited_until and time.time() < self._like_rate_limited_until:
 			return 0, True
 
-		candidates = await self._collect_like_candidate_post_ids(page)
-		# 避免点到 24h 内已点赞过的帖子（含本次运行前同步的数据）
-		candidates = [c for c in candidates if int(c["post_id"]) not in liked_posts_24h]
-		if not candidates:
-			return 0, False
-
-		random.shuffle(candidates)
-		to_like = candidates[: min(len(candidates), self.settings.max_likes_per_topic, remaining_likes)]
-
 		liked = 0
-		for cand in to_like:
+		target = min(self.settings.max_likes_per_topic, remaining_likes)
+		for _ in range(target):
 			if self._like_rate_limited_until and time.time() < self._like_rate_limited_until:
 				return liked, True
-			post_id = int(cand["post_id"])
-			kind = str(cand["kind"])
 			try:
-				post_sel = f'article[data-post-id="{post_id}"]'
-				post_el = await page.query_selector(post_sel)
-				if not post_el:
-					continue
-
-				if kind == "reaction_like":
-					btn_sel = (
-						f'article[data-post-id="{post_id}"] '
-						'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like'
-					)
-				else:
-					btn_sel = f'article[data-post-id="{post_id}"] button.toggle-like'
-
-				btn = await page.query_selector(btn_sel)
-				if not btn:
-					continue
-				await post_el.scroll_into_view_if_needed()
-				await page.wait_for_timeout(random.randint(350, 900))
-				# 有些按钮 hover 后才显示/可点
-				try:
-					await post_el.hover()
-					await page.wait_for_timeout(random.randint(120, 260))
-				except Exception:
-					pass
-				# 重新获取按钮（避免 hover 之后 DOM 替换）
-				btn = await page.query_selector(btn_sel)
-				if not btn:
-					continue
-				await btn.click()
+				pid = await self._click_one_like_candidate(page, liked_posts_24h)
+				if pid is None:
+					break
 				liked += 1
-				liked_posts_24h.add(post_id)
-				self.auto_state.setdefault("liked_posts", {})[str(post_id)] = _now_ts()
+				liked_posts_24h.add(pid)
+				self.auto_state.setdefault("liked_posts", {})[str(pid)] = _now_ts()
 				self._save_auto_state()
 				await page.wait_for_timeout(random.randint(650, 1400))
 			except Exception:
@@ -655,6 +680,13 @@ class LinuxDoAutoReadLike:
 						continue
 					if tid_s in read_topics:
 						continue
+					# 默认跳过置顶（pinned）主题，避免重复刷常驻帖
+					if self.settings.skip_pinned:
+						try:
+							if bool(t.get("pinned")) or bool(t.get("pinned_globally")):
+								continue
+						except Exception:
+							pass
 					posts_count = t.get("posts_count")
 					try:
 						if int(posts_count or 0) >= 5000:

@@ -18,6 +18,8 @@ jobs:
       LINUXDO_MIN_READ_SECONDS: '25'
       LINUXDO_MAX_READ_SECONDS: '90'
       LINUXDO_MAX_LIKES_PER_TOPIC: '2'
+      # 默认跳过置顶主题（设为 0 可关闭）
+      LINUXDO_SKIP_PINNED: '1'
       # 不建议在 GitHub Hosted Runner 上尝试自动解 Turnstile；通常需要人工/自建 runner 才稳定
       LINUXDO_TRY_TURNSTILE_SOLVER: '0'
     steps:
