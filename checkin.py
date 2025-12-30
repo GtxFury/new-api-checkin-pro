@@ -465,12 +465,11 @@ class CheckIn:
                     await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
                 except Exception:
                     pass
-                # Turnstile click solver 默认关闭；如需启用请设 LINUXDO_TRY_TURNSTILE_SOLVER=1
-                if str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip() in {"1", "true", "True", "yes", "YES"}:
-                    try:
-                        await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-                    except Exception:
-                        pass
+                # Turnstile solver 的开关逻辑由 sign_in_with_linuxdo.solve_captcha 内部统一处理
+                try:
+                    await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+                except Exception:
+                    pass
         except Exception:
             pass
 
