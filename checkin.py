@@ -60,6 +60,9 @@ class CheckIn:
 
         os.makedirs(self.storage_state_dir, exist_ok=True)
 
+        # 为整个会话生成固定的 User-Agent，避免同一会话中 UA 变化触发风控
+        self.user_agent = get_random_user_agent()
+
     @staticmethod
     def _mask_code(code: str) -> str:
         if not code:
@@ -1811,7 +1814,7 @@ class CheckIn:
 
                 def _fuli_headers(referer: str) -> dict:
                     return {
-                        "User-Agent": get_random_user_agent(),
+                        "User-Agent": self.user_agent,
                         "Accept": "application/json, text/plain, */*",
                         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                         "Cache-Control": "no-store",
@@ -3675,7 +3678,7 @@ class CheckIn:
             client.cookies.update(cookies)
 
             headers = {
-                "User-Agent": get_random_user_agent(),
+                "User-Agent": self.user_agent,
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                 "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -3861,7 +3864,7 @@ class CheckIn:
             client.cookies.update(waf_cookies)
 
             headers = {
-                "User-Agent": get_random_user_agent(),
+                "User-Agent": self.user_agent,
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                 "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -4021,7 +4024,7 @@ class CheckIn:
             client.cookies.update(waf_cookies)
 
             headers = {
-                "User-Agent": get_random_user_agent(),
+                "User-Agent": self.user_agent,
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                 "Accept-Encoding": "gzip, deflate, br, zstd",
