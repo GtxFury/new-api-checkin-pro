@@ -1,0 +1,125 @@
+name: 清理 Actions 缓存
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_prefix:
+        description: '要清理的缓存前缀（留空清理所有）'
+        required: false
+        default: ''
+        type: string
+      keep_latest:
+        description: '每个前缀保留最新的几个缓存'
+        required: false
+        default: '1'
+        type: string
+      dry_run:
+        description: '仅预览，不实际删除'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: 清理缓存
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cachePrefix = '${{ inputs.cache_prefix }}';
+            const keepLatest = parseInt('${{ inputs.keep_latest }}') || 1;
+            const dryRun = '${{ inputs.dry_run }}' === 'true';
+
+            console.log(`🔧 配置:`);
+            console.log(`   缓存前缀: ${cachePrefix || '(所有)'}`);
+            console.log(`   保留数量: ${keepLatest}`);
+            console.log(`   预览模式: ${dryRun}`);
+            console.log('');
+
+            // 获取所有缓存
+            const caches = await github.paginate(
+              github.rest.actions.getActionsCacheList,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              }
+            );
+
+            console.log(`📦 找到 ${caches.length} 个缓存`);
+
+            if (caches.length === 0) {
+              console.log('✅ 没有需要清理的缓存');
+              return;
+            }
+
+            // 按前缀分组
+            const groups = {};
+            for (const cache of caches) {
+              // 如果指定了前缀，只处理匹配的缓存
+              if (cachePrefix && !cache.key.startsWith(cachePrefix)) {
+                continue;
+              }
+
+              // 提取前缀（第一个 - 之前的部分，或整个 key）
+              const prefix = cache.key.split('-').slice(0, 2).join('-');
+              if (!groups[prefix]) {
+                groups[prefix] = [];
+              }
+              groups[prefix].push(cache);
+            }
+
+            // 按创建时间排序（最新的在前）
+            for (const prefix in groups) {
+              groups[prefix].sort((a, b) =>
+                new Date(b.created_at) - new Date(a.created_at)
+              );
+            }
+
+            // 统计
+            let totalDeleted = 0;
+            let totalSize = 0;
+
+            console.log('');
+            console.log('📋 缓存分组:');
+
+            for (const [prefix, cacheList] of Object.entries(groups)) {
+              console.log(`\n🏷️  ${prefix} (${cacheList.length} 个)`);
+
+              for (let i = 0; i < cacheList.length; i++) {
+                const cache = cacheList[i];
+                const sizeKB = (cache.size_in_bytes / 1024).toFixed(1);
+                const createdAt = new Date(cache.created_at).toLocaleString('zh-CN');
+                const willDelete = i >= keepLatest;
+                const status = willDelete ? '🗑️' : '✅';
+
+                console.log(`   ${status} ${cache.key}`);
+                console.log(`      大小: ${sizeKB} KB | 创建: ${createdAt}`);
+
+                if (willDelete) {
+                  totalDeleted++;
+                  totalSize += cache.size_in_bytes;
+
+                  if (!dryRun) {
+                    try {
+                      await github.rest.actions.deleteActionsCacheById({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        cache_id: cache.id
+                      });
+                      console.log(`      ✅ 已删除`);
+                    } catch (error) {
+                      console.log(`      ❌ 删除失败: ${error.message}`);
+                    }
+                  }
+                }
+              }
+            }
+
+            console.log('');
+            console.log('📊 统计:');
+            console.log(`   ${dryRun ? '将删除' : '已删除'}: ${totalDeleted} 个缓存`);
+            console.log(`   释放空间: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
