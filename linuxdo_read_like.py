@@ -26,6 +26,7 @@ from typing import Any
 from camoufox.async_api import AsyncCamoufox
 
 from utils.config import AccountConfig
+from utils.notify import notify
 
 try:  # pragma: no cover - 可选依赖
 	from sign_in_with_linuxdo import solve_captcha as linuxdo_solve_captcha  # type: ignore
@@ -96,6 +97,23 @@ class LinuxDoSettings:
 			headless=_env_int("HEADLESS", 0) == 1,
 			storage_state_dir=_env_str("STORAGE_STATE_DIR", "storage-states"),
 		)
+
+
+@dataclass
+class RunStats:
+	account_name: str
+	username: str
+	trust_level: int | None = None
+	like_limit: int = 0
+	liked_posts_24h_at_start: int = 0
+	remaining_likes_at_start: int = 0
+	selected_topics: int = 0
+	read_topics: int = 0
+	likes_clicked: int = 0
+	skipped_already_read: int = 0
+	skipped_pinned: int = 0
+	skipped_too_long: int = 0
+	open_failures: int = 0
 
 
 class LinuxDoAutoReadLike:
@@ -622,6 +640,7 @@ class LinuxDoAutoReadLike:
 		return liked, limited
 
 	async def run(self) -> None:
+		stats = RunStats(account_name=self.account_name, username=self.username)
 		self._prune_auto_state()
 		self._save_auto_state()
 
@@ -651,6 +670,10 @@ class LinuxDoAutoReadLike:
 			liked_posts_24h = await self._sync_likes_24h(page, username)
 			used = len(liked_posts_24h)
 			remaining = max(0, limit - used)
+			stats.trust_level = int(trust_level) if trust_level is not None else None
+			stats.like_limit = int(limit)
+			stats.liked_posts_24h_at_start = int(used)
+			stats.remaining_likes_at_start = int(remaining)
 			print(
 				f"ℹ️ {self.account_name}: 用户={username}, trust_level={trust_level}, "
 				f"近24h已点赞(去重post)={used}, 上限={limit}, 剩余={remaining}"
@@ -679,17 +702,20 @@ class LinuxDoAutoReadLike:
 					except Exception:
 						continue
 					if tid_s in read_topics:
+						stats.skipped_already_read += 1
 						continue
 					# 默认跳过置顶（pinned）主题，避免重复刷常驻帖
 					if self.settings.skip_pinned:
 						try:
 							if bool(t.get("pinned")) or bool(t.get("pinned_globally")):
+								stats.skipped_pinned += 1
 								continue
 						except Exception:
 							pass
 					posts_count = t.get("posts_count")
 					try:
 						if int(posts_count or 0) >= 5000:
+							stats.skipped_too_long += 1
 							continue
 					except Exception:
 						pass
@@ -700,6 +726,7 @@ class LinuxDoAutoReadLike:
 
 			self.auto_state["feed_page"] = page_no
 			self._save_auto_state()
+			stats.selected_topics = len(selected)
 
 			if not selected:
 				print(f"ℹ️ {self.account_name}: 没有可阅读的新主题（可能都已读/接口空）")
@@ -719,15 +746,18 @@ class LinuxDoAutoReadLike:
 					await self._maybe_solve_cloudflare(page)
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: 打开主题失败 {tid_i}: {e}")
+					stats.open_failures += 1
 					continue
 
 				read_s = random.randint(self.settings.min_read_seconds, max(self.settings.min_read_seconds, self.settings.max_read_seconds))
 				await self._simulate_reading(page, read_s)
 
 				liked_in_topic, limited = await self._like_some_posts(page, remaining, liked_posts_24h)
+				stats.likes_clicked += liked_in_topic
 				remaining = max(0, remaining - liked_in_topic)
 
 				read_topics[str(tid_i)] = _now_ts()
+				stats.read_topics += 1
 				self._save_auto_state()
 
 				print(
@@ -744,6 +774,8 @@ class LinuxDoAutoReadLike:
 				await context.storage_state(path=self.storage_state_path)
 			except Exception as e:
 				print(f"⚠️ {self.account_name}: 保存 storage_state 失败: {e}")
+
+		return stats
 
 
 def _load_accounts_from_env() -> list[AccountConfig]:
@@ -779,13 +811,45 @@ async def _run_all() -> None:
 		print("⚠️ 未找到包含 linux.do 用户名密码的账号配置，任务结束")
 		return
 
+	all_stats: list[RunStats] = []
 	for name, u, p in targets:
 		print(f"\n===== linux.do 自动阅读点赞：{name} =====")
 		try:
-			await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
+			stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
+			all_stats.append(stats)
 			print(f"✅ {name}: 完成")
 		except Exception as e:
 			print(f"❌ {name}: 失败: {e}")
+
+	# 发送通知（若配置了任意通知渠道）
+	has_any_channel = any(
+		str(os.getenv(k, "") or "").strip()
+		for k in [
+			"EMAIL_USER",
+			"EMAIL_PASS",
+			"EMAIL_TO",
+			"PUSHPLUS_TOKEN",
+			"SERVERPUSHKEY",
+			"DINGDING_WEBHOOK",
+			"FEISHU_WEBHOOK",
+			"WEIXIN_WEBHOOK",
+			"TELEGRAM_BOT_TOKEN",
+			"TELEGRAM_CHAT_ID",
+		]
+	)
+	if has_any_channel:
+		total_read = sum(s.read_topics for s in all_stats)
+		total_likes = sum(s.likes_clicked for s in all_stats)
+		time_info = f'🕓 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		lines: list[str] = [time_info, f"📌 本次总计：阅读主题 {total_read}，点赞 {total_likes}"]
+		for s in all_stats:
+			lines.append(
+				f"👤 {s.account_name}: 阅读主题 {s.read_topics}/{s.selected_topics}，点赞 {s.likes_clicked}，"
+				f"信任等级 {s.trust_level}，近24h已赞 {s.liked_posts_24h_at_start}/{s.like_limit}"
+			)
+		notify.push_message("Linux.do 自动阅读点赞", "\n".join(lines), msg_type="text")
+	else:
+		print("ℹ️ 未检测到通知渠道配置，跳过消息通知")
 
 
 def main() -> None:
