@@ -1062,7 +1062,29 @@ class LinuxDoSignIn:
 									# elysiver: 需要在浏览器中执行签到
 									user_info_fast = None
 									if self.provider_config.name == "elysiver":
-										# 先导航到控制台页面，确保 session 生效
+										# elysiver: 先等待当前页面完成登录流程，确保 session 建立
+										print(f"ℹ️ {self.account_name}: Waiting for elysiver to establish session after OAuth callback")
+										
+										# 等待 localStorage 中出现 user 数据，表示前端已完成登录
+										try:
+											await page.wait_for_function(
+												"""() => {
+													try {
+														const user = localStorage.getItem('user');
+														return user !== null && user !== '';
+													} catch (e) {
+														return false;
+													}
+												}""",
+												timeout=10000,
+											)
+											print(f"✅ {self.account_name}: elysiver localStorage user detected, session established")
+										except Exception:
+											print(f"⚠️ {self.account_name}: elysiver localStorage user not found, trying page reload")
+											await page.reload(wait_until="networkidle")
+											await page.wait_for_timeout(3000)
+										
+										# 导航到控制台页面
 										print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
 										await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
 										await page.wait_for_timeout(2000)
@@ -1071,8 +1093,20 @@ class LinuxDoSignIn:
 										console_url = page.url or ""
 										if "/login" in console_url:
 											expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-											print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, cannot proceed with check-in")
+											print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, trying to recover")
 											await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
+											
+											# 尝试恢复：刷新登录页看是否可以自动登录
+											await page.reload(wait_until="networkidle")
+											await page.wait_for_timeout(3000)
+											
+											# 再次检查是否仍在登录页
+											if "/login" not in (page.url or ""):
+												print(f"✅ {self.account_name}: Session recovered after page reload")
+												await self._browser_check_in_with_turnstile(page)
+												user_info_fast = await self._extract_balance_from_profile(page)
+											else:
+												print(f"❌ {self.account_name}: Cannot recover session, check-in skipped")
 										else:
 											await self._browser_check_in_with_turnstile(page)
 											user_info_fast = await self._extract_balance_from_profile(page)
@@ -1102,17 +1136,50 @@ class LinuxDoSignIn:
 										# elysiver: 需要在浏览器中执行签到
 										user_info_nav = None
 										if self.provider_config.name == "elysiver":
-											# 先导航到控制台页面，确保 session 生效
+											# elysiver: 先等待当前页面完成登录流程，确保 session 建立
+											print(f"ℹ️ {self.account_name}: Waiting for elysiver to establish session after OAuth callback")
+											
+											# 等待 localStorage 中出现 user 数据
+											try:
+												await page.wait_for_function(
+													"""() => {
+														try {
+															const user = localStorage.getItem('user');
+															return user !== null && user !== '';
+														} catch (e) {
+															return false;
+														}
+													}""",
+													timeout=10000,
+												)
+												print(f"✅ {self.account_name}: elysiver localStorage user detected, session established")
+											except Exception:
+												print(f"⚠️ {self.account_name}: elysiver localStorage user not found, trying page reload")
+												await page.reload(wait_until="networkidle")
+												await page.wait_for_timeout(3000)
+											
+											# 导航到控制台页面
 											print(f"ℹ️ {self.account_name}: Navigating to console to establish session")
 											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
 											await page.wait_for_timeout(2000)
 											
-											# 检测 session 是否有效（如果被重定向到登录页则 session 已过期）
+											# 检测 session 是否有效
 											console_url = page.url or ""
 											if "/login" in console_url:
 												expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-												print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, cannot proceed with check-in")
+												print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, trying to recover")
 												await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
+												
+												# 尝试恢复
+												await page.reload(wait_until="networkidle")
+												await page.wait_for_timeout(3000)
+												
+												if "/login" not in (page.url or ""):
+													print(f"✅ {self.account_name}: Session recovered after page reload")
+													await self._browser_check_in_with_turnstile(page)
+													user_info_nav = await self._extract_balance_from_profile(page)
+												else:
+													print(f"❌ {self.account_name}: Cannot recover session, check-in skipped")
 											else:
 												await self._browser_check_in_with_turnstile(page)
 												user_info_nav = await self._extract_balance_from_profile(page)
