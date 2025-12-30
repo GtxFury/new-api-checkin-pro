@@ -2740,6 +2740,13 @@ class CheckIn:
                                 f"⚠️ {self.account_name}: playwright-captcha error on login page: {sc_err}"
                             )
 
+                    # 2.1 针对 elysiver 站点：确保真正通过 Cloudflare 挑战后再继续
+                    if self.provider_config.name == "elysiver":
+                        print(f"ℹ️ {self.account_name}: elysiver detected, ensuring page past Cloudflare challenge")
+                        cf_passed = await self._ensure_page_past_cloudflare(page, timeout_ms=60000)
+                        if not cf_passed:
+                            print(f"⚠️ {self.account_name}: Cloudflare challenge may not be fully resolved, will retry")
+
                     # 3. 使用浏览器内的 fetch 调用 auth_state 接口，复用已通过的 Cloudflare 状态
                     auth_state_url = self.provider_config.get_auth_state_url()
                     print(
@@ -2749,36 +2756,74 @@ class CheckIn:
                     api_user_headers = {k: "-1" for k in self._get_api_user_header_keys()}
                     # 提供基本的 Accept，避免被当成普通页面请求返回 HTML
                     api_user_headers.setdefault("Accept", "application/json, text/plain, */*")
-                    response = await page.evaluate(
-                        f"""async () => {{
-                            try {{
-                                const resp = await fetch('{auth_state_url}', {{
-                                    credentials: 'include',
-                                    headers: {json.dumps(api_user_headers, ensure_ascii=False)},
-                                }});
-                                const text = await resp.text();
-                                return {{ ok: resp.ok, status: resp.status, text }};
-                            }} catch (e) {{
-                                return {{ ok: false, status: 0, text: String(e) }};
-                            }}
-                        }}"""
-                    )
 
-                    if not response or "text" not in response:
-                        return {
-                            "success": False,
-                            "error": f"Failed to get state via browser fetch, invalid response: {response}",
-                        }
+                    # 针对 elysiver：添加重试机制，应对 CF 挑战通过后仍需等待的情况
+                    max_attempts = 4 if self.provider_config.name == "elysiver" else 1
+                    response = None
+                    for attempt in range(max_attempts):
+                        if attempt > 0:
+                            print(f"ℹ️ {self.account_name}: Retrying auth state fetch (attempt {attempt + 1}/{max_attempts})")
+                            await page.wait_for_timeout(3000)
 
-                    status = response.get("status", 0)
-                    text = response.get("text", "")
+                        response = await page.evaluate(
+                            f"""async () => {{
+                                try {{
+                                    const resp = await fetch('{auth_state_url}', {{
+                                        credentials: 'include',
+                                        headers: {json.dumps(api_user_headers, ensure_ascii=False)},
+                                    }});
+                                    const text = await resp.text();
+                                    return {{ ok: resp.ok, status: resp.status, text }};
+                                }} catch (e) {{
+                                    return {{ ok: false, status: 0, text: String(e) }};
+                                }}
+                            }}"""
+                        )
 
-                    if not response.get("ok") or status != 200:
-                        # 依然被 Cloudflare 或后端拒绝，保存部分文本便于排查
-                        return {
-                            "success": False,
-                            "error": f"Failed to get state via browser fetch: HTTP {status}, body: {text[:200]}",
-                        }
+                        if not response or "text" not in response:
+                            if attempt < max_attempts - 1:
+                                continue
+                            return {
+                                "success": False,
+                                "error": f"Failed to get state via browser fetch, invalid response: {response}",
+                            }
+
+                        status = response.get("status", 0)
+                        text = response.get("text", "")
+
+                        # 成功获取
+                        if response.get("ok") and status == 200:
+                            break
+
+                        # 针对 elysiver：检测 CF 拦截并尝试解决后重试
+                        if self.provider_config.name == "elysiver" and attempt < max_attempts - 1:
+                            if status in (403, 429, 503) and self._looks_like_cloudflare_interstitial_html(text[:4000]):
+                                print(
+                                    f"⚠️ {self.account_name}: Cloudflare interstitial detected on auth state fetch (HTTP {status}), "
+                                    "attempting to solve"
+                                )
+                                # 尝试解决 interstitial
+                                await self._maybe_solve_cloudflare_interstitial(page)
+                                # 也尝试解决 turnstile（某些情况下两者可能混用）
+                                await self._maybe_solve_cloudflare_turnstile(page)
+                                # 等待足够时间让 CF 验证完成
+                                await page.wait_for_timeout(10000)
+                                # 再次确保通过 CF
+                                await self._ensure_page_past_cloudflare(page, timeout_ms=30000)
+                                continue
+                            elif status == 429:
+                                # 限流，等待后重试
+                                backoff_ms = min(30000, 5000 * (2 ** attempt))
+                                print(f"⚠️ {self.account_name}: Rate limited (HTTP 429), backing off {backoff_ms/1000:.1f}s")
+                                await page.wait_for_timeout(backoff_ms)
+                                continue
+
+                        # 其他站点或最后一次尝试：直接返回失败
+                        if attempt == max_attempts - 1:
+                            return {
+                                "success": False,
+                                "error": f"Failed to get state via browser fetch: HTTP {status}, body: {text[:200]}",
+                            }
 
                     try:
                         data = json.loads(text)
