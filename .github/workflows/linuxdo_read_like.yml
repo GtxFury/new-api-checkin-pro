@@ -1,0 +1,118 @@
+name: linux.do 自动阅读点赞
+on:
+  schedule:
+    # UTC 18:30 = 北京时间 02:30
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  linuxdo-read-like:
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+      LINUXDO_FEED: latest
+      LINUXDO_TOPICS_PER_RUN: '10'
+      LINUXDO_MIN_READ_SECONDS: '25'
+      LINUXDO_MAX_READ_SECONDS: '90'
+      LINUXDO_MAX_LIKES_PER_TOPIC: '2'
+    steps:
+      - name: set beijing timezone
+        uses: szenius/set-timezone@v2.0
+        with:
+          timezoneWindows: 'China Standard Time'
+
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: 'latest'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 缓存 UV 依赖
+        uses: actions/cache@v4
+        id: uv-cache
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: 安装依赖
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "缓存未命中，开始安装项目依赖..."
+          uv sync
+          echo "✅ 环境初始化完成"
+
+      - name: 安装 Playwright 浏览器依赖
+        run: |
+          echo "安装 Playwright 浏览器依赖..."
+          uv run python -m playwright install
+          echo "✅ Playwright 浏览器依赖安装完成"
+
+      - name: 获取 Camoufox 版本
+        id: camoufox-version
+        run: |
+          $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('camoufox'))"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Camoufox version: $version"
+
+      - name: 缓存 Camoufox 浏览器
+        uses: actions/cache@v4
+        id: camoufox-cache
+        with:
+          path: ~\AppData\Local\camoufox
+          key: ${{ runner.os }}-camoufox-${{ steps.camoufox-version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-camoufox-
+
+      - name: 安装 Camoufox 浏览器
+        if: steps.camoufox-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "缓存未命中，开始下载 Camoufox 浏览器..."
+          uv run camoufox fetch
+          echo "✅ Camoufox 浏览器安装完成"
+
+      - name: 恢复 linux.do 登录状态/阅读状态缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            storage-states
+          key: storage-state-${{ hashFiles('storage-states/*.json') }}
+          restore-keys: |
+            storage-state-
+
+      - name: 执行自动阅读点赞
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+        run: |
+          uv run python -u linuxdo_read_like.py
+
+      - name: 保存 linux.do 登录状态/阅读状态缓存
+        if: hashFiles('storage-states/*.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            storage-states
+          key: storage-state-${{ hashFiles('storage-states/*.json') }}
+
+      - name: 保存日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linuxdo-artifacts-${{ github.run_number }}
+          path: |
+            logs/
+            screenshots/
+            storage-states/
+          if-no-files-found: ignore
+          retention-days: 7
+
