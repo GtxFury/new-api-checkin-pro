@@ -158,6 +158,25 @@
 
 ## 注意事项
 
+## x666.me（独立签到）
+
+本仓库额外提供了 `x666.me` 的独立签到入口与独立 Action：
+- 入口脚本：`main_x666.py`
+- Workflow：`.github/workflows/x666.yml`
+
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_X666`，格式如下：
+
+```json
+[
+  {
+    "name": "x666 账号1",
+    "access_token": "qd.x666.me 的 Bearer token",
+    "cookies": { "session": "x666.me 的 session/cookies" },
+    "api_user": "x666.me 的 new-api-user"
+  }
+]
+```
+
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - `GitHub` 新设备 OTP 验证，注意日志中的链接或配置了通知注意接收的链接，访问链接进行输入验证码
