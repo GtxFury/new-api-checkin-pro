@@ -349,6 +349,20 @@ class LinuxDoSignIn:
 						except Exception:
 							pass
 					await page.wait_for_timeout(12000)
+					
+					# CF 解决后，不能重新 goto 相同 URL（OAuth code 只能使用一次）
+					# 检查当前页面是否已经完成登录，或等待自动跳转
+					current_url = page.url or ""
+					if "/login" not in current_url and "challenges.cloudflare.com" not in current_url:
+						# 可能已经跳转到控制台，尝试从 localStorage 获取用户信息
+						try:
+							api_user_from_ls = await self._extract_api_user_from_localstorage(page)
+							if api_user_from_ls:
+								print(f"✅ {self.account_name}: Got api user from localStorage after CF solve: {api_user_from_ls}")
+								return api_user_from_ls
+						except Exception:
+							pass
+					# 如果仍然没有用户信息，继续重试（但下次 goto 可能会失败因为 code 已被使用）
 					continue
 				break
 
