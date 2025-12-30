@@ -741,35 +741,10 @@ class LinuxDoSignIn:
 		"""从 elysiver 的 /console/personal 页面提取余额信息。
 
 		elysiver 使用 New-API 新版 UI，余额显示在卡片组件中而非表格。
-		优先从 localStorage 获取（更可靠），回退到页面 DOM 解析。
+		优先从页面 DOM 获取（更准确），回退到 localStorage。
 		"""
 		try:
-			# 方法1：从 localStorage 获取用户信息（最可靠）
-			user_data = await page.evaluate("() => localStorage.getItem('user')")
-			if user_data:
-				try:
-					user_obj = json.loads(user_data)
-					if isinstance(user_obj, dict):
-						# quota 和 used_quota 在 localStorage 中是原始值，需要除以 quota_per_unit
-						quota_per_unit = 500000  # elysiver 的 quota_per_unit
-						raw_quota = user_obj.get("quota", 0)
-						raw_used = user_obj.get("used_quota", 0)
-						quota = raw_quota / quota_per_unit if raw_quota else 0.0
-						used_quota = raw_used / quota_per_unit if raw_used else 0.0
-						print(
-							f"✅ {self.account_name}: Parsed balance from localStorage - "
-							f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}"
-						)
-						return {
-							"success": True,
-							"quota": round(quota, 2),
-							"used_quota": round(used_quota, 2),
-							"display": f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}",
-						}
-				except Exception as parse_err:
-					print(f"⚠️ {self.account_name}: Failed to parse localStorage user data: {parse_err}")
-
-			# 方法2：导航到 /console/personal 并从页面 DOM 提取
+			# 先确保在 /console/personal 页面
 			current_url = page.url or ""
 			if "/console/personal" not in current_url:
 				try:
@@ -777,26 +752,25 @@ class LinuxDoSignIn:
 					await page.wait_for_timeout(2000)
 				except Exception as nav_err:
 					print(f"⚠️ {self.account_name}: Failed to navigate to /console/personal: {nav_err}")
-					return None
 
-			# 从页面 DOM 提取余额信息
+			# 方法1：从页面 DOM 提取余额信息（优先，因为 OAuth 回调后 localStorage 可能还没更新）
 			balance_info = await page.evaluate(
 				"""() => {
 					try {
 						const bodyText = document.body?.innerText || '';
 						const result = {};
 
-						// 匹配 "当前余额" 标签附近的数值（格式如 "E 146.60"）
+						// 匹配 "E 146.60" 后跟 "当前余额" 的模式
 						const balanceMatch = bodyText.match(/E\\s*([\\d.,]+)\\s*当前余额/);
 						if (balanceMatch) {
 							result.quota = balanceMatch[1];
 						} else {
-							// 备用匹配：查找大数值后跟"当前余额"
+							// 备用匹配：查找数值后跟"当前余额"
 							const altMatch = bodyText.match(/([\\d.,]+)\\s*当前余额/);
 							if (altMatch) result.quota = altMatch[1];
 						}
 
-						// 匹配 "历史消耗" 标签附近的数值
+						// 匹配 "历史消耗" 后跟 "E 0.00" 的模式
 						const usedMatch = bodyText.match(/历史消耗\\s*E\\s*([\\d.,]+)/);
 						if (usedMatch) {
 							result.used_quota = usedMatch[1];
@@ -829,6 +803,33 @@ class LinuxDoSignIn:
 					"used_quota": round(used_quota, 2),
 					"display": f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}",
 				}
+
+			# 方法2：从 localStorage 获取用户信息（回退方案）
+			user_data = await page.evaluate("() => localStorage.getItem('user')")
+			if user_data:
+				try:
+					user_obj = json.loads(user_data)
+					if isinstance(user_obj, dict):
+						# quota 和 used_quota 在 localStorage 中是原始值，需要除以 quota_per_unit
+						quota_per_unit = 500000  # elysiver 的 quota_per_unit
+						raw_quota = user_obj.get("quota", 0)
+						raw_used = user_obj.get("used_quota", 0)
+						# 只有当 quota > 0 时才使用 localStorage 的数据
+						if raw_quota and raw_quota > 0:
+							quota = raw_quota / quota_per_unit
+							used_quota = raw_used / quota_per_unit if raw_used else 0.0
+							print(
+								f"✅ {self.account_name}: Parsed balance from localStorage - "
+								f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}"
+							)
+							return {
+								"success": True,
+								"quota": round(quota, 2),
+								"used_quota": round(used_quota, 2),
+								"display": f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}",
+							}
+				except Exception as parse_err:
+					print(f"⚠️ {self.account_name}: Failed to parse localStorage user data: {parse_err}")
 
 			print(f"⚠️ {self.account_name}: Failed to extract balance from elysiver /console/personal")
 			return None
