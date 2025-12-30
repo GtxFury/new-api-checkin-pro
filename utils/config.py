@@ -143,16 +143,16 @@ class AppConfig:
                 # WONG 公益站使用 /api/user/checkin 作为签到接口
                 sign_in_path="/api/user/checkin",
                 user_info_path="/api/user/self",
-                # 该站点使用 New-Api-User 作为用户标识头
-                api_user_key="New-Api-User",
+                # 该站点使用 new-api-user 作为用户标识头（小写）
+                api_user_key="new-api-user",
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 # 从 https://wzw.pp.ua/api/status 中动态获取（该值可能会变动）
                 linuxdo_client_id=None,
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
-                # 与 anyrouter 类似，可能需要 WAF cookies
-                bypass_method="waf_cookies",
+                # 该站点不需要 WAF cookies
+                bypass_method=None,
                 turnstile_check=False,
             ),
             "agentrouter": ProviderConfig(
