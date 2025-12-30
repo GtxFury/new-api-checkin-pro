@@ -151,6 +151,27 @@ class LinuxDoAutoReadLike:
 			for k in removed:
 				m.pop(k, None)
 
+	async def _dump_debug(self, page, reason: str) -> None:
+		try:
+			os.makedirs("screenshots", exist_ok=True)
+			os.makedirs("logs", exist_ok=True)
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			safe_reason = _safe_name(reason)
+			png = os.path.join("screenshots", f"{self.safe_account_name}_{ts}_{safe_reason}.png")
+			html = os.path.join("logs", f"{self.safe_account_name}_{ts}_{safe_reason}.html")
+			try:
+				await page.screenshot(path=png, full_page=True)
+			except Exception:
+				pass
+			try:
+				content = await page.content()
+				with open(html, "w", encoding="utf-8") as f:
+					f.write(content)
+			except Exception:
+				pass
+		except Exception:
+			pass
+
 	@staticmethod
 	def _get_daily_like_limit(trust_level: int | None) -> int:
 		if trust_level is None:
@@ -305,10 +326,15 @@ class LinuxDoAutoReadLike:
 			return user
 
 		print(f"ℹ️ {self.account_name}: 未登录，开始登录 linux.do")
-		await self._linuxdo_login(page)
+		try:
+			await self._linuxdo_login(page)
+		except Exception:
+			await self._dump_debug(page, "linuxdo_login_failed")
+			raise
 
 		user = await self._get_current_user(page)
 		if not user:
+			await self._dump_debug(page, "linuxdo_login_no_current_user")
 			raise RuntimeError("linux.do 登录后仍无法获取当前用户信息（可能被 Cloudflare/风控拦截）")
 		return user
 
