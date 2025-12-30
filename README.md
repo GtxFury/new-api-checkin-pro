@@ -14,6 +14,7 @@
 - ✅ linux.do 登录认证
 - ✅ github 登录认证 (with OTP)
 - ✅ Cloudflare bypass
+- ✅ linux.do 自动阅读/点赞（可选工作流：`.github/workflows/linuxdo_read_like.yml`）
 
 ## 使用方法
 
