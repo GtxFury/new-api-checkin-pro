@@ -32,6 +32,12 @@ except Exception as e1:  # pragma: no cover - 可选依赖
 	print(f"⚠️ LinuxDoSignIn: playwright-captcha not available: {e1!r}")
 
 
+def _should_try_turnstile_solver() -> bool:
+	# 默认关闭：在很多环境下 Turnstile 为不可见/强风控形态，click solver 会刷屏报
+	# “Cloudflare checkbox not found or not ready”，且并不能提高通过率。
+	return str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip() in {"1", "true", "True", "yes", "YES"}
+
+
 async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
 	"""统一的验证码解决入口，优先使用 playwright-captcha。
 
@@ -43,6 +49,10 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 			f"⚠️ LinuxDoSignIn: playwright-captcha is not available, "
 			f"solve_captcha fallback will always return False"
 		)
+		return False
+
+	# 默认不尝试 Turnstile click solver（除非显式开启）。
+	if captcha_type == "cloudflare" and challenge_type == "turnstile" and not _should_try_turnstile_solver():
 		return False
 
 	# 预检测：很多情况下页面并没有 Cloudflare iframe（例如已经通过校验、或被其他 WAF/401 页面拦截），
@@ -327,10 +337,11 @@ class LinuxDoSignIn:
 						await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
 					except Exception:
 						pass
-					try:
-						await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-					except Exception:
-						pass
+					if _should_try_turnstile_solver():
+						try:
+							await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+						except Exception:
+							pass
 					await page.wait_for_timeout(12000)
 					continue
 				break
@@ -779,16 +790,23 @@ class LinuxDoSignIn:
 					try:
 						print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
 
-						await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+						login_resp = await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+						try:
+							if login_resp and getattr(login_resp, "status", None) == 429:
+								raise RuntimeError("linux.do 返回 429（IP 被临时限流/封禁），请稍后重试或更换出口 IP")
+						except Exception:
+							raise
 						# linux.do 登录页会出现 Cloudflare Turnstile/Interstitial，先尝试处理（失败不阻塞，后续仍可能人工通过）
 						try:
 							await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
 						except Exception:
 							pass
-						try:
-							await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-						except Exception:
-							pass
+						# Turnstile click solver 默认关闭；如需启用请设 LINUXDO_TRY_TURNSTILE_SOLVER=1
+						if _should_try_turnstile_solver():
+							try:
+								await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+							except Exception:
+								pass
 
 						async def _set_value(selectors: list[str], value: str) -> bool:
 							for sel in selectors:

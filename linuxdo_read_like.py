@@ -17,6 +17,7 @@ import json
 import os
 import random
 import time
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,6 +72,7 @@ class LinuxDoSettings:
 	min_read_seconds: int = 25
 	max_read_seconds: int = 90
 	max_likes_per_topic: int = 2
+	try_turnstile_solver: bool = False
 	headless: bool = False
 	storage_state_dir: str = "storage-states"
 
@@ -88,6 +90,7 @@ class LinuxDoSettings:
 			min_read_seconds=_clamp(_env_int("LINUXDO_MIN_READ_SECONDS", 25), 3, 3600),
 			max_read_seconds=_clamp(_env_int("LINUXDO_MAX_READ_SECONDS", 90), 3, 7200),
 			max_likes_per_topic=_clamp(_env_int("LINUXDO_MAX_LIKES_PER_TOPIC", 2), 0, 20),
+			try_turnstile_solver=_env_int("LINUXDO_TRY_TURNSTILE_SOLVER", 0) == 1,
 			headless=_env_int("HEADLESS", 0) == 1,
 			storage_state_dir=_env_str("STORAGE_STATE_DIR", "storage-states"),
 		)
@@ -104,9 +107,16 @@ class LinuxDoAutoReadLike:
 		self.settings = settings
 
 		Path(self.settings.storage_state_dir).mkdir(parents=True, exist_ok=True)
-		self.storage_state_path = os.path.join(
+		# 复用 checkin.py 的 linux.do 登录缓存命名，避免同一账号重复触发 Cloudflare/Turnstile
+		# checkin.py: storage-states/linuxdo_{username_hash}_storage_state.json
+		username_hash = hashlib.sha256(self.username.encode("utf-8")).hexdigest()[:8]
+		primary_storage_state = os.path.join(
+			self.settings.storage_state_dir, f"linuxdo_{username_hash}_storage_state.json"
+		)
+		legacy_storage_state = os.path.join(
 			self.settings.storage_state_dir, f"linuxdo_forum_{self.safe_account_name}.json"
 		)
+		self.storage_state_path = primary_storage_state if os.path.exists(primary_storage_state) else legacy_storage_state
 		self.auto_state_path = os.path.join(
 			self.settings.storage_state_dir, f"linuxdo_forum_{self.safe_account_name}_autostate.json"
 		)
@@ -219,12 +229,15 @@ class LinuxDoAutoReadLike:
 			await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
 		except Exception:
 			pass
-		try:
-			await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-		except Exception:
-			pass
+		if self.settings.try_turnstile_solver:
+			try:
+				await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+			except Exception:
+				pass
 
 	async def _linuxdo_login(self, page) -> None:
+		# 说明：GitHub Hosted Runner 上 Turnstile 经常是不可见/强风控形态，自动点击不稳定。
+		# 这里尽量依赖缓存的 storage_state 复用登录态；必要时才走登录表单+interstitial 处理。
 		await page.goto(f"{self.settings.origin}/login", wait_until="domcontentloaded")
 		await page.wait_for_timeout(1200)
 		await self._maybe_solve_cloudflare(page)
