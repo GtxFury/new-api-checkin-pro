@@ -430,37 +430,57 @@ class LinuxDoAutoReadLike:
 			await page.wait_for_timeout(random.randint(350, 850))
 
 	async def _collect_like_candidate_post_ids(self, page) -> list[int]:
-		# 仅针对 discourse-reactions 插件的 “like” 按钮（与 linux.do.js 一致）
+		# linux.do 可能同时存在：
+		# - discourse-reactions 的 like（btn-toggle-reaction-like）
+		# - Discourse 核心 like（toggle-like）
+		# 且按钮可能在 hover 后才显示，因此这里不做严格可见性过滤，只做“未点赞/未禁用”过滤，
+		# 真正点击时再 scroll+hover 提高成功率。
 		res = await page.evaluate(
 			"""() => {
 				const posts = Array.from(document.querySelectorAll('article[data-post-id]'));
 				const out = [];
+
+				const pushIfOk = (postId, kind, btn) => {
+					if (!btn) return;
+					if (btn.disabled) return;
+					const pressed = btn.getAttribute('aria-pressed') === 'true';
+					const liked = pressed || btn.classList.contains('liked') || btn.classList.contains('has-like');
+					if (liked) return;
+					out.push({ post_id: Number(postId), kind });
+				};
+
 				for (const post of posts) {
 					const postId = post.getAttribute('data-post-id');
 					if (!postId) continue;
-					const btn = post.querySelector('div.discourse-reactions-reaction-button button.btn-toggle-reaction-like');
-					if (!btn) continue;
-					// 可见性简单判断
-					const rect = btn.getBoundingClientRect();
-					const visible = rect.width > 0 && rect.height > 0;
-					if (!visible) continue;
-					// 已点赞判断（尽量保守）
-					const pressed = btn.getAttribute('aria-pressed') === 'true';
-					const liked = pressed || btn.classList.contains('liked') || btn.classList.contains('has-like');
-					if (liked) continue;
-					out.push(Number(postId));
+
+					// 1) discourse-reactions like
+					const reactionLike = post.querySelector(
+						'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like'
+					);
+					pushIfOk(postId, 'reaction_like', reactionLike);
+
+					// 2) Discourse core like
+					const coreLike = post.querySelector('button.toggle-like');
+					pushIfOk(postId, 'core_like', coreLike);
 				}
 				return out;
 			}""",
 		)
 		if not isinstance(res, list):
 			return []
-		out: list[int] = []
-		for x in res:
+		out: list[dict[str, Any]] = []
+		for item in res:
+			if not isinstance(item, dict):
+				continue
+			post_id = item.get("post_id")
+			kind = item.get("kind")
 			try:
-				out.append(int(x))
+				pid = int(post_id)
 			except Exception:
 				continue
+			if kind not in {"reaction_like", "core_like"}:
+				continue
+			out.append({"post_id": pid, "kind": kind})
 		return out
 
 	def _install_like_rate_limit_listener(self, page) -> None:
@@ -522,7 +542,7 @@ class LinuxDoAutoReadLike:
 
 		candidates = await self._collect_like_candidate_post_ids(page)
 		# 避免点到 24h 内已点赞过的帖子（含本次运行前同步的数据）
-		candidates = [pid for pid in candidates if pid not in liked_posts_24h]
+		candidates = [c for c in candidates if int(c["post_id"]) not in liked_posts_24h]
 		if not candidates:
 			return 0, False
 
@@ -530,19 +550,40 @@ class LinuxDoAutoReadLike:
 		to_like = candidates[: min(len(candidates), self.settings.max_likes_per_topic, remaining_likes)]
 
 		liked = 0
-		for post_id in to_like:
+		for cand in to_like:
 			if self._like_rate_limited_until and time.time() < self._like_rate_limited_until:
 				return liked, True
+			post_id = int(cand["post_id"])
+			kind = str(cand["kind"])
 			try:
-				sel = (
-					f'article[data-post-id="{post_id}"] '
-					'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like'
-				)
-				btn = await page.query_selector(sel)
+				post_sel = f'article[data-post-id="{post_id}"]'
+				post_el = await page.query_selector(post_sel)
+				if not post_el:
+					continue
+
+				if kind == "reaction_like":
+					btn_sel = (
+						f'article[data-post-id="{post_id}"] '
+						'div.discourse-reactions-reaction-button button.btn-toggle-reaction-like'
+					)
+				else:
+					btn_sel = f'article[data-post-id="{post_id}"] button.toggle-like'
+
+				btn = await page.query_selector(btn_sel)
 				if not btn:
 					continue
-				await btn.scroll_into_view_if_needed()
+				await post_el.scroll_into_view_if_needed()
 				await page.wait_for_timeout(random.randint(350, 900))
+				# 有些按钮 hover 后才显示/可点
+				try:
+					await post_el.hover()
+					await page.wait_for_timeout(random.randint(120, 260))
+				except Exception:
+					pass
+				# 重新获取按钮（避免 hover 之后 DOM 替换）
+				btn = await page.query_selector(btn_sel)
+				if not btn:
+					continue
 				await btn.click()
 				liked += 1
 				liked_posts_24h.add(post_id)
