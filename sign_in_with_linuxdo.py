@@ -75,10 +75,19 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 			except Exception:
 				pass
 
-		# 仅在确实存在可点击/可识别的挑战元素时才进入 solver；title 只是辅助信号，不作为触发条件，
-		# 避免 “Just a moment” 之类页面尚未渲染 iframe 时反复刷屏报错。
-		has_any = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput") or has_cf_evidence.get("hasChlForm"))
-		if not has_any:
+		# 仅在“与目标挑战类型匹配”的证据存在时才进入 solver，避免把 interstitial 页面当 turnstile 点，
+		# 从而出现 “Cloudflare checkbox not found or not ready” 的误判/刷屏。
+		is_turnstile_evidence = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput"))
+		is_interstitial_evidence = bool(has_cf_evidence.get("hasChlForm"))
+
+		should_try = False
+		if captcha_type == "cloudflare" and challenge_type == "turnstile":
+			should_try = is_turnstile_evidence
+		elif captcha_type == "cloudflare" and challenge_type == "interstitial":
+			# interstitial 常见为 __cf_chl 表单；部分情况下只有标题信号但还未渲染，允许 titleLooks 作为弱触发
+			should_try = is_interstitial_evidence or bool(has_cf_evidence.get("titleLooks"))
+
+		if not should_try:
 			return False
 	except Exception:
 		# 预检测失败时不影响原流程：继续尝试 solver（保持行为兼容）
