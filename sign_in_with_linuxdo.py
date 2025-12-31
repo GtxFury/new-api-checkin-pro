@@ -5,6 +5,7 @@
 主要用于 runanytime.hxi.me 这类需要在前端页面完成签到的站点。
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -124,10 +125,18 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 			)
 			return False
 
-		async with ClickSolver(framework=framework, page=page) as solver:
-			# 对于 ClickSolver，solve_captcha 在成功时不会返回 token，能正常返回即视为成功
-			await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
-			return True
+		async def _run_solver() -> bool:
+			async with ClickSolver(framework=framework, page=page) as solver:
+				# 对于 ClickSolver，solve_captcha 在成功时不会返回 token，能正常返回即视为成功
+				await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
+				return True
+
+		# 设置 30 秒超时（Turnstile 通常需要一些时间完成验证）
+		try:
+			return await asyncio.wait_for(_run_solver(), timeout=30.0)
+		except asyncio.TimeoutError:
+			print(f"⚠️ LinuxDoSignIn: playwright-captcha solver timed out after 30s")
+			return False
 	except Exception as e:
 		print(f"⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}")
 		return False
@@ -193,9 +202,13 @@ class LinuxDoSignIn:
 	def _should_skip_fast_callback(self) -> bool:
 		"""判断是否应该跳过 fast callback，让浏览器自然完成 OAuth 流程。
 
-		wzw 站点的回调接口会返回 'failed to get access token'，
-		需要让前端 SPA 自行处理 OAuth 回调，而不是主动调用回调接口。
+		wzw 站点需要让前端 SPA 自行处理 OAuth 回调建立 session，
+		而不是主动调用回调接口（会导致 session 不正确，后续签到 401）。
 		"""
+		return self.provider_config.name == "wzw"
+
+	def _is_wzw_provider(self) -> bool:
+		"""判断是否是 wzw 站点"""
 		return self.provider_config.name == "wzw"
 
 	async def _call_provider_linuxdo_callback_fast(
@@ -1473,56 +1486,39 @@ class LinuxDoSignIn:
 						}
 
 					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
-					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调
+					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调建立 session
 					if self._should_skip_fast_callback():
-						# wzw: 前端 OAuth 回调可能无法正确建立 session，需要手动导航到 API 回调接口
-						print(f"ℹ️ {self.account_name}: wzw OAuth: navigating to API callback to establish session...")
+						# wzw: 等待 SPA 自然完成 OAuth 流程，不要手动导航到 API 端点
+						# 这样可以让前端正确建立 session，避免后续签到 401
+						print(f"ℹ️ {self.account_name}: wzw OAuth: waiting for SPA to complete OAuth flow...")
 						try:
-							# 构建回调 URL
-							base_callback_url = self.provider_config.get_linuxdo_auth_url()
-							parsed_cb = urlparse(base_callback_url)
-							cb_query = parse_qs(parsed_cb.query)
-							cb_query["code"] = [code]
-							if auth_state:
-								cb_query["state"] = [auth_state]
-							final_query = urlencode(cb_query, doseq=True)
-							final_callback_url = parsed_cb._replace(query=final_query).geturl()
-
-							print(f"ℹ️ {self.account_name}: Navigating to callback URL: {final_callback_url}")
-							response = await page.goto(final_callback_url, wait_until="domcontentloaded")
-
-							# 等待页面处理完成
-							await page.wait_for_timeout(3000)
-
-							# 尝试从响应或 localStorage 获取 api_user
-							api_user_wzw = None
-
-							# 方法1：检查响应是否是 JSON
+							# 等待 localStorage 中出现 user 数据，表示 SPA 已完成 OAuth 处理
 							try:
-								text = await page.evaluate("() => document.body?.innerText || ''")
-								if text and text.strip().startswith("{"):
-									data = json.loads(text)
-									if isinstance(data, dict) and data.get("success"):
-										user_data = data.get("data", {}) or {}
-										api_user_wzw = user_data.get("id") or user_data.get("user_id")
-										if api_user_wzw:
-											print(f"✅ {self.account_name}: Got api user from wzw callback response: {api_user_wzw}")
+								await page.wait_for_function(
+									"""() => {
+										try {
+											const user = localStorage.getItem('user');
+											return user !== null && user !== '';
+										} catch (e) {
+											return false;
+										}
+									}""",
+									timeout=15000,
+								)
+								print(f"✅ {self.account_name}: wzw localStorage user detected")
 							except Exception:
-								pass
-
-							# 方法2：从 localStorage 获取
-							if not api_user_wzw:
-								# 可能页面重定向了，尝试导航到 /console 触发 session
+								# 如果等待超时，尝试导航到 /console 触发 SPA 初始化
+								print(f"⚠️ {self.account_name}: wzw localStorage timeout, trying /console navigation...")
 								try:
 									await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-									await page.wait_for_timeout(2000)
+									await page.wait_for_timeout(3000)
 								except Exception:
 									pass
-								api_user_wzw = await self._extract_api_user_from_localstorage(page)
-								if api_user_wzw:
-									print(f"✅ {self.account_name}: Got api user from wzw localStorage: {api_user_wzw}")
 
+							# 从 localStorage 获取 api_user
+							api_user_wzw = await self._extract_api_user_from_localstorage(page)
 							if api_user_wzw:
+								print(f"✅ {self.account_name}: Got api user from wzw localStorage: {api_user_wzw}")
 								restore_cookies_wzw = await page.context.cookies()
 								user_cookies_wzw = filter_cookies(
 									restore_cookies_wzw, self.provider_config.origin
@@ -1530,11 +1526,13 @@ class LinuxDoSignIn:
 								print(f"ℹ️ {self.account_name}: wzw cookies extracted: {len(user_cookies_wzw)} cookies")
 								return True, {"cookies": user_cookies_wzw, "api_user": api_user_wzw}
 							else:
-								print(f"⚠️ {self.account_name}: wzw OAuth: failed to get api_user after callback")
+								# 如果仍然无法获取 api_user，返回 OAuth code 让上层通过 HTTP 调用回调
+								print(f"⚠️ {self.account_name}: wzw: no api_user in localStorage, returning OAuth code")
+								return True, {"code": [code], "state": [auth_state] if auth_state else []}
 						except Exception as wzw_err:
-							print(f"⚠️ {self.account_name}: wzw OAuth callback error: {wzw_err}")
-
-						return False, {"error": "wzw OAuth: failed to establish session"}
+							print(f"⚠️ {self.account_name}: wzw OAuth flow error: {wzw_err}")
+							# 返回 OAuth code 让上层处理
+							return True, {"code": [code], "state": [auth_state] if auth_state else []}
 
 					if callback_attempted and self._prefer_callback_navigation():
 						return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
