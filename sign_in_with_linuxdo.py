@@ -1409,6 +1409,57 @@ class LinuxDoSignIn:
 					if api_user:
 						print(f"✅ {self.account_name}: OAuth authorization successful")
 
+						# wzw 站点：localStorage 有 user 不代表服务端 session 已建立。
+						# 需要等待 SPA 完成 OAuth 流程，确保 session cookie 被正确设置。
+						if self.provider_config.name == "wzw":
+							print(f"ℹ️ {self.account_name}: wzw: waiting for session to be established...")
+							try:
+								# 等待一小段时间让 SPA 完成 OAuth 回调处理
+								await page.wait_for_timeout(2000)
+
+								# 导航到 /console 触发 session 验证
+								try:
+									await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+									await page.wait_for_timeout(1000)
+								except Exception:
+									pass
+
+								# 验证 session 是否有效：尝试调用 /api/user/self
+								try:
+									api_response = await page.evaluate("""
+										async () => {
+											try {
+												const resp = await fetch('/api/user/self', {
+													method: 'GET',
+													headers: {
+														'Accept': 'application/json',
+														'Content-Type': 'application/json'
+													},
+													credentials: 'include'
+												});
+												return { status: resp.status, ok: resp.ok };
+											} catch (e) {
+												return { status: 0, ok: false, error: e.message };
+											}
+										}
+									""")
+									if api_response and api_response.get("ok"):
+										print(f"✅ {self.account_name}: wzw session verified successfully")
+									else:
+										print(f"⚠️ {self.account_name}: wzw session verification returned status {api_response.get('status')}")
+										# 如果 session 无效，尝试重新导航到 OAuth 回调 URL
+										if oauth_redirect_url:
+											print(f"ℹ️ {self.account_name}: wzw: retrying OAuth callback navigation...")
+											try:
+												await page.goto(oauth_redirect_url, wait_until="networkidle")
+												await page.wait_for_timeout(3000)
+											except Exception:
+												pass
+								except Exception as verify_err:
+									print(f"⚠️ {self.account_name}: wzw session verification error: {verify_err}")
+							except Exception as wzw_err:
+								print(f"⚠️ {self.account_name}: wzw session wait error: {wzw_err}")
+
 						# runanytime/new-api：localStorage 里有 user 不代表服务端 session 已建立。
 						# 这里用 /api/user/self（带 new-api-user）强校验；若失败则尝试用 code 回调建立会话。
 						if self.provider_config.name == "runanytime":
