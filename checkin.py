@@ -3368,7 +3368,9 @@ class CheckIn:
                     configured = getattr(self.provider_config, "checkin_page_path", None)
                     if configured:
                         paths.append(str(configured))
-                    paths.extend(["/console/checkin", "/console"])
+                    # elysiver: 签到状态只在 /console/checkin 页面可确认，不需要回退到 /console
+                    if self.provider_config.name != "elysiver":
+                        paths.extend(["/console/checkin", "/console"])
 
                     seen: set[str] = set()
                     paths = [p for p in paths if p and not (p in seen or seen.add(p))]
@@ -3482,7 +3484,94 @@ class CheckIn:
                             except Exception:
                                 pass
 
-                        # DOM 判定：按钮“今日已签到”通常 disabled；同时兼容文本提示
+                        # DOM 判定：按钮"今日已签到"通常 disabled；同时兼容文本提示
+                        # elysiver 专用检测：等待页面完全加载后检测签到按钮状态
+                        if self.provider_config.name == "elysiver":
+                            try:
+                                # elysiver 页面初始会显示"签到功能未启用"，需要等待真正的签到按钮出现
+                                # 等待"今日已签到"或"立即签到"按钮出现，最多等待 15 秒
+                                print(f"ℹ️ {self.account_name}: Waiting for elysiver check-in page to fully load...")
+                                await page.wait_for_function(
+                                    """() => {
+                                        try {
+                                            const bodyText = document.body?.innerText || '';
+                                            // 页面加载完成的标志：出现签到按钮或签到记录
+                                            if (bodyText.includes('今日已签到') || bodyText.includes('立即签到')) {
+                                                return true;
+                                            }
+                                            // 如果有签到记录表格，也说明页面已加载
+                                            if (bodyText.includes('签到记录') && bodyText.includes('获得额度')) {
+                                                return true;
+                                            }
+                                            return false;
+                                        } catch (e) {
+                                            return false;
+                                        }
+                                    }""",
+                                    timeout=15000,
+                                )
+                                print(f"ℹ️ {self.account_name}: elysiver check-in page loaded, checking status...")
+
+                                # 检测签到状态
+                                elysiver_result = await page.evaluate(
+                                    """() => {
+                                        try {
+                                            // 遍历所有按钮，查找签到相关按钮
+                                            const buttons = Array.from(document.querySelectorAll('button'));
+                                            for (const btn of buttons) {
+                                                const btnText = btn.innerText || btn.textContent || '';
+                                                if (btnText.includes('今日已签到')) {
+                                                    return {
+                                                        checkedIn: true,
+                                                        btnText: btnText.trim(),
+                                                        disabled: btn.disabled || btn.getAttribute('aria-disabled') === 'true'
+                                                    };
+                                                }
+                                                if (btnText.includes('立即签到')) {
+                                                    return {
+                                                        checkedIn: false,
+                                                        btnText: btnText.trim(),
+                                                        canCheckIn: true
+                                                    };
+                                                }
+                                            }
+                                            // 备用：检查页面文本
+                                            const bodyText = document.body?.innerText || '';
+                                            if (bodyText.includes('今日已签到')) {
+                                                return { checkedIn: true, inBody: true };
+                                            }
+                                            if (bodyText.includes('签到功能未启用')) {
+                                                return { checkedIn: false, disabled: true, reason: 'feature_disabled' };
+                                            }
+                                            return { checkedIn: false, notFound: true };
+                                        } catch (e) {
+                                            return { checkedIn: false, error: e.message };
+                                        }
+                                    }"""
+                                )
+
+                                if isinstance(elysiver_result, dict):
+                                    if elysiver_result.get("checkedIn"):
+                                        btn_text = elysiver_result.get("btnText", "")
+                                        print(f"✅ {self.account_name}: Check-in confirmed by elysiver detection (button: {btn_text})")
+                                        return {"success": True, "checked_in": True}
+                                    elif elysiver_result.get("canCheckIn"):
+                                        print(f"ℹ️ {self.account_name}: elysiver shows '立即签到' button, not checked in yet")
+                                        return {"success": True, "checked_in": False, "can_check_in": True}
+                                    elif elysiver_result.get("reason") == "feature_disabled":
+                                        print(f"⚠️ {self.account_name}: elysiver check-in feature is disabled by admin")
+                                        # 功能被禁用时视为成功（无需签到）
+                                        return {"success": True, "checked_in": True, "reason": "feature_disabled"}
+                                    else:
+                                        print(f"⚠️ {self.account_name}: elysiver check-in status unclear: {elysiver_result}")
+                            except Exception as ely_err:
+                                print(f"⚠️ {self.account_name}: elysiver check-in detection error: {ely_err}")
+                                # 超时可能是页面没有完全加载，尝试截图诊断
+                                try:
+                                    await self._take_screenshot(page, "elysiver_checkin_timeout")
+                                except Exception:
+                                    pass
+
                         try:
                             result = await page.evaluate(
                                 """() => {
