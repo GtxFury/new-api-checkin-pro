@@ -190,6 +190,14 @@ class LinuxDoSignIn:
 		except Exception:
 			return False
 
+	def _should_skip_fast_callback(self) -> bool:
+		"""判断是否应该跳过 fast callback，让浏览器自然完成 OAuth 流程。
+
+		wzw 站点的回调接口会返回 'failed to get access token'，
+		需要让前端 SPA 自行处理 OAuth 回调，而不是主动调用回调接口。
+		"""
+		return self.provider_config.name == "wzw"
+
 	async def _call_provider_linuxdo_callback_fast(
 		self,
 		page,
@@ -1164,7 +1172,7 @@ class LinuxDoSignIn:
 							q_fast = parse_qs(parsed_fast.query)
 							code_fast_vals = q_fast.get("code")
 							code_fast = code_fast_vals[0] if code_fast_vals else None
-							if code_fast:
+							if code_fast and not self._should_skip_fast_callback():
 								callback_attempted = True
 								# Veloera 系站点（如 elysiver）更容易在回调接口触发 CF/WAF，避免先用 fetch 反复打回调导致 429
 								if self._prefer_callback_navigation():
@@ -1465,6 +1473,48 @@ class LinuxDoSignIn:
 						}
 
 					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
+					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调
+					if self._should_skip_fast_callback():
+						# wzw: 等待 SPA 完成 OAuth 处理，从 localStorage 获取 user
+						print(f"ℹ️ {self.account_name}: Waiting for SPA to handle OAuth callback...")
+						try:
+							await page.wait_for_function(
+								"""() => {
+									try {
+										const user = localStorage.getItem('user');
+										return user !== null && user !== '';
+									} catch (e) {
+										return false;
+									}
+								}""",
+								timeout=15000,
+							)
+							api_user_spa = await self._extract_api_user_from_localstorage(page)
+							if api_user_spa:
+								print(f"✅ {self.account_name}: Got api user from SPA localStorage: {api_user_spa}")
+								restore_cookies_spa = await page.context.cookies()
+								user_cookies_spa = filter_cookies(
+									restore_cookies_spa, self.provider_config.origin
+								)
+								return True, {"cookies": user_cookies_spa, "api_user": api_user_spa}
+						except Exception as spa_err:
+							print(f"⚠️ {self.account_name}: SPA OAuth handling timeout or failed: {spa_err}")
+							# 尝试导航到 /console 页面触发 session 建立
+							try:
+								await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+								await page.wait_for_timeout(3000)
+								api_user_console = await self._extract_api_user_from_localstorage(page)
+								if api_user_console:
+									print(f"✅ {self.account_name}: Got api user from /console: {api_user_console}")
+									restore_cookies_console = await page.context.cookies()
+									user_cookies_console = filter_cookies(
+										restore_cookies_console, self.provider_config.origin
+									)
+									return True, {"cookies": user_cookies_console, "api_user": api_user_console}
+							except Exception:
+								pass
+						return False, {"error": "wzw OAuth: SPA failed to establish session"}
+
 					if callback_attempted and self._prefer_callback_navigation():
 						return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
 
