@@ -1475,45 +1475,66 @@ class LinuxDoSignIn:
 					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
 					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调
 					if self._should_skip_fast_callback():
-						# wzw: 等待 SPA 完成 OAuth 处理，从 localStorage 获取 user
-						print(f"ℹ️ {self.account_name}: Waiting for SPA to handle OAuth callback...")
+						# wzw: 前端 OAuth 回调可能无法正确建立 session，需要手动导航到 API 回调接口
+						print(f"ℹ️ {self.account_name}: wzw OAuth: navigating to API callback to establish session...")
 						try:
-							await page.wait_for_function(
-								"""() => {
-									try {
-										const user = localStorage.getItem('user');
-										return user !== null && user !== '';
-									} catch (e) {
-										return false;
-									}
-								}""",
-								timeout=15000,
-							)
-							api_user_spa = await self._extract_api_user_from_localstorage(page)
-							if api_user_spa:
-								print(f"✅ {self.account_name}: Got api user from SPA localStorage: {api_user_spa}")
-								restore_cookies_spa = await page.context.cookies()
-								user_cookies_spa = filter_cookies(
-									restore_cookies_spa, self.provider_config.origin
-								)
-								return True, {"cookies": user_cookies_spa, "api_user": api_user_spa}
-						except Exception as spa_err:
-							print(f"⚠️ {self.account_name}: SPA OAuth handling timeout or failed: {spa_err}")
-							# 尝试导航到 /console 页面触发 session 建立
+							# 构建回调 URL
+							base_callback_url = self.provider_config.get_linuxdo_auth_url()
+							parsed_cb = urlparse(base_callback_url)
+							cb_query = parse_qs(parsed_cb.query)
+							cb_query["code"] = [code]
+							if auth_state:
+								cb_query["state"] = [auth_state]
+							final_query = urlencode(cb_query, doseq=True)
+							final_callback_url = parsed_cb._replace(query=final_query).geturl()
+
+							print(f"ℹ️ {self.account_name}: Navigating to callback URL: {final_callback_url}")
+							response = await page.goto(final_callback_url, wait_until="domcontentloaded")
+
+							# 等待页面处理完成
+							await page.wait_for_timeout(3000)
+
+							# 尝试从响应或 localStorage 获取 api_user
+							api_user_wzw = None
+
+							# 方法1：检查响应是否是 JSON
 							try:
-								await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-								await page.wait_for_timeout(3000)
-								api_user_console = await self._extract_api_user_from_localstorage(page)
-								if api_user_console:
-									print(f"✅ {self.account_name}: Got api user from /console: {api_user_console}")
-									restore_cookies_console = await page.context.cookies()
-									user_cookies_console = filter_cookies(
-										restore_cookies_console, self.provider_config.origin
-									)
-									return True, {"cookies": user_cookies_console, "api_user": api_user_console}
+								text = await page.evaluate("() => document.body?.innerText || ''")
+								if text and text.strip().startswith("{"):
+									data = json.loads(text)
+									if isinstance(data, dict) and data.get("success"):
+										user_data = data.get("data", {}) or {}
+										api_user_wzw = user_data.get("id") or user_data.get("user_id")
+										if api_user_wzw:
+											print(f"✅ {self.account_name}: Got api user from wzw callback response: {api_user_wzw}")
 							except Exception:
 								pass
-						return False, {"error": "wzw OAuth: SPA failed to establish session"}
+
+							# 方法2：从 localStorage 获取
+							if not api_user_wzw:
+								# 可能页面重定向了，尝试导航到 /console 触发 session
+								try:
+									await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+									await page.wait_for_timeout(2000)
+								except Exception:
+									pass
+								api_user_wzw = await self._extract_api_user_from_localstorage(page)
+								if api_user_wzw:
+									print(f"✅ {self.account_name}: Got api user from wzw localStorage: {api_user_wzw}")
+
+							if api_user_wzw:
+								restore_cookies_wzw = await page.context.cookies()
+								user_cookies_wzw = filter_cookies(
+									restore_cookies_wzw, self.provider_config.origin
+								)
+								print(f"ℹ️ {self.account_name}: wzw cookies extracted: {len(user_cookies_wzw)} cookies")
+								return True, {"cookies": user_cookies_wzw, "api_user": api_user_wzw}
+							else:
+								print(f"⚠️ {self.account_name}: wzw OAuth: failed to get api_user after callback")
+						except Exception as wzw_err:
+							print(f"⚠️ {self.account_name}: wzw OAuth callback error: {wzw_err}")
+
+						return False, {"error": "wzw OAuth: failed to establish session"}
 
 					if callback_attempted and self._prefer_callback_navigation():
 						return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
