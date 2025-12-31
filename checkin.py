@@ -3670,7 +3670,7 @@ class CheckIn:
                 "error": f"Failed to get user info, {e}",
             }
 
-    def execute_check_in(self, client: httpx.Client, headers: dict):
+    def execute_check_in(self, client: httpx.Client, headers: dict, api_user: str | int):
         """执行签到请求"""
         print(f"🌐 {self.account_name}: Executing check-in")
 
@@ -3685,7 +3685,7 @@ class CheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
 
-        response = client.post(self.provider_config.get_sign_in_url(), headers=checkin_headers, timeout=30)
+        response = client.post(self.provider_config.get_sign_in_url(api_user), headers=checkin_headers, timeout=30)
 
         print(f"📨 {self.account_name}: Response status code {response.status_code}")
 
@@ -3784,7 +3784,7 @@ class CheckIn:
             if self.provider_config.name == "wzw":
                 # 只在配置了独立签到接口且未显式禁用签到时调用签到
                 if needs_check_in is None and self.provider_config.needs_manual_check_in():
-                    success = self.execute_check_in(client, headers)
+                    success = self.execute_check_in(client, headers, api_user)
                     if not success:
                         return False, {"error": "Check-in failed"}
 
@@ -3863,7 +3863,7 @@ class CheckIn:
 
             # 1) 传统站点：通过独立签到接口完成（非 wzw 保持原逻辑：用签到前的余额做展示）
             if needs_check_in is None and self.provider_config.needs_manual_check_in():
-                success = self.execute_check_in(client, headers)
+                success = self.execute_check_in(client, headers, api_user)
                 return success, user_info if user_info else {"error": "No user info available"}
 
             # 2) 特殊站点（如 runanytime）：需要根据签到状态接口判断是否真的签到成功

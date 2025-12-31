@@ -82,11 +82,23 @@ class ProviderConfig:
         """获取认证状态 URL"""
         return f"{self.origin}{self.auth_state_path}"
 
-    def get_sign_in_url(self) -> str | None:
-        """获取签到 URL"""
-        if self.sign_in_path:
-            return f"{self.origin}{self.sign_in_path}"
-        return None
+    def get_sign_in_url(self, user_id: str | int | None = None) -> str | None:
+        """获取签到 URL
+
+        Args:
+            user_id: 用户 ID（部分站点可能需要在 URL 中携带用户信息）
+
+        Returns:
+            str | None: 签到 URL，如果不需要签到则返回 None
+        """
+        if not self.sign_in_path:
+            return None
+
+        # 如果是函数，则调用函数生成 URL（支持动态签名 URL）
+        if callable(self.sign_in_path):
+            return self.sign_in_path(self.origin, user_id)
+
+        return f"{self.origin}{self.sign_in_path}"
 
     def get_user_info_url(self) -> str:
         """获取用户信息 URL"""
