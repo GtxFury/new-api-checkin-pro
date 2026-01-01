@@ -243,7 +243,17 @@ class LinuxDoAutoReadLike:
 		print(f"🔍 {self.account_name}: [DOM检测] 尝试从页面 DOM 获取用户信息")
 		try:
 			result = await page.evaluate("""() => {
-				// 方法1: 检查用户头像/用户名元素
+				// 方法1: 检查 sidebar 中的 "我的帖子" 或 "我的消息" 链接（最可靠）
+				const sidebarUserLinks = document.querySelectorAll('.sidebar-section-link[href^="/u/"]');
+				for (const link of sidebarUserLinks) {
+					const href = link.getAttribute('href') || '';
+					const match = href.match(/\\/u\\/([^\\/]+)/);
+					if (match && match[1]) {
+						return { username: match[1], source: 'sidebar_link' };
+					}
+				}
+
+				// 方法2: 检查用户头像/用户名元素
 				const avatarLink = document.querySelector('.current-user a[href^="/u/"]');
 				if (avatarLink) {
 					const href = avatarLink.getAttribute('href') || '';
@@ -253,7 +263,7 @@ class LinuxDoAutoReadLike:
 					}
 				}
 
-				// 方法2: 检查用户菜单中的用户名
+				// 方法3: 检查用户菜单中的用户名
 				const userMenu = document.querySelector('.user-menu-links a[href^="/u/"]');
 				if (userMenu) {
 					const href = userMenu.getAttribute('href') || '';
@@ -263,7 +273,7 @@ class LinuxDoAutoReadLike:
 					}
 				}
 
-				// 方法3: 检查 header 中的用户信息
+				// 方法4: 检查 header 中的用户信息
 				const headerUser = document.querySelector('.header-dropdown-toggle.current-user');
 				if (headerUser) {
 					const img = headerUser.querySelector('img');
@@ -275,13 +285,13 @@ class LinuxDoAutoReadLike:
 					}
 				}
 
-				// 方法4: 检查页面是否有登录按钮（表示未登录）
+				// 方法5: 检查页面是否有登录按钮（表示未登录）
 				const loginBtn = document.querySelector('.login-button, .btn-primary.login-button, a[href="/login"]');
 				if (loginBtn && loginBtn.offsetParent !== null) {
 					return { not_logged_in: true };
 				}
 
-				// 方法5: 检查 body 上的 logged-in class
+				// 方法6: 检查 body 上的 logged-in class
 				if (document.body.classList.contains('logged-in')) {
 					// 尝试从其他地方获取用户名
 					const anyUserLink = document.querySelector('a[href^="/u/"][data-user-card]');
@@ -291,6 +301,12 @@ class LinuxDoAutoReadLike:
 							return { username: username, source: 'data_user_card' };
 						}
 					}
+					return { logged_in_but_unknown: true };
+				}
+
+				// 方法7: 检查是否存在 header 中的用户按钮（即使没有 logged-in class）
+				const headerCurrentUser = document.querySelector('.header-dropdown-toggle.current-user');
+				if (headerCurrentUser) {
 					return { logged_in_but_unknown: true };
 				}
 
