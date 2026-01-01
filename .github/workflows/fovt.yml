@@ -1,0 +1,141 @@
+name: Fovt 自动签到
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+jobs:
+  fovt:
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+    - name: set beijing timezone
+      uses: szenius/set-timezone@v2.0
+      with:
+        timezoneWindows: "China Standard Time"
+
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: 缓存 UV 依赖
+      uses: actions/cache@v4
+      id: uv-cache
+      with:
+        path: |
+          ~/.cache/uv
+          .venv
+        key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-
+
+    - name: 安装依赖
+      if: steps.uv-cache.outputs.cache-hit != 'true'
+      run: |
+        echo "缓存未命中，开始安装项目依赖..."
+        uv sync
+        echo "✅ 环境初始化完成"
+
+    - name: 安装 Playwright 浏览器依赖
+      run: |
+        uv run playwright install-deps
+
+    - name: 获取 Camoufox 浏览器缓存路径
+      id: camoufox-path
+      run: |
+        $CAMOUFOX_PATH = uv run python -c "from camoufox.pkgman import get_path; print(get_path('camoufox'))"
+        echo "CAMOUFOX_PATH=$CAMOUFOX_PATH" >> $env:GITHUB_OUTPUT
+        echo "Camoufox path: $CAMOUFOX_PATH"
+
+    - name: 缓存 Camoufox 浏览器
+      uses: actions/cache@v4
+      id: camoufox-cache
+      with:
+        path: ${{ steps.camoufox-path.outputs.CAMOUFOX_PATH }}
+        key: ${{ runner.os }}-camoufox-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-camoufox-
+
+    - name: 获取 Camoufox
+      if: steps.camoufox-cache.outputs.cache-hit != 'true'
+      run: uv run python -c "import camoufox; camoufox.sync_api.Camoufox(headless=True).__enter__().__exit__(None, None, None)"
+
+    - name: 恢复登录状态缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          storage-states/fovt_*.json
+        key: fovt-storage-states-${{ hashFiles('storage-states/fovt_*.json') }}
+        restore-keys: |
+          fovt-storage-states-
+
+    - name: 恢复余额历史缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          balance_hash_fovt.txt
+        key: balance-hash-fovt-${{ hashFiles('balance_hash_fovt.txt') }}
+        restore-keys: |
+          balance-hash-fovt-
+
+    - name: 执行 Fovt 签到
+      env:
+        ACCOUNTS_FOVT: ${{ secrets.ACCOUNTS_FOVT }}
+        PROXY: ${{ secrets.PROXY }}
+        LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
+        DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+        EMAIL_USER: ${{ secrets.EMAIL_USER }}
+        EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        uv run python -u main_fovt.py
+
+    - name: 保存登录状态缓存
+      if: hashFiles('storage-states/fovt_*.json') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          storage-states/fovt_*.json
+        key: fovt-storage-states-${{ hashFiles('storage-states/fovt_*.json') }}
+
+    - name: 保存余额历史缓存
+      if: hashFiles('balance_hash_fovt.txt') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          balance_hash_fovt.txt
+        key: balance-hash-fovt-${{ hashFiles('balance_hash_fovt.txt') }}
+
+    - name: 保存日志和截图
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fovt-artifacts-${{ github.run_number }}
+        path: |
+          logs/
+          screenshots/
+        if-no-files-found: ignore
+        retention-days: 7
+
+    - name: 执行结果
+      if: always()
+      run: |
+        echo "Fovt 签到任务执行完成"
+        echo "时间: $(Get-Date)"
