@@ -22,6 +22,8 @@ jobs:
       LINUXDO_SKIP_PINNED: '1'
       # 不建议在 GitHub Hosted Runner 上尝试自动解 Turnstile；通常需要人工/自建 runner 才稳定
       LINUXDO_TRY_TURNSTILE_SOLVER: '0'
+      # 多账号之间的延迟（秒），避免触发 429 限流
+      LINUXDO_ACCOUNT_DELAY: '30'
     steps:
       - name: set beijing timezone
         uses: szenius/set-timezone@v2.0
