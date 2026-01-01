@@ -38,7 +38,7 @@ class FovtCheckIn:
     API_ORIGIN = "https://api.voct.top"
     GIFT_ORIGIN = "https://gift.voct.top"
     BACKEND_ORIGIN = "https://backend.voct.top"
-    LINUXDO_CLIENT_ID = "8w2uZtoWH9AUXrZr1qeCEEmvXLafea3c"
+    LINUXDO_CLIENT_ID = "gO5j0MafWWtkDgU2OsHfMFKbekJUFsIA"
 
     def __init__(self, account_name: str, *, proxy_config: dict | None = None):
         self.account_name = account_name
