@@ -552,55 +552,16 @@ class FovtCheckIn:
                         except Exception as e:
                             print(f"⚠️ {self.account_name}: Linux.do 登录/授权可能未完成: {e}")
 
-                        # 等待返回 api.voct.top 并捕获带 code 的 URL
-                        oauth_redirect_url = None
-                        observed_oauth_urls = []
-
-                        def _record_provider_url(u: str) -> None:
-                            try:
-                                if not u or not u.startswith(self.API_ORIGIN):
-                                    return
-                                if "code=" in u and "linuxdo" in u:
-                                    if u not in observed_oauth_urls:
-                                        observed_oauth_urls.append(u)
-                            except Exception:
-                                pass
-
-                        try:
-                            def on_frame_navigated(frame) -> None:
-                                try:
-                                    _record_provider_url(frame.url)
-                                except Exception:
-                                    pass
-
-                            page.on("framenavigated", on_frame_navigated)
-                        except Exception:
-                            pass
-
+                        # 等待 OAuth 回调完成 - 让 SPA 自然处理，不要手动导航到 callback URL
+                        # 参考 wzw 站点的做法
                         try:
                             await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
-                            oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
-                            print(f"ℹ️ {self.account_name}: Captured OAuth redirect URL: {oauth_redirect_url}")
+                            print(f"ℹ️ {self.account_name}: Redirected back to api.voct.top")
                         except Exception:
                             pass
 
-                        # 从 URL 中提取 code 参数
-                        from urllib.parse import urlparse, parse_qs
-                        current_url = oauth_redirect_url or page.url
-                        parsed_url = urlparse(current_url)
-                        query_params = parse_qs(parsed_url.query)
-                        code_values = query_params.get("code")
-                        code = code_values[0] if code_values else None
-
-                        if code:
-                            print(f"ℹ️ {self.account_name}: Got OAuth code: {code[:20]}...")
-
-                            # 如果当前不在回调 URL 上，需要手动调用回调
-                            if "/api/oauth/linuxdo" not in current_url:
-                                callback_url = f"{self.API_ORIGIN}/api/oauth/linuxdo?code={code}&state={auth_state}"
-                                print(f"ℹ️ {self.account_name}: Navigating to callback URL")
-                                await page.goto(callback_url, wait_until="domcontentloaded")
-                                await page.wait_for_timeout(3000)
+                        # 等待页面完成加载和 SPA 初始化
+                        await page.wait_for_timeout(5000)
 
                         # 等待 localStorage 中出现 user 数据
                         try:
@@ -621,13 +582,36 @@ class FovtCheckIn:
                             print(f"⚠️ {self.account_name}: localStorage timeout, trying /console navigation...")
                             try:
                                 await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
-                                await page.wait_for_timeout(3000)
+                                await page.wait_for_timeout(5000)
+
+                                # 再次检查 localStorage
+                                user_data = await page.evaluate("() => localStorage.getItem('user')")
+                                if user_data:
+                                    print(f"✅ {self.account_name}: localStorage user detected after /console navigation")
                             except Exception:
                                 pass
 
-                        # 验证登录成功
-                        await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
-                        await page.wait_for_timeout(2000)
+                        # 验证登录成功 - 先检查当前页面 URL
+                        current_url = page.url or ""
+                        print(f"ℹ️ {self.account_name}: Current URL after OAuth: {current_url}")
+
+                        # 如果在登录页说明 session 未建立
+                        if "/login" in current_url:
+                            await self._take_screenshot(page, "oauth_redirect_to_login")
+                            await self._save_page_content(page, "oauth_redirect_to_login")
+                            print(f"⚠️ {self.account_name}: Redirected to login page, OAuth may have failed")
+
+                        # 确保在 console 页面
+                        if "/console" not in current_url:
+                            await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                            await page.wait_for_timeout(2000)
+                            current_url = page.url or ""
+
+                        # 再次检查是否被重定向到登录页
+                        if "/login" in current_url:
+                            await self._take_screenshot(page, "login_verification_failed")
+                            await self._save_page_content(page, "login_verification_failed")
+                            return False, {"error": "Login verification failed - redirected to login", **results}
 
                         balance_info = await self._get_user_balance(page)
                         if balance_info and balance_info.get("username"):
@@ -647,6 +631,7 @@ class FovtCheckIn:
                                 print(f"⚠️ {self.account_name}: Failed to save session: {e}")
                         else:
                             await self._take_screenshot(page, "login_verification_failed")
+                            await self._save_page_content(page, "login_verification_failed")
                             return False, {"error": "Login verification failed", **results}
 
                     # 步骤2: 访问 gift.voct.top 进行签到
