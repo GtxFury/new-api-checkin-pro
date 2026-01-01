@@ -238,7 +238,89 @@ class LinuxDoAutoReadLike:
 			print(f"⚠️ {self.account_name}: [API] JSON 解析失败: {e}")
 			return status, {"raw": text}
 
-	async def _get_current_user(self, page) -> dict[str, Any] | None:
+	async def _get_current_user_from_dom(self, page) -> dict[str, Any] | None:
+		"""通过 DOM 检测登录状态（备用方案，当 /session/current.json 被限流时使用）"""
+		print(f"🔍 {self.account_name}: [DOM检测] 尝试从页面 DOM 获取用户信息")
+		try:
+			result = await page.evaluate("""() => {
+				// 方法1: 检查用户头像/用户名元素
+				const avatarLink = document.querySelector('.current-user a[href^="/u/"]');
+				if (avatarLink) {
+					const href = avatarLink.getAttribute('href') || '';
+					const match = href.match(/\\/u\\/([^\\/]+)/);
+					if (match) {
+						return { username: match[1], source: 'avatar_link' };
+					}
+				}
+
+				// 方法2: 检查用户菜单中的用户名
+				const userMenu = document.querySelector('.user-menu-links a[href^="/u/"]');
+				if (userMenu) {
+					const href = userMenu.getAttribute('href') || '';
+					const match = href.match(/\\/u\\/([^\\/]+)/);
+					if (match) {
+						return { username: match[1], source: 'user_menu' };
+					}
+				}
+
+				// 方法3: 检查 header 中的用户信息
+				const headerUser = document.querySelector('.header-dropdown-toggle.current-user');
+				if (headerUser) {
+					const img = headerUser.querySelector('img');
+					if (img) {
+						const alt = img.getAttribute('alt') || '';
+						if (alt) {
+							return { username: alt, source: 'header_img_alt' };
+						}
+					}
+				}
+
+				// 方法4: 检查页面是否有登录按钮（表示未登录）
+				const loginBtn = document.querySelector('.login-button, .btn-primary.login-button, a[href="/login"]');
+				if (loginBtn && loginBtn.offsetParent !== null) {
+					return { not_logged_in: true };
+				}
+
+				// 方法5: 检查 body 上的 logged-in class
+				if (document.body.classList.contains('logged-in')) {
+					// 尝试从其他地方获取用户名
+					const anyUserLink = document.querySelector('a[href^="/u/"][data-user-card]');
+					if (anyUserLink) {
+						const username = anyUserLink.getAttribute('data-user-card');
+						if (username) {
+							return { username: username, source: 'data_user_card' };
+						}
+					}
+					return { logged_in_but_unknown: true };
+				}
+
+				return null;
+			}""")
+
+			if not result:
+				print(f"⚠️ {self.account_name}: [DOM检测] 无法从 DOM 确定登录状态")
+				return None
+
+			if result.get("not_logged_in"):
+				print(f"⚠️ {self.account_name}: [DOM检测] 检测到登录按钮，用户未登录")
+				return None
+
+			username = result.get("username")
+			if username:
+				print(f"✅ {self.account_name}: [DOM检测] 从 {result.get('source')} 检测到用户: {username}")
+				# 返回基础用户信息，trust_level 未知时默认为 1
+				return {"username": username, "trust_level": None, "_from_dom": True}
+
+			if result.get("logged_in_but_unknown"):
+				print(f"⚠️ {self.account_name}: [DOM检测] 页面显示已登录但无法获取用户名，使用配置的用户名")
+				return {"username": self.username, "trust_level": None, "_from_dom": True}
+
+			return None
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [DOM检测] DOM 检测失败: {e}")
+			return None
+
+	async def _get_current_user(self, page, max_retries: int = 3) -> dict[str, Any] | None:
 		# 获取当前页面状态用于诊断
 		try:
 			current_url = page.url
@@ -246,15 +328,39 @@ class LinuxDoAutoReadLike:
 		except Exception as e:
 			print(f"⚠️ {self.account_name}: [页面状态] 获取 URL 失败: {e}")
 
-		status, data = await self._fetch_json_same_origin(page, "/session/current.json")
-		if status != 200 or not isinstance(data, dict):
-			print(f"⚠️ {self.account_name}: [用户检查] 获取 session 失败 status={status}")
+		for attempt in range(max_retries):
+			status, data = await self._fetch_json_same_origin(page, "/session/current.json")
+
+			# 处理 429 限流 - 改用 DOM 检测
+			if status == 429:
+				print(f"⚠️ {self.account_name}: [用户检查] /session/current.json 返回 429 限流，改用 DOM 检测")
+				dom_user = await self._get_current_user_from_dom(page)
+				if dom_user:
+					return dom_user
+				# DOM 检测也失败，等待一小段时间后重试
+				if attempt < max_retries - 1:
+					print(f"⚠️ {self.account_name}: [用户检查] DOM 检测失败，等待 5 秒后重试 ({attempt+1}/{max_retries})")
+					await page.wait_for_timeout(5000)
+					continue
+				return None
+
+			if status != 200 or not isinstance(data, dict):
+				print(f"⚠️ {self.account_name}: [用户检查] 获取 session 失败 status={status}，尝试 DOM 检测")
+				dom_user = await self._get_current_user_from_dom(page)
+				if dom_user:
+					return dom_user
+				return None
+			user = data.get("current_user")
+			if isinstance(user, dict) and user.get("username"):
+				print(f"✅ {self.account_name}: [用户检查] 已登录用户: {user.get('username')}, trust_level={user.get('trust_level')}")
+				return user
+			print(f"⚠️ {self.account_name}: [用户检查] session 响应中无 current_user 字段，尝试 DOM 检测")
+			dom_user = await self._get_current_user_from_dom(page)
+			if dom_user:
+				return dom_user
 			return None
-		user = data.get("current_user")
-		if isinstance(user, dict) and user.get("username"):
-			print(f"✅ {self.account_name}: [用户检查] 已登录用户: {user.get('username')}, trust_level={user.get('trust_level')}")
-			return user
-		print(f"⚠️ {self.account_name}: [用户检查] session 响应中无 current_user 字段")
+
+		print(f"⚠️ {self.account_name}: [用户检查] 重试 {max_retries} 次后仍失败")
 		return None
 
 	async def _maybe_solve_cloudflare(self, page) -> None:
@@ -935,15 +1041,24 @@ async def _run_all() -> None:
 		print("⚠️ 未找到包含 linux.do 用户名密码的账号配置，任务结束")
 		return
 
+	# 账号间延迟配置（秒），避免多账号连续请求触发 429 限流
+	account_delay = _clamp(_env_int("LINUXDO_ACCOUNT_DELAY", 30), 0, 300)
+	print(f"ℹ️ 共找到 {len(targets)} 个账号，账号间延迟={account_delay}秒")
+
 	all_stats: list[RunStats] = []
-	for name, u, p in targets:
-		print(f"\n===== linux.do 自动阅读点赞：{name} =====")
+	for idx, (name, u, p) in enumerate(targets):
+		print(f"\n===== linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
 		try:
 			stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
 			all_stats.append(stats)
 			print(f"✅ {name}: 完成")
 		except Exception as e:
 			print(f"❌ {name}: 失败: {e}")
+
+		# 账号之间添加延迟，避免触发 429 限流
+		if idx < len(targets) - 1 and account_delay > 0:
+			print(f"ℹ️ 等待 {account_delay} 秒后处理下一个账号...")
+			await asyncio.sleep(account_delay)
 
 	# 发送通知（若配置了任意通知渠道）
 	has_any_channel = any(
