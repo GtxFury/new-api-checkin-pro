@@ -194,17 +194,23 @@ class FovtCheckIn:
 
         print(f"✅ {self.account_name}: Linux.do login successful")
 
+    async def _maybe_solve_cloudflare_interstitial(self, page) -> None:
+        """尝试解决 Cloudflare Interstitial 挑战"""
+        if not CAPTCHA_SOLVER_AVAILABLE or solve_captcha is None:
+            return
+        try:
+            await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+            await page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
     async def _click_linuxdo_login_button(self, page) -> bool:
-        """点击 api.voct.top 登录页的 "使用 LinuxDO 继续" 按钮
+        """点击登录页的 "使用 LinuxDO 继续" 按钮
 
-        复用自 checkin.py 的 _ensure_runanytime_logged_in 逻辑
+        完全复用 checkin.py 的 _ensure_runanytime_logged_in 逻辑
         """
-        # 等待页面加载完成
-        await page.wait_for_timeout(2000)
-
-        # 精确查找 "使用 LinuxDO 继续" 按钮（避免点到 "使用 邮箱或用户名 登录"）
-        linuxdo_btn = None
-        for selector in [
+        login_btn = None
+        for sel in [
             'button:has-text("使用 LinuxDO 继续")',
             'button:has-text("使用 LinuxDO")',
             'button:has-text("使用 Linux Do 登录")',
@@ -215,53 +221,36 @@ class FovtCheckIn:
             'a[href*="linuxdo" i]',
         ]:
             try:
-                ele = await page.query_selector(selector)
+                ele = await page.query_selector(sel)
                 if ele:
-                    # 验证不是"邮箱或用户名"按钮
-                    text = await ele.inner_text()
-                    if "邮箱" not in text and "用户名" not in text:
-                        linuxdo_btn = ele
-                        print(f"ℹ️ {self.account_name}: Found login button with selector: {selector}")
-                        break
+                    login_btn = ele
+                    print(f"ℹ️ {self.account_name}: Found login button: {sel}")
+                    break
             except Exception:
                 continue
 
-        if linuxdo_btn:
-            print(f"ℹ️ {self.account_name}: Clicking Linux.do login button...")
-            await linuxdo_btn.click()
-            await page.wait_for_timeout(3000)
-            return True
+        if login_btn:
+            await login_btn.click()
+            print(f"ℹ️ {self.account_name}: Clicked LinuxDO login button")
+        else:
+            # 兜底：从所有链接里找包含 linuxdo 的跳转
+            print(f"ℹ️ {self.account_name}: Button not found, trying JS fallback...")
+            try:
+                await page.evaluate(
+                    """() => {
+                        const a = Array.from(document.querySelectorAll('a, button')).find(x => {
+                            const h = (x.getAttribute('href') || '').toLowerCase();
+                            const t = (x.innerText || '').toLowerCase();
+                            return h.includes('linuxdo') || t.includes('linux do') || t.includes('linuxdo');
+                        });
+                        if (a) a.click();
+                    }"""
+                )
+            except Exception:
+                pass
 
-        # 兜底：用 JS 精确查找
-        print(f"ℹ️ {self.account_name}: Button not found by selector, trying JS click...")
-        try:
-            clicked = await page.evaluate(
-                """() => {
-                    const buttons = [...document.querySelectorAll('button, a')];
-                    const btn = buttons.find(el => {
-                        const text = (el.innerText || '').trim();
-                        const href = (el.getAttribute('href') || '').toLowerCase();
-                        // 匹配包含 LinuxDO 但不包含 邮箱/用户名 的按钮
-                        const hasLinuxdo = text.includes('LinuxDO') || text.includes('Linux Do') ||
-                                          text.includes('linux.do') || href.includes('linuxdo');
-                        const isEmailButton = text.includes('邮箱') || text.includes('用户名');
-                        return hasLinuxdo && !isEmailButton;
-                    });
-                    if (btn) {
-                        btn.click();
-                        return true;
-                    }
-                    return false;
-                }"""
-            )
-            if clicked:
-                print(f"ℹ️ {self.account_name}: Clicked via JS evaluation")
-                await page.wait_for_timeout(3000)
-                return True
-        except Exception as e:
-            print(f"⚠️ {self.account_name}: JS click failed: {e}")
-
-        return False
+        await page.wait_for_timeout(1200)
+        return True
 
     async def _get_gift_checkin_status(self, page) -> dict:
         """获取 gift.voct.top 签到状态"""
@@ -483,42 +472,53 @@ class FovtCheckIn:
                         print(f"ℹ️ {self.account_name}: Need to login via Linux.do OAuth")
 
                         # 先到 api.voct.top 的登录页
-                        await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
-                        await page.wait_for_timeout(3000)
+                        try:
+                            await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
+                            await self._maybe_solve_cloudflare_interstitial(page)
+                        except Exception:
+                            try:
+                                await page.goto(f"{self.API_ORIGIN}/login", wait_until="domcontentloaded")
+                            except Exception:
+                                pass
 
                         # 点击 "使用 LinuxDO 继续" 按钮
-                        clicked = await self._click_linuxdo_login_button(page)
-                        if not clicked:
-                            await self._take_screenshot(page, "linuxdo_button_not_found")
-                            return False, {"error": "Linux.do login button not found", **results}
+                        await self._click_linuxdo_login_button(page)
+                        await self._maybe_solve_cloudflare_interstitial(page)
 
-                        # 检查是否跳转到 linux.do
-                        current_url = page.url or ""
-                        if "linux.do" in current_url:
-                            # 检查是否需要登录
-                            allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                            if not allow_btn:
-                                # 需要登录
+                        # Linux.do 登录或授权
+                        try:
+                            if "linux.do/login" in (page.url or ""):
                                 await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
 
-                            # 等待授权按钮
+                            # 授权页
                             try:
-                                await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+                                allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+                                if allow_btn:
+                                    await allow_btn.click()
+                                else:
+                                    for sel in [
+                                        'button:has-text("授权")',
+                                        'button:has-text("允许")',
+                                        'button:has-text("Authorize")',
+                                        'button[type="submit"]',
+                                    ]:
+                                        try:
+                                            b = await page.query_selector(sel)
+                                            if b:
+                                                await b.click()
+                                                break
+                                        except Exception:
+                                            continue
                             except Exception:
-                                await self._take_screenshot(page, "oauth_approve_not_found")
-                                return False, {"error": "OAuth approve button not found", **results}
+                                pass
+                        except Exception as e:
+                            print(f"⚠️ {self.account_name}: Linux.do 登录/授权可能未完成: {e}")
 
-                            # 点击授权
-                            allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                            if allow_btn:
-                                print(f"ℹ️ {self.account_name}: Clicking OAuth authorize button")
-                                await allow_btn.click(no_wait_after=True, timeout=30000)
-
-                            # 等待返回 api.voct.top
-                            try:
-                                await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
-                            except Exception:
-                                await page.wait_for_timeout(5000)
+                        # 等待返回 api.voct.top
+                        try:
+                            await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
+                        except Exception:
+                            pass
 
                         # 验证登录成功
                         await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
