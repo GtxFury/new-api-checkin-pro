@@ -1324,20 +1324,18 @@ class LinuxDoSignIn:
 										console_url = page.url or ""
 										if "/login" in console_url:
 											expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-											print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, trying to recover")
-											await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
-											
-											# 尝试恢复：刷新登录页看是否可以自动登录
-											await page.reload(wait_until="networkidle")
-											await page.wait_for_timeout(3000)
-											
-											# 再次检查是否仍在登录页
-											if "/login" not in (page.url or ""):
-												print(f"✅ {self.account_name}: Session recovered after page reload")
-												await self._browser_check_in_with_turnstile(page)
-												user_info_fast = await self._extract_balance_from_profile(page)
-											else:
-												print(f"❌ {self.account_name}: Cannot recover session, check-in skipped")
+											print(f"⚠️ {self.account_name}: elysiver session {expired_msg} after OAuth callback, clearing cache for retry...")
+
+											# 删除缓存文件，强制下次重新登录
+											if cache_file_path and os.path.exists(cache_file_path):
+												try:
+													os.remove(cache_file_path)
+													print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
+												except Exception as del_err:
+													print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
+
+											await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_need_retry")
+											return False, {"error": "session_verify_failed_need_retry", "retry": True}
 										else:
 											await self._browser_check_in_with_turnstile(page)
 											user_info_fast = await self._extract_balance_from_profile(page)
@@ -1398,19 +1396,18 @@ class LinuxDoSignIn:
 											console_url = page.url or ""
 											if "/login" in console_url:
 												expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-												print(f"⚠️ {self.account_name}: Session {expired_msg} after OAuth callback, trying to recover")
-												await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_after_oauth")
-												
-												# 尝试恢复
-												await page.reload(wait_until="networkidle")
-												await page.wait_for_timeout(3000)
-												
-												if "/login" not in (page.url or ""):
-													print(f"✅ {self.account_name}: Session recovered after page reload")
-													await self._browser_check_in_with_turnstile(page)
-													user_info_nav = await self._extract_balance_from_profile(page)
-												else:
-													print(f"❌ {self.account_name}: Cannot recover session, check-in skipped")
+												print(f"⚠️ {self.account_name}: elysiver session {expired_msg} after OAuth callback, clearing cache for retry...")
+
+												# 删除缓存文件，强制下次重新登录
+												if cache_file_path and os.path.exists(cache_file_path):
+													try:
+														os.remove(cache_file_path)
+														print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
+													except Exception as del_err:
+														print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
+
+												await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_need_retry")
+												return False, {"error": "session_verify_failed_need_retry", "retry": True}
 											else:
 												await self._browser_check_in_with_turnstile(page)
 												user_info_nav = await self._extract_balance_from_profile(page)
