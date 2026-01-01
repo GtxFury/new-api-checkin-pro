@@ -10,111 +10,25 @@ Fovt (api.voct.top + gift.voct.top) 自动签到
 """
 
 import asyncio
-import json
 import os
-import random
 from datetime import datetime
-from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote
 
 from camoufox.async_api import AsyncCamoufox
 
 from utils.browser_utils import filter_cookies
 
-# 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
+# 复用 sign_in_with_linuxdo 中的验证码解决方案
 try:
-    from playwright_captcha import ClickSolver, CaptchaType, FrameworkType  # type: ignore[assignment]
+    from sign_in_with_linuxdo import solve_captcha, _should_try_turnstile_solver
 
-    PLAYWRIGHT_CAPTCHA_AVAILABLE = True
-    print("ℹ️ FovtCheckIn: playwright-captcha imported successfully")
-except Exception as e1:  # pragma: no cover - 可选依赖
-    ClickSolver = None  # type: ignore[assignment]
-    CaptchaType = None  # type: ignore[assignment]
-    FrameworkType = None  # type: ignore[assignment]
-    PLAYWRIGHT_CAPTCHA_AVAILABLE = False
-    print(f"⚠️ FovtCheckIn: playwright-captcha not available: {e1!r}")
-
-
-def _should_try_turnstile_solver() -> bool:
-    """判断是否尝试 Turnstile solver"""
-    raw = str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    return True
-
-
-async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
-    """统一的验证码解决入口"""
-    if not PLAYWRIGHT_CAPTCHA_AVAILABLE or ClickSolver is None or FrameworkType is None or CaptchaType is None:
-        return False
-
-    if captcha_type == "cloudflare" and challenge_type == "turnstile" and not _should_try_turnstile_solver():
-        return False
-
-    try:
-        has_cf_evidence = await page.evaluate(
-            """() => {
-                try {
-                    const hasIframe = !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');
-                    const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
-                    const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
-                    const title = (document.title || '').toLowerCase();
-                    const titleLooks = title.includes('just a moment') || title.includes('attention required');
-                    return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
-                } catch (e) {
-                    return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
-                }
-            }"""
-        )
-        if not isinstance(has_cf_evidence, dict):
-            has_cf_evidence = {}
-
-        if bool(has_cf_evidence.get("titleLooks")) and not bool(has_cf_evidence.get("hasIframe")):
-            try:
-                await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=6000)
-                has_cf_evidence["hasIframe"] = True
-            except Exception:
-                pass
-
-        is_turnstile_evidence = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput"))
-        is_interstitial_evidence = bool(has_cf_evidence.get("hasChlForm"))
-
-        should_try = False
-        if captcha_type == "cloudflare" and challenge_type == "turnstile":
-            should_try = is_turnstile_evidence
-        elif captcha_type == "cloudflare" and challenge_type == "interstitial":
-            should_try = is_interstitial_evidence or bool(has_cf_evidence.get("titleLooks"))
-
-        if not should_try:
-            return False
-    except Exception:
-        pass
-
-    try:
-        framework = FrameworkType.CAMOUFOX
-
-        if captcha_type == "cloudflare" and challenge_type == "turnstile":
-            target_type = CaptchaType.CLOUDFLARE_TURNSTILE
-        elif captcha_type == "cloudflare" and challenge_type == "interstitial":
-            target_type = CaptchaType.CLOUDFLARE_INTERSTITIAL
-        else:
-            return False
-
-        async def _run_solver() -> bool:
-            async with ClickSolver(framework=framework, page=page) as solver:
-                await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
-                return True
-
-        try:
-            return await asyncio.wait_for(_run_solver(), timeout=30.0)
-        except asyncio.TimeoutError:
-            print(f"⚠️ FovtCheckIn: playwright-captcha solver timed out after 30s")
-            return False
-    except Exception as e:
-        print(f"⚠️ FovtCheckIn: playwright-captcha solve_captcha error: {e}")
-        return False
+    CAPTCHA_SOLVER_AVAILABLE = True
+    print("ℹ️ FovtCheckIn: solve_captcha imported from sign_in_with_linuxdo")
+except Exception as e:
+    solve_captcha = None
+    _should_try_turnstile_solver = lambda: False
+    CAPTCHA_SOLVER_AVAILABLE = False
+    print(f"⚠️ FovtCheckIn: solve_captcha not available: {e}")
 
 
 class FovtCheckIn:
@@ -124,8 +38,7 @@ class FovtCheckIn:
     API_ORIGIN = "https://api.voct.top"
     GIFT_ORIGIN = "https://gift.voct.top"
     BACKEND_ORIGIN = "https://backend.voct.top"
-    LINUXDO_CLIENT_ID = "8w2uZtoWH9AUXrZr1qeCEEmvXLafea3c"  # 需要从站点获取真实值
-    LINUXDO_AUTH_PATH = "/api/oauth/linuxdo"
+    LINUXDO_CLIENT_ID = "8w2uZtoWH9AUXrZr1qeCEEmvXLafea3c"
 
     def __init__(self, account_name: str, *, proxy_config: dict | None = None):
         self.account_name = account_name
@@ -167,17 +80,19 @@ class FovtCheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to save HTML: {e}")
 
-    async def _linuxdo_login(self, page, username: str, password: str) -> bool:
-        """执行 Linux.do 登录"""
-        try:
-            print(f"ℹ️ {self.account_name}: Starting Linux.do login")
+    async def _linuxdo_login_if_needed(self, page, linuxdo_username: str, linuxdo_password: str) -> None:
+        """在 linux.do 登录页（若出现）自动填表提交
 
-            login_resp = await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+        复用自 checkin.py 的逻辑，兼容近期 selector 变更。
+        """
+        u = page.url or ""
+        if "linux.do/login" not in u:
+            return
 
-            if login_resp and getattr(login_resp, "status", None) == 429:
-                raise RuntimeError("linux.do 返回 429（IP 被临时限流/封禁），请稍后重试或更换出口 IP")
+        print(f"ℹ️ {self.account_name}: Detected linux.do login page, filling credentials...")
 
-            # 尝试处理 Cloudflare 挑战
+        # linux.do 登录页可能出现 Turnstile/Interstitial
+        if CAPTCHA_SOLVER_AVAILABLE and solve_captcha is not None:
             try:
                 await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
             except Exception:
@@ -188,100 +103,165 @@ class FovtCheckIn:
                 except Exception:
                     pass
 
-            async def _set_value(selectors: list[str], value: str) -> bool:
-                for sel in selectors:
-                    try:
-                        ok = await page.evaluate(
-                            """({ sel, value }) => {
-                                try {
-                                    const el = document.querySelector(sel);
-                                    if (!el) return false;
-                                    el.focus();
-                                    el.value = value;
-                                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                } catch (e) {
-                                    return false;
-                                }
-                            }""",
-                            {"sel": sel, "value": value},
-                        )
-                        if ok:
-                            return True
-                    except Exception:
-                        continue
-                return False
-
-            user_ok = await _set_value(
-                [
-                    "#login-account-name",
-                    "#signin_username",
-                    'input[name="login"]',
-                    'input[name="username"]',
-                    'input[type="email"]',
-                    'input[autocomplete="username"]',
-                ],
-                username,
-            )
-            pwd_ok = await _set_value(
-                [
-                    "#login-account-password",
-                    "#signin_password",
-                    'input[name="password"]',
-                    'input[type="password"]',
-                    'input[autocomplete="current-password"]',
-                ],
-                password,
-            )
-
-            if not user_ok or not pwd_ok:
-                await self._take_screenshot(page, "linuxdo_login_inputs_not_found")
-                raise RuntimeError("linux.do login inputs not found or not editable")
-
-            # 点击登录按钮
-            clicked = False
-            for sel in [
-                "#signin-button",
-                "#login-button",
-                'button:has-text("登录")',
-                'button[type="submit"]',
-                'input[type="submit"]',
-            ]:
+        async def _set_value(selectors: list[str], value: str) -> bool:
+            for sel in selectors:
                 try:
-                    btn = await page.query_selector(sel)
-                    if btn:
-                        await btn.click()
-                        clicked = True
-                        break
+                    ok = await page.evaluate(
+                        """({ sel, value }) => {
+                            try {
+                                const el = document.querySelector(sel);
+                                if (!el) return false;
+                                el.focus();
+                                el.value = value;
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                                return true;
+                            } catch (e) {
+                                return false;
+                            }
+                        }""",
+                        {"sel": sel, "value": value},
+                    )
+                    if ok:
+                        return True
                 except Exception:
                     continue
-            if not clicked:
-                try:
-                    await page.press("#login-account-password", "Enter")
-                except Exception:
-                    pass
-
-            # 等待登录完成
-            try:
-                await page.wait_for_function(
-                    """() => {
-                        const u = location.href || '';
-                        if (u.includes('/oauth2/authorize')) return true;
-                        if (!u.includes('/login')) return true;
-                        return false;
-                    }""",
-                    timeout=30000,
-                )
-            except Exception:
-                await self._take_screenshot(page, "linuxdo_login_timeout")
-                raise RuntimeError("linux.do login submit timeout")
-
-            print(f"✅ {self.account_name}: Linux.do login successful")
-            return True
-        except Exception as e:
-            print(f"❌ {self.account_name}: Linux.do login failed: {e}")
             return False
+
+        user_ok = await _set_value(
+            [
+                "#login-account-name",
+                "#signin_username",
+                'input[name="login"]',
+                'input[name="username"]',
+                'input[type="email"]',
+                'input[autocomplete="username"]',
+            ],
+            linuxdo_username,
+        )
+        pwd_ok = await _set_value(
+            [
+                "#login-account-password",
+                "#signin_password",
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[autocomplete="current-password"]',
+            ],
+            linuxdo_password,
+        )
+
+        if not user_ok or not pwd_ok:
+            await self._take_screenshot(page, "linuxdo_login_inputs_not_found")
+            raise RuntimeError("linux.do 登录页未找到可输入的账号/密码框")
+
+        # 点击登录按钮
+        clicked = False
+        for sel in [
+            "#signin-button",
+            "#login-button",
+            'button:has-text("登录")',
+            'button[type="submit"]',
+            'input[type="submit"]',
+        ]:
+            try:
+                btn = await page.query_selector(sel)
+                if btn:
+                    await btn.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            try:
+                await page.press("#login-account-password", "Enter")
+            except Exception:
+                pass
+
+        # 等待跳出 /login
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const u = location.href || '';
+                    if (u.includes('/oauth2/authorize')) return true;
+                    if (!u.includes('/login')) return true;
+                    return false;
+                }""",
+                timeout=30000,
+            )
+        except Exception:
+            await self._take_screenshot(page, "linuxdo_login_timeout")
+            raise RuntimeError("linux.do 登录提交超时")
+
+        print(f"✅ {self.account_name}: Linux.do login successful")
+
+    async def _click_linuxdo_login_button(self, page) -> bool:
+        """点击 api.voct.top 登录页的 "使用 LinuxDO 继续" 按钮
+
+        复用自 checkin.py 的 _ensure_runanytime_logged_in 逻辑
+        """
+        # 等待页面加载完成
+        await page.wait_for_timeout(2000)
+
+        # 精确查找 "使用 LinuxDO 继续" 按钮（避免点到 "使用 邮箱或用户名 登录"）
+        linuxdo_btn = None
+        for selector in [
+            'button:has-text("使用 LinuxDO 继续")',
+            'button:has-text("使用 LinuxDO")',
+            'button:has-text("使用 Linux Do 登录")',
+            'button:has-text("Linux Do")',
+            'button:has-text("LinuxDO")',
+            'a:has-text("Linux Do")',
+            'a:has-text("使用 Linux Do 登录")',
+            'a[href*="linuxdo" i]',
+        ]:
+            try:
+                ele = await page.query_selector(selector)
+                if ele:
+                    # 验证不是"邮箱或用户名"按钮
+                    text = await ele.inner_text()
+                    if "邮箱" not in text and "用户名" not in text:
+                        linuxdo_btn = ele
+                        print(f"ℹ️ {self.account_name}: Found login button with selector: {selector}")
+                        break
+            except Exception:
+                continue
+
+        if linuxdo_btn:
+            print(f"ℹ️ {self.account_name}: Clicking Linux.do login button...")
+            await linuxdo_btn.click()
+            await page.wait_for_timeout(3000)
+            return True
+
+        # 兜底：用 JS 精确查找
+        print(f"ℹ️ {self.account_name}: Button not found by selector, trying JS click...")
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                    const buttons = [...document.querySelectorAll('button, a')];
+                    const btn = buttons.find(el => {
+                        const text = (el.innerText || '').trim();
+                        const href = (el.getAttribute('href') || '').toLowerCase();
+                        // 匹配包含 LinuxDO 但不包含 邮箱/用户名 的按钮
+                        const hasLinuxdo = text.includes('LinuxDO') || text.includes('Linux Do') ||
+                                          text.includes('linux.do') || href.includes('linuxdo');
+                        const isEmailButton = text.includes('邮箱') || text.includes('用户名');
+                        return hasLinuxdo && !isEmailButton;
+                    });
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                print(f"ℹ️ {self.account_name}: Clicked via JS evaluation")
+                await page.wait_for_timeout(3000)
+                return True
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: JS click failed: {e}")
+
+        return False
 
     async def _get_gift_checkin_status(self, page) -> dict:
         """获取 gift.voct.top 签到状态"""
@@ -341,7 +321,6 @@ class FovtCheckIn:
             message = data.get("message", data.get("error", "Unknown error"))
             if "already" in str(message).lower() or "已签到" in str(message) or "已经签到" in str(message):
                 print(f"ℹ️ {self.account_name}: Already checked in today on gift site")
-                # 尝试获取今日的兑换码
                 existing_code = data.get("data", {}).get("code", "")
                 return True, existing_code
 
@@ -358,12 +337,10 @@ class FovtCheckIn:
             return True
 
         try:
-            # 先导航到 api.voct.top/console/topup
             print(f"ℹ️ {self.account_name}: Navigating to topup page to redeem code")
             await page.goto(f"{self.API_ORIGIN}/console/topup", wait_until="networkidle")
             await page.wait_for_timeout(2000)
 
-            # 调用兑换接口
             result = await page.evaluate(
                 """async (code) => {
                     try {
@@ -434,8 +411,7 @@ class FovtCheckIn:
             used_quota = user_data.get("used_quota", 0)
             username = user_data.get("username", "Unknown")
 
-            # quota 通常是整数，需要转换为美元
-            quota_per_unit = 500000  # 默认值，可能需要调整
+            quota_per_unit = 500000
             balance = quota / quota_per_unit if quota else 0
             used = used_quota / quota_per_unit if used_quota else 0
 
@@ -477,7 +453,6 @@ class FovtCheckIn:
                 window=(1280, 720),
                 proxy=self.proxy_config,
             ) as browser:
-                # 加载缓存
                 storage_state = cache_file_path if cache_file_path and os.path.exists(cache_file_path) else None
                 if storage_state:
                     print(f"ℹ️ {self.account_name}: Found cache file, restore storage state")
@@ -497,7 +472,6 @@ class FovtCheckIn:
 
                     current_url = page.url or ""
                     if "/login" not in current_url:
-                        # 验证 session
                         balance_info = await self._get_user_balance(page)
                         if balance_info and balance_info.get("username"):
                             print(f"✅ {self.account_name}: Already logged in as {balance_info.get('username')}")
@@ -510,95 +484,41 @@ class FovtCheckIn:
 
                         # 先到 api.voct.top 的登录页
                         await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
-                        await page.wait_for_timeout(2000)
+                        await page.wait_for_timeout(3000)
 
-                        # 查找 Linux.do 登录按钮（参考 checkin.py 的选择器）
-                        linuxdo_btn = None
-                        for selector in [
-                            'button:has-text("使用 LinuxDO 继续")',
-                            'button:has-text("使用 LinuxDO")',
-                            'button:has-text("使用 Linux Do 登录")',
-                            'button:has-text("Linux Do")',
-                            'button:has-text("LinuxDO")',
-                            'button:has-text("linux.do")',
-                            'a:has-text("Linux Do")',
-                            'a:has-text("使用 Linux Do 登录")',
-                            'a[href*="linuxdo" i]',
-                        ]:
-                            try:
-                                ele = await page.query_selector(selector)
-                                if ele:
-                                    linuxdo_btn = ele
-                                    print(f"ℹ️ {self.account_name}: Found login button with selector: {selector}")
-                                    break
-                            except Exception:
-                                continue
-
-                        if linuxdo_btn:
-                            print(f"ℹ️ {self.account_name}: Clicking Linux.do login button...")
-                            await linuxdo_btn.click()
-                            await page.wait_for_timeout(2000)
-                        else:
-                            # 兜底：从所有链接/按钮里找包含 linuxdo 的
-                            print(f"ℹ️ {self.account_name}: Button not found by selector, trying JS click...")
-                            try:
-                                clicked = await page.evaluate(
-                                    """() => {
-                                        const elements = [...document.querySelectorAll('button, a')];
-                                        const btn = elements.find(el => {
-                                            const text = (el.innerText || '').toLowerCase();
-                                            const href = (el.getAttribute('href') || '').toLowerCase();
-                                            return text.includes('linuxdo') || text.includes('linux do') ||
-                                                   text.includes('linux.do') || href.includes('linuxdo');
-                                        });
-                                        if (btn) {
-                                            btn.click();
-                                            return true;
-                                        }
-                                        return false;
-                                    }"""
-                                )
-                                if clicked:
-                                    print(f"ℹ️ {self.account_name}: Clicked via JS evaluation")
-                                    await page.wait_for_timeout(2000)
-                                else:
-                                    await self._take_screenshot(page, "linuxdo_button_not_found")
-                                    return False, {"error": "Linux.do login button not found", **results}
-                            except Exception as e:
-                                await self._take_screenshot(page, "linuxdo_button_click_error")
-                                return False, {"error": f"Failed to click login button: {e}", **results}
+                        # 点击 "使用 LinuxDO 继续" 按钮
+                        clicked = await self._click_linuxdo_login_button(page)
+                        if not clicked:
+                            await self._take_screenshot(page, "linuxdo_button_not_found")
+                            return False, {"error": "Linux.do login button not found", **results}
 
                         # 检查是否跳转到 linux.do
                         current_url = page.url or ""
                         if "linux.do" in current_url:
-                            # 执行 Linux.do 登录
-                            if "/login" in current_url or "/oauth2" in current_url:
-                                # 检查是否需要登录
-                                allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                                if not allow_btn:
-                                    # 需要登录
-                                    login_ok = await self._linuxdo_login(page, linuxdo_username, linuxdo_password)
-                                    if not login_ok:
-                                        return False, {"error": "Linux.do login failed", **results}
+                            # 检查是否需要登录
+                            allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+                            if not allow_btn:
+                                # 需要登录
+                                await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
 
-                                # 等待授权按钮
-                                try:
-                                    await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
-                                except Exception:
-                                    await self._take_screenshot(page, "oauth_approve_not_found")
-                                    return False, {"error": "OAuth approve button not found", **results}
+                            # 等待授权按钮
+                            try:
+                                await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+                            except Exception:
+                                await self._take_screenshot(page, "oauth_approve_not_found")
+                                return False, {"error": "OAuth approve button not found", **results}
 
-                                # 点击授权
-                                allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                                if allow_btn:
-                                    print(f"ℹ️ {self.account_name}: Clicking OAuth authorize button")
-                                    await allow_btn.click(no_wait_after=True, timeout=30000)
+                            # 点击授权
+                            allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+                            if allow_btn:
+                                print(f"ℹ️ {self.account_name}: Clicking OAuth authorize button")
+                                await allow_btn.click(no_wait_after=True, timeout=30000)
 
-                                # 等待返回 api.voct.top
-                                try:
-                                    await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
-                                except Exception:
-                                    await page.wait_for_timeout(5000)
+                            # 等待返回 api.voct.top
+                            try:
+                                await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
+                            except Exception:
+                                await page.wait_for_timeout(5000)
 
                         # 验证登录成功
                         await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
