@@ -406,11 +406,15 @@ class FovtCheckIn:
                 }"""
             )
 
+            print(f"ℹ️ {self.account_name}: /api/user/self response: status={result.get('status')}, data={str(result.get('data', {}))[:200]}")
+
             if not result or result.get("status") != 200:
+                print(f"⚠️ {self.account_name}: API returned non-200 status: {result}")
                 return {}
 
             data = result.get("data", {})
             if not data.get("success"):
+                print(f"⚠️ {self.account_name}: API returned success=false: {data.get('message', 'no message')}")
                 return {}
 
             user_data = data.get("data", {})
