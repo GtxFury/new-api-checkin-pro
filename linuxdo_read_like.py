@@ -212,6 +212,7 @@ class LinuxDoAutoReadLike:
 		url = path_or_url
 		if path_or_url.startswith("/"):
 			url = f"{self.settings.origin}{path_or_url}"
+		print(f"🔍 {self.account_name}: [API] 请求 {url}")
 		resp = await page.evaluate(
 			"""async ({ url }) => {
 				try {
@@ -225,41 +226,70 @@ class LinuxDoAutoReadLike:
 			{"url": url},
 		)
 		if not isinstance(resp, dict):
+			print(f"⚠️ {self.account_name}: [API] 响应异常（非dict）: {str(resp)[:200]}")
 			return 0, {"error": str(resp)}
 		status = int(resp.get("status") or 0)
 		text = resp.get("text") or ""
+		text_preview = text[:300] if len(text) > 300 else text
+		print(f"🔍 {self.account_name}: [API] 响应 status={status}, body_len={len(text)}, preview={text_preview!r}")
 		try:
 			return status, json.loads(text)
-		except Exception:
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [API] JSON 解析失败: {e}")
 			return status, {"raw": text}
 
 	async def _get_current_user(self, page) -> dict[str, Any] | None:
+		# 获取当前页面状态用于诊断
+		try:
+			current_url = page.url
+			print(f"🔍 {self.account_name}: [页面状态] 当前 URL: {current_url}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [页面状态] 获取 URL 失败: {e}")
+
 		status, data = await self._fetch_json_same_origin(page, "/session/current.json")
 		if status != 200 or not isinstance(data, dict):
+			print(f"⚠️ {self.account_name}: [用户检查] 获取 session 失败 status={status}")
 			return None
 		user = data.get("current_user")
 		if isinstance(user, dict) and user.get("username"):
+			print(f"✅ {self.account_name}: [用户检查] 已登录用户: {user.get('username')}, trust_level={user.get('trust_level')}")
 			return user
+		print(f"⚠️ {self.account_name}: [用户检查] session 响应中无 current_user 字段")
 		return None
 
 	async def _maybe_solve_cloudflare(self, page) -> None:
 		if linuxdo_solve_captcha is None:
 			return
+		print(f"🔍 {self.account_name}: [CF] 尝试解决 Cloudflare interstitial")
 		try:
 			await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
-		except Exception:
-			pass
+			print(f"✅ {self.account_name}: [CF] interstitial 处理完成")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [CF] interstitial 处理失败: {e}")
 		if self.settings.try_turnstile_solver:
+			print(f"🔍 {self.account_name}: [CF] 尝试解决 Cloudflare turnstile")
 			try:
 				await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-			except Exception:
-				pass
+				print(f"✅ {self.account_name}: [CF] turnstile 处理完成")
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: [CF] turnstile 处理失败: {e}")
 
 	async def _linuxdo_login(self, page) -> None:
 		# 说明：GitHub Hosted Runner 上 Turnstile 经常是不可见/强风控形态，自动点击不稳定。
 		# 这里尽量依赖缓存的 storage_state 复用登录态；必要时才走登录表单+interstitial 处理。
+		print(f"🔍 {self.account_name}: [登录] 步骤1: 导航到登录页 {self.settings.origin}/login")
 		await page.goto(f"{self.settings.origin}/login", wait_until="domcontentloaded")
 		await page.wait_for_timeout(1200)
+
+		# 记录登录页加载后状态
+		try:
+			current_url = page.url
+			title = await page.title()
+			print(f"🔍 {self.account_name}: [登录] 登录页加载完成 URL={current_url}, title={title!r}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [登录] 获取登录页信息失败: {e}")
+
+		print(f"🔍 {self.account_name}: [登录] 步骤2: 尝试解决 Cloudflare 验证")
 		await self._maybe_solve_cloudflare(page)
 
 		async def _set_value(selectors: list[str], value: str) -> bool:
@@ -287,6 +317,7 @@ class LinuxDoAutoReadLike:
 					continue
 			return False
 
+		print(f"🔍 {self.account_name}: [登录] 步骤3: 填写用户名")
 		user_ok = await _set_value(
 			[
 				"#login-account-name",
@@ -298,6 +329,9 @@ class LinuxDoAutoReadLike:
 			],
 			self.username,
 		)
+		print(f"🔍 {self.account_name}: [登录] 用户名填写结果: {'成功' if user_ok else '失败'}")
+
+		print(f"🔍 {self.account_name}: [登录] 步骤4: 填写密码")
 		pwd_ok = await _set_value(
 			[
 				"#login-account-password",
@@ -308,9 +342,27 @@ class LinuxDoAutoReadLike:
 			],
 			self.password,
 		)
+		print(f"🔍 {self.account_name}: [登录] 密码填写结果: {'成功' if pwd_ok else '失败'}")
+
 		if not user_ok or not pwd_ok:
+			# 打印页面上可用的输入框以便调试
+			try:
+				inputs_info = await page.evaluate("""() => {
+					const inputs = Array.from(document.querySelectorAll('input'));
+					return inputs.map(i => ({
+						id: i.id,
+						name: i.name,
+						type: i.type,
+						placeholder: i.placeholder,
+						visible: i.offsetParent !== null
+					}));
+				}""")
+				print(f"🔍 {self.account_name}: [登录] 页面上的输入框: {inputs_info}")
+			except Exception:
+				pass
 			raise RuntimeError("linux.do 登录页未找到可输入的账号/密码框")
 
+		print(f"🔍 {self.account_name}: [登录] 步骤5: 点击登录按钮")
 		clicked = False
 		for sel in [
 			"#signin-button",
@@ -322,20 +374,34 @@ class LinuxDoAutoReadLike:
 			try:
 				btn = await page.query_selector(sel)
 				if btn:
+					print(f"🔍 {self.account_name}: [登录] 找到登录按钮 selector={sel}")
 					await btn.click()
 					clicked = True
 					break
 			except Exception:
 				continue
 		if not clicked:
+			print(f"⚠️ {self.account_name}: [登录] 未找到登录按钮，尝试按 Enter 键")
 			try:
 				await page.keyboard.press("Enter")
 			except Exception:
 				pass
 
 		# 等待跳出 /login 或 session/current 可获取到 current_user
+		print(f"🔍 {self.account_name}: [登录] 步骤6: 等待登录跳转 (最多25秒)")
 		await page.wait_for_timeout(1500)
+
+		# 记录点击登录后的页面状态
+		try:
+			current_url = page.url
+			title = await page.title()
+			print(f"🔍 {self.account_name}: [登录] 点击登录后页面状态 URL={current_url}, title={title!r}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [登录] 获取点击后页面状态失败: {e}")
+
+		print(f"🔍 {self.account_name}: [登录] 步骤7: 再次尝试解决 Cloudflare 验证")
 		await self._maybe_solve_cloudflare(page)
+
 		try:
 			await page.wait_for_function(
 				"""() => {
@@ -346,27 +412,49 @@ class LinuxDoAutoReadLike:
 				}""",
 				timeout=25000,
 			)
-		except Exception:
+			print(f"✅ {self.account_name}: [登录] 页面跳转检测通过")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [登录] 等待跳转超时或失败: {e}")
+			# 记录超时时的页面状态
+			try:
+				current_url = page.url
+				title = await page.title()
+				print(f"🔍 {self.account_name}: [登录] 超时时页面状态 URL={current_url}, title={title!r}")
+			except Exception:
+				pass
 			# 允许后续用 /session/current.json 再判定
 			pass
 
 	async def _ensure_logged_in(self, page) -> dict[str, Any]:
+		print(f"🔍 {self.account_name}: [登录检查] 开始访问 {self.settings.origin}/latest")
 		await page.goto(f"{self.settings.origin}/latest", wait_until="domcontentloaded")
 		await page.wait_for_timeout(1200)
 
+		# 打印页面状态
+		try:
+			current_url = page.url
+			title = await page.title()
+			print(f"🔍 {self.account_name}: [登录检查] 页面已加载 URL={current_url}, title={title!r}")
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: [登录检查] 获取页面信息失败: {e}")
+
 		user = await self._get_current_user(page)
 		if user:
+			print(f"✅ {self.account_name}: [登录检查] 缓存登录有效，跳过登录流程")
 			return user
 
 		print(f"ℹ️ {self.account_name}: 未登录，开始登录 linux.do")
 		try:
 			await self._linuxdo_login(page)
-		except Exception:
+		except Exception as e:
+			print(f"❌ {self.account_name}: [登录] 登录过程异常: {e}")
 			await self._dump_debug(page, "linuxdo_login_failed")
 			raise
 
+		print(f"🔍 {self.account_name}: [登录检查] 登录流程完成，重新检查用户状态")
 		user = await self._get_current_user(page)
 		if not user:
+			print(f"❌ {self.account_name}: [登录检查] 登录后仍无法获取用户信息")
 			await self._dump_debug(page, "linuxdo_login_no_current_user")
 			raise RuntimeError("linux.do 登录后仍无法获取当前用户信息（可能被 Cloudflare/风控拦截）")
 		return user
@@ -420,14 +508,19 @@ class LinuxDoAutoReadLike:
 	async def _fetch_topics(self, page, page_no: int) -> list[dict[str, Any]]:
 		endpoint = "unread" if self.settings.feed == "unread" else "latest"
 		path = f"/{endpoint}.json?no_definitions=true&page={page_no}"
+		print(f"🔍 {self.account_name}: [主题获取] 请求主题列表 endpoint={endpoint}, page={page_no}")
 		status, data = await self._fetch_json_same_origin(page, path)
 		if status != 200 or not isinstance(data, dict):
+			print(f"⚠️ {self.account_name}: [主题获取] 请求失败 status={status}")
 			return []
 		tl = data.get("topic_list") or {}
 		topics = tl.get("topics") or []
 		if not isinstance(topics, list):
+			print(f"⚠️ {self.account_name}: [主题获取] 响应中无 topics 列表")
 			return []
-		return [t for t in topics if isinstance(t, dict)]
+		result = [t for t in topics if isinstance(t, dict)]
+		print(f"✅ {self.account_name}: [主题获取] 获取到 {len(result)} 个主题")
+		return result
 
 	async def _simulate_reading(self, page, seconds: int) -> None:
 		seconds = max(3, seconds)
@@ -615,25 +708,32 @@ class LinuxDoAutoReadLike:
 	) -> tuple[int, bool]:
 		"""返回 (本主题点赞数量, 是否触发限流)"""
 		if remaining_likes <= 0 or self.settings.max_likes_per_topic <= 0:
+			print(f"🔍 {self.account_name}: [点赞] 跳过点赞（remaining={remaining_likes}, max_per_topic={self.settings.max_likes_per_topic}）")
 			return 0, False
 		if self._like_rate_limited_until and time.time() < self._like_rate_limited_until:
+			print(f"⚠️ {self.account_name}: [点赞] 仍在限流中，跳过点赞")
 			return 0, True
 
 		liked = 0
 		target = min(self.settings.max_likes_per_topic, remaining_likes)
-		for _ in range(target):
+		print(f"🔍 {self.account_name}: [点赞] 目标点赞数={target}")
+		for i in range(target):
 			if self._like_rate_limited_until and time.time() < self._like_rate_limited_until:
+				print(f"⚠️ {self.account_name}: [点赞] 点赞过程中触发限流，停止")
 				return liked, True
 			try:
 				pid = await self._click_one_like_candidate(page, liked_posts_24h)
 				if pid is None:
+					print(f"🔍 {self.account_name}: [点赞] 未找到可点赞的帖子")
 					break
 				liked += 1
 				liked_posts_24h.add(pid)
 				self.auto_state.setdefault("liked_posts", {})[str(pid)] = _now_ts()
 				self._save_auto_state()
+				print(f"✅ {self.account_name}: [点赞] 成功点赞 post_id={pid} ({liked}/{target})")
 				await page.wait_for_timeout(random.randint(650, 1400))
-			except Exception:
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: [点赞] 点赞失败: {e}")
 				continue
 
 		limited = bool(self._like_rate_limited_until and time.time() < self._like_rate_limited_until)
@@ -641,6 +741,8 @@ class LinuxDoAutoReadLike:
 
 	async def run(self) -> None:
 		stats = RunStats(account_name=self.account_name, username=self.username)
+		print(f"🔍 {self.account_name}: [运行] 开始执行 Linux.do 自动阅读点赞")
+		print(f"🔍 {self.account_name}: [运行] 配置: origin={self.settings.origin}, feed={self.settings.feed}, topics_per_run={self.settings.topics_per_run}")
 		self._prune_auto_state()
 		self._save_auto_state()
 
@@ -648,6 +750,8 @@ class LinuxDoAutoReadLike:
 		print(
 			f"ℹ️ {self.account_name}: 启动浏览器 (headless={self.settings.headless}, cache={'yes' if storage_state else 'no'})"
 		)
+		if storage_state:
+			print(f"🔍 {self.account_name}: [运行] 使用缓存文件: {storage_state}")
 
 		async with AsyncCamoufox(
 			headless=self.settings.headless,
@@ -658,8 +762,10 @@ class LinuxDoAutoReadLike:
 			i_know_what_im_doing=True,
 			window=(1280, 720),
 		) as browser:
+			print(f"✅ {self.account_name}: [运行] 浏览器启动成功")
 			context = await browser.new_context(storage_state=storage_state)
 			page = await context.new_page()
+			print(f"✅ {self.account_name}: [运行] 新页面创建成功")
 			self._install_like_rate_limit_listener(page)
 
 			user = await self._ensure_logged_in(page)
@@ -667,6 +773,7 @@ class LinuxDoAutoReadLike:
 			username = str(user.get("username") or self.username)
 			limit = self._get_daily_like_limit(int(trust_level) if trust_level is not None else None)
 
+			print(f"🔍 {self.account_name}: [运行] 开始同步近24小时点赞记录")
 			liked_posts_24h = await self._sync_likes_24h(page, username)
 			used = len(liked_posts_24h)
 			remaining = max(0, limit - used)
@@ -683,14 +790,17 @@ class LinuxDoAutoReadLike:
 			if not isinstance(read_topics, dict):
 				read_topics = {}
 				self.auto_state["read_topics"] = read_topics
+			print(f"🔍 {self.account_name}: [运行] 已缓存阅读主题数: {len(read_topics)}")
 
 			start_page = int(self.auto_state.get("feed_page") or 0)
 			page_no = max(0, start_page)
 			selected: list[dict[str, Any]] = []
+			print(f"🔍 {self.account_name}: [运行] 开始获取主题列表，起始页={start_page}")
 
 			while len(selected) < self.settings.topics_per_run and page_no <= start_page + self.settings.max_pages_per_run:
 				topics = await self._fetch_topics(page, page_no)
 				if not topics:
+					print(f"🔍 {self.account_name}: [运行] 第 {page_no} 页无主题，跳到下一页")
 					page_no += 1
 					continue
 				for t in topics:
@@ -727,10 +837,11 @@ class LinuxDoAutoReadLike:
 			self.auto_state["feed_page"] = page_no
 			self._save_auto_state()
 			stats.selected_topics = len(selected)
+			print(f"🔍 {self.account_name}: [运行] 主题筛选完成: 选中={len(selected)}, 已读跳过={stats.skipped_already_read}, 置顶跳过={stats.skipped_pinned}, 过长跳过={stats.skipped_too_long}")
 
 			if not selected:
 				print(f"ℹ️ {self.account_name}: 没有可阅读的新主题（可能都已读/接口空）")
-			for topic in selected:
+			for idx, topic in enumerate(selected):
 				tid = topic.get("id")
 				title = topic.get("title") or ""
 				try:
@@ -739,10 +850,18 @@ class LinuxDoAutoReadLike:
 					continue
 
 				url = f"{self.settings.origin}/t/topic/{tid_i}"
-				print(f"ℹ️ {self.account_name}: 打开主题 {tid_i} {title!r}")
+				print(f"ℹ️ {self.account_name}: [{idx+1}/{len(selected)}] 打开主题 {tid_i} {title!r}")
 				try:
+					print(f"🔍 {self.account_name}: [主题] 导航到 {url}")
 					await page.goto(url, wait_until="domcontentloaded")
 					await page.wait_for_timeout(1200)
+					# 记录主题页加载后状态
+					try:
+						current_url = page.url
+						page_title = await page.title()
+						print(f"🔍 {self.account_name}: [主题] 页面加载完成 URL={current_url}, title={page_title!r}")
+					except Exception as e:
+						print(f"⚠️ {self.account_name}: [主题] 获取页面信息失败: {e}")
 					await self._maybe_solve_cloudflare(page)
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: 打开主题失败 {tid_i}: {e}")
@@ -750,8 +869,10 @@ class LinuxDoAutoReadLike:
 					continue
 
 				read_s = random.randint(self.settings.min_read_seconds, max(self.settings.min_read_seconds, self.settings.max_read_seconds))
+				print(f"🔍 {self.account_name}: [主题] 开始模拟阅读 {read_s} 秒")
 				await self._simulate_reading(page, read_s)
 
+				print(f"🔍 {self.account_name}: [主题] 阅读完成，开始点赞（剩余额度={remaining}）")
 				liked_in_topic, limited = await self._like_some_posts(page, remaining, liked_posts_24h)
 				stats.likes_clicked += liked_in_topic
 				remaining = max(0, remaining - liked_in_topic)
@@ -761,20 +882,23 @@ class LinuxDoAutoReadLike:
 				self._save_auto_state()
 
 				print(
-					f"ℹ️ {self.account_name}: 主题 {tid_i} 阅读 {read_s}s，点赞 {liked_in_topic}，剩余可赞 {remaining}"
+					f"✅ {self.account_name}: [{idx+1}/{len(selected)}] 主题 {tid_i} 阅读 {read_s}s，点赞 {liked_in_topic}，剩余可赞 {remaining}"
 				)
 				if limited:
 					print(f"⚠️ {self.account_name}: 已触发点赞限流，停止本次点赞（阅读仍可继续）")
-					# 触发限流后不再点赞，但仍继续读完剩余主题以“纯阅读”为主
+					# 触发限流后不再点赞，但仍继续读完剩余主题以"纯阅读"为主
 					remaining = 0
 
 				await page.wait_for_timeout(random.randint(900, 2200))
 
+			print(f"🔍 {self.account_name}: [运行] 所有主题处理完成，保存登录状态")
 			try:
 				await context.storage_state(path=self.storage_state_path)
+				print(f"✅ {self.account_name}: [运行] 登录状态已保存到 {self.storage_state_path}")
 			except Exception as e:
 				print(f"⚠️ {self.account_name}: 保存 storage_state 失败: {e}")
 
+		print(f"✅ {self.account_name}: [运行] 执行完成 - 阅读主题={stats.read_topics}/{stats.selected_topics}, 点赞={stats.likes_clicked}, 失败={stats.open_failures}")
 		return stats
 
 
