@@ -512,58 +512,133 @@ class FovtCheckIn:
                             print(f"⚠️ {self.account_name}: OAuth state error: {e}")
                             return False, {"error": f"OAuth state error: {e}", **results}
 
-                        # 直接导航到 OAuth URL（不通过点击按钮）
                         redirect_uri = f"{self.API_ORIGIN}/api/oauth/linuxdo"
                         oauth_url = (
                             "https://connect.linux.do/oauth2/authorize?"
                             f"response_type=code&client_id={self.LINUXDO_CLIENT_ID}&state={auth_state}"
                             f"&redirect_uri={quote(redirect_uri, safe='')}"
                         )
-                        print(f"ℹ️ {self.account_name}: Navigating to OAuth URL: {oauth_url}")
-                        await page.goto(oauth_url, wait_until="domcontentloaded")
-                        await self._maybe_solve_cloudflare_interstitial(page)
 
-                        # Linux.do 登录或授权
+                        # ===== 步骤1: 先到 linux.do 登录页登录 =====
+                        print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
+                        login_resp = await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+
                         try:
-                            if "linux.do/login" in (page.url or ""):
-                                await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
+                            if login_resp and getattr(login_resp, "status", None) == 429:
+                                raise RuntimeError("linux.do 返回 429（IP 被临时限流/封禁）")
+                        except Exception:
+                            raise
 
-                            # 授权页
+                        # 尝试解决 Cloudflare
+                        await self._maybe_solve_cloudflare_interstitial(page)
+                        if CAPTCHA_SOLVER_AVAILABLE and _should_try_turnstile_solver():
                             try:
-                                allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-                                if allow_btn:
-                                    await allow_btn.click()
-                                else:
-                                    for sel in [
-                                        'button:has-text("授权")',
-                                        'button:has-text("允许")',
-                                        'button:has-text("Authorize")',
-                                        'button[type="submit"]',
-                                    ]:
-                                        try:
-                                            b = await page.query_selector(sel)
-                                            if b:
-                                                await b.click()
-                                                break
-                                        except Exception:
-                                            continue
+                                await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
                             except Exception:
                                 pass
-                        except Exception as e:
-                            print(f"⚠️ {self.account_name}: Linux.do 登录/授权可能未完成: {e}")
 
-                        # 等待 OAuth 回调完成 - 让 SPA 自然处理，不要手动导航到 callback URL
-                        # 参考 wzw 站点的做法
+                        # 填写账号密码
+                        await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
+
+                        # 等待跳出 /login
                         try:
-                            await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
-                            print(f"ℹ️ {self.account_name}: Redirected back to api.voct.top")
+                            await page.wait_for_function(
+                                """() => {
+                                    const u = location.href || '';
+                                    if (u.includes('/oauth2/authorize')) return true;
+                                    if (!u.includes('/login')) return true;
+                                    const t = document.body ? (document.body.innerText || '') : '';
+                                    return t.includes('授权') || t.includes('Authorize') || t.includes('/oauth2/approve');
+                                }""",
+                                timeout=30000,
+                            )
+                            print(f"ℹ️ {self.account_name}: Left login page, current URL: {page.url}")
+                        except Exception:
+                            await self._take_screenshot(page, "linuxdo_login_timeout")
+                            return False, {"error": "linux.do login submit timeout", **results}
+
+                        # 保存 linux.do session
+                        try:
+                            if cache_file_path and "/login" not in page.url:
+                                cache_dir = os.path.dirname(cache_file_path)
+                                if cache_dir:
+                                    os.makedirs(cache_dir, exist_ok=True)
+                                await context.storage_state(path=cache_file_path)
+                                print(f"✅ {self.account_name}: Linux.do session saved")
                         except Exception:
                             pass
 
-                        # 等待页面完成加载和 SPA 初始化
-                        await page.wait_for_timeout(5000)
+                        # ===== 步骤2: 登录后重新导航到 OAuth URL =====
+                        print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
+                        await page.goto(oauth_url, wait_until="domcontentloaded")
 
+                        # ===== 步骤3: 等待授权按钮出现 =====
+                        print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
+                        try:
+                            await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+                        except Exception:
+                            await self._take_screenshot(page, "approve_button_not_found")
+                            await self._save_page_content(page, "approve_button_not_found")
+                            print(f"⚠️ {self.account_name}: Approve button not found, current URL: {page.url}")
+                            return False, {"error": "Approve button not found", **results}
+
+                        allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
+                        if not allow_btn_ele:
+                            await self._take_screenshot(page, "approve_button_query_failed")
+                            return False, {"error": "Approve button query failed", **results}
+
+                        # ===== 步骤4: 点击授权按钮 =====
+                        print(f"ℹ️ {self.account_name}: Clicking authorization button...")
+
+                        # 设置 URL 监听捕获 OAuth 回调
+                        oauth_redirect_url = None
+                        observed_oauth_urls = []
+
+                        def _record_provider_url(u: str) -> None:
+                            try:
+                                if u and u.startswith(self.API_ORIGIN) and "code=" in u:
+                                    if u not in observed_oauth_urls:
+                                        observed_oauth_urls.append(u)
+                            except Exception:
+                                pass
+
+                        try:
+                            page.on("framenavigated", lambda frame: _record_provider_url(frame.url))
+                            page.on("request", lambda req: _record_provider_url(req.url))
+                        except Exception:
+                            pass
+
+                        try:
+                            await allow_btn_ele.click(no_wait_after=True, timeout=30000)
+                        except Exception:
+                            try:
+                                await page.evaluate("(el) => el && el.click && el.click()", allow_btn_ele)
+                            except Exception:
+                                pass
+
+                        # ===== 步骤5: 等待重定向到 provider =====
+                        try:
+                            await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
+                            oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
+                            print(f"ℹ️ {self.account_name}: Redirected to: {oauth_redirect_url}")
+                        except Exception:
+                            await self._take_screenshot(page, "oauth_redirect_timeout")
+                            print(f"⚠️ {self.account_name}: OAuth redirect timeout, current URL: {page.url}")
+
+                        # 从 URL 中提取 code 参数
+                        from urllib.parse import urlparse, parse_qs
+                        source_url = oauth_redirect_url or page.url
+                        parsed_url = urlparse(source_url)
+                        query_params = parse_qs(parsed_url.query)
+                        code_values = query_params.get("code")
+                        code = code_values[0] if code_values else None
+
+                        if code:
+                            print(f"ℹ️ {self.account_name}: Got OAuth code: {code[:20]}...")
+
+                        # ===== 步骤6: 等待 session 建立 =====
                         # 等待 localStorage 中出现 user 数据
+                        await page.wait_for_timeout(3000)
                         try:
                             await page.wait_for_function(
                                 """() => {
@@ -578,36 +653,29 @@ class FovtCheckIn:
                             )
                             print(f"✅ {self.account_name}: localStorage user detected")
                         except Exception:
-                            # 如果等待超时，尝试导航到 /console 触发 SPA 初始化
-                            print(f"⚠️ {self.account_name}: localStorage timeout, trying /console navigation...")
+                            print(f"⚠️ {self.account_name}: localStorage timeout, current URL: {page.url}")
+                            # 尝试导航到 /console 触发 SPA 初始化
                             try:
                                 await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
-                                await page.wait_for_timeout(5000)
-
-                                # 再次检查 localStorage
-                                user_data = await page.evaluate("() => localStorage.getItem('user')")
-                                if user_data:
-                                    print(f"✅ {self.account_name}: localStorage user detected after /console navigation")
+                                await page.wait_for_timeout(3000)
                             except Exception:
                                 pass
 
-                        # 验证登录成功 - 先检查当前页面 URL
+                        # 验证登录成功
                         current_url = page.url or ""
                         print(f"ℹ️ {self.account_name}: Current URL after OAuth: {current_url}")
 
-                        # 如果在登录页说明 session 未建立
                         if "/login" in current_url:
                             await self._take_screenshot(page, "oauth_redirect_to_login")
                             await self._save_page_content(page, "oauth_redirect_to_login")
-                            print(f"⚠️ {self.account_name}: Redirected to login page, OAuth may have failed")
+                            print(f"⚠️ {self.account_name}: Redirected to login page")
 
                         # 确保在 console 页面
-                        if "/console" not in current_url:
+                        if "/console" not in current_url and "/login" not in current_url:
                             await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
                             await page.wait_for_timeout(2000)
                             current_url = page.url or ""
 
-                        # 再次检查是否被重定向到登录页
                         if "/login" in current_url:
                             await self._take_screenshot(page, "login_verification_failed")
                             await self._save_page_content(page, "login_verification_failed")
