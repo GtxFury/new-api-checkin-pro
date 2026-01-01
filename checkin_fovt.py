@@ -552,11 +552,78 @@ class FovtCheckIn:
                         except Exception as e:
                             print(f"⚠️ {self.account_name}: Linux.do 登录/授权可能未完成: {e}")
 
-                        # 等待返回 api.voct.top
+                        # 等待返回 api.voct.top 并捕获带 code 的 URL
+                        oauth_redirect_url = None
+                        observed_oauth_urls = []
+
+                        def _record_provider_url(u: str) -> None:
+                            try:
+                                if not u or not u.startswith(self.API_ORIGIN):
+                                    return
+                                if "code=" in u and "linuxdo" in u:
+                                    if u not in observed_oauth_urls:
+                                        observed_oauth_urls.append(u)
+                            except Exception:
+                                pass
+
                         try:
-                            await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
+                            def on_frame_navigated(frame) -> None:
+                                try:
+                                    _record_provider_url(frame.url)
+                                except Exception:
+                                    pass
+
+                            page.on("framenavigated", on_frame_navigated)
                         except Exception:
                             pass
+
+                        try:
+                            await page.wait_for_url(f"**{self.API_ORIGIN}/**", timeout=30000)
+                            oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
+                            print(f"ℹ️ {self.account_name}: Captured OAuth redirect URL: {oauth_redirect_url}")
+                        except Exception:
+                            pass
+
+                        # 从 URL 中提取 code 参数
+                        from urllib.parse import urlparse, parse_qs
+                        current_url = oauth_redirect_url or page.url
+                        parsed_url = urlparse(current_url)
+                        query_params = parse_qs(parsed_url.query)
+                        code_values = query_params.get("code")
+                        code = code_values[0] if code_values else None
+
+                        if code:
+                            print(f"ℹ️ {self.account_name}: Got OAuth code: {code[:20]}...")
+
+                            # 如果当前不在回调 URL 上，需要手动调用回调
+                            if "/api/oauth/linuxdo" not in current_url:
+                                callback_url = f"{self.API_ORIGIN}/api/oauth/linuxdo?code={code}&state={auth_state}"
+                                print(f"ℹ️ {self.account_name}: Navigating to callback URL")
+                                await page.goto(callback_url, wait_until="domcontentloaded")
+                                await page.wait_for_timeout(3000)
+
+                        # 等待 localStorage 中出现 user 数据
+                        try:
+                            await page.wait_for_function(
+                                """() => {
+                                    try {
+                                        const user = localStorage.getItem('user');
+                                        return user !== null && user !== '';
+                                    } catch (e) {
+                                        return false;
+                                    }
+                                }""",
+                                timeout=15000,
+                            )
+                            print(f"✅ {self.account_name}: localStorage user detected")
+                        except Exception:
+                            # 如果等待超时，尝试导航到 /console 触发 SPA 初始化
+                            print(f"⚠️ {self.account_name}: localStorage timeout, trying /console navigation...")
+                            try:
+                                await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                                await page.wait_for_timeout(3000)
+                            except Exception:
+                                pass
 
                         # 验证登录成功
                         await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
