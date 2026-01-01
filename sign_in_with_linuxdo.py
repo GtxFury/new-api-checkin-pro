@@ -1461,26 +1461,22 @@ class LinuxDoSignIn:
 								print(f"⚠️ {self.account_name}: wzw session wait error: {wzw_err}")
 
 						# runanytime/new-api：localStorage 里有 user 不代表服务端 session 已建立。
-						# 这里用 /api/user/self（带 new-api-user）强校验；若失败则尝试用 code 回调建立会话。
+						# 这里用 /api/user/self（带 new-api-user）强校验；若失败则删除缓存并返回 retry 标记。
 						if self.provider_config.name == "runanytime":
 							ok = await self._runanytime_verify_session(page, str(api_user))
 							if not ok:
-								# 尝试从捕获到的 OAuth URL 或 observed 里解析 code 再走回调
-								source = oauth_redirect_url or (observed_oauth_urls[0] if observed_oauth_urls else page.url)
-								parsed = urlparse(source)
-								q = parse_qs(parsed.query)
-								code_vals = q.get("code")
-								code_val = code_vals[0] if code_vals else None
-								if code_val:
-									api_user_cb = await self._call_provider_linuxdo_callback_via_navigation(
-										page, code_val, auth_state
-									)
-									if api_user_cb:
-										api_user = api_user_cb
-										ok = await self._runanytime_verify_session(page, str(api_user))
-							if not ok:
-								await self._take_screenshot(page, "runanytime_oauth_session_not_established")
-								return False, {"error": "runanytime oauth ok but session not established"}
+								print(f"⚠️ {self.account_name}: runanytime session verify failed (401), clearing cache for retry...")
+
+								# 删除缓存文件，强制下次重新登录
+								if cache_file_path and os.path.exists(cache_file_path):
+									try:
+										os.remove(cache_file_path)
+										print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
+									except Exception as del_err:
+										print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
+
+								await self._take_screenshot(page, "runanytime_session_401_need_retry")
+								return False, {"error": "session_verify_failed_need_retry", "retry": True}
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None

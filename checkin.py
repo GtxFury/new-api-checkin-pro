@@ -4262,6 +4262,26 @@ class CheckIn:
                 cache_file_path=cache_file_path,
             )
 
+            # 如果 session verify 失败需要重试，重新获取 auth_state 并执行完整登录流程
+            if not success and result_data.get("retry"):
+                print(f"ℹ️ {self.account_name}: Session verify failed, retrying with fresh login...")
+
+                # 重新获取 auth_state（因为之前的可能已过期）
+                retry_auth_state_result = await self.get_auth_state(
+                    client=client,
+                    headers=headers,
+                )
+                if retry_auth_state_result.get("success"):
+                    # 第二次调用 signin，由于缓存已删除，会走完整登录流程
+                    success, result_data = await linuxdo.signin(
+                        client_id=client_id_result["client_id"],
+                        auth_state=retry_auth_state_result["state"],
+                        auth_cookies=retry_auth_state_result.get("cookies", []),
+                        cache_file_path=cache_file_path,
+                    )
+                else:
+                    print(f"⚠️ {self.account_name}: Failed to get new auth_state for retry")
+
             # 检查是否成功获取 cookies 和 api_user
             if success and "cookies" in result_data and "api_user" in result_data:
                 user_cookies = result_data["cookies"]
