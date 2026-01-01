@@ -3556,8 +3556,95 @@ class CheckIn:
                                         print(f"✅ {self.account_name}: Check-in confirmed by elysiver detection (button: {btn_text})")
                                         return {"success": True, "checked_in": True}
                                     elif elysiver_result.get("canCheckIn"):
-                                        print(f"ℹ️ {self.account_name}: elysiver shows '立即签到' button, not checked in yet")
-                                        return {"success": True, "checked_in": False, "can_check_in": True}
+                                        # elysiver: 检测到"立即签到"按钮，点击执行签到
+                                        print(f"ℹ️ {self.account_name}: elysiver shows '立即签到' button, clicking to check in...")
+                                        try:
+                                            # 点击签到按钮
+                                            click_result = await page.evaluate(
+                                                """() => {
+                                                    try {
+                                                        const buttons = Array.from(document.querySelectorAll('button'));
+                                                        const btn = buttons.find(b => (b.innerText || '').includes('立即签到'));
+                                                        if (btn && !btn.disabled) {
+                                                            btn.click();
+                                                            return { clicked: true };
+                                                        }
+                                                        return { clicked: false, reason: 'button not found or disabled' };
+                                                    } catch (e) {
+                                                        return { clicked: false, error: e.message };
+                                                    }
+                                                }"""
+                                            )
+                                            if click_result and click_result.get("clicked"):
+                                                print(f"ℹ️ {self.account_name}: Clicked check-in button, waiting for response...")
+                                                # 等待签到完成（等待按钮文字变化或出现成功提示）
+                                                try:
+                                                    await page.wait_for_function(
+                                                        """() => {
+                                                            try {
+                                                                const bodyText = document.body?.innerText || '';
+                                                                // 签到成功的标志
+                                                                if (bodyText.includes('今日已签到')) return true;
+                                                                if (bodyText.includes('签到成功')) return true;
+                                                                // 检查按钮是否变成已签到状态
+                                                                const buttons = Array.from(document.querySelectorAll('button'));
+                                                                const btn = buttons.find(b => {
+                                                                    const text = b.innerText || '';
+                                                                    return text.includes('今日已签到') ||
+                                                                           (text.includes('签到') && (b.disabled || b.getAttribute('aria-disabled') === 'true'));
+                                                                });
+                                                                return !!btn;
+                                                            } catch (e) {
+                                                                return false;
+                                                            }
+                                                        }""",
+                                                        timeout=10000,
+                                                    )
+                                                    print(f"✅ {self.account_name}: elysiver check-in successful!")
+                                                    return {"success": True, "checked_in": True}
+                                                except Exception:
+                                                    # 超时后再次检测状态
+                                                    await page.wait_for_timeout(2000)
+                                                    recheck_result = await page.evaluate(
+                                                        """() => {
+                                                            try {
+                                                                const bodyText = document.body?.innerText || '';
+                                                                if (bodyText.includes('今日已签到') || bodyText.includes('签到成功')) {
+                                                                    return { checkedIn: true };
+                                                                }
+                                                                const buttons = Array.from(document.querySelectorAll('button'));
+                                                                for (const btn of buttons) {
+                                                                    const text = btn.innerText || '';
+                                                                    if (text.includes('今日已签到')) {
+                                                                        return { checkedIn: true, btnText: text };
+                                                                    }
+                                                                    if (text.includes('立即签到') && !btn.disabled) {
+                                                                        return { checkedIn: false, stillCanCheckIn: true };
+                                                                    }
+                                                                }
+                                                                return { checkedIn: false, unknown: true };
+                                                            } catch (e) {
+                                                                return { checkedIn: false, error: e.message };
+                                                            }
+                                                        }"""
+                                                    )
+                                                    if recheck_result and recheck_result.get("checkedIn"):
+                                                        print(f"✅ {self.account_name}: elysiver check-in confirmed after recheck")
+                                                        return {"success": True, "checked_in": True}
+                                                    else:
+                                                        print(f"⚠️ {self.account_name}: elysiver check-in status unclear after click: {recheck_result}")
+                                                        # 如果点击后状态不明确，尝试截图诊断
+                                                        try:
+                                                            await self._take_screenshot(page, "elysiver_checkin_after_click")
+                                                        except Exception:
+                                                            pass
+                                                        return {"success": False, "checked_in": False, "error": "Check-in status unclear after click"}
+                                            else:
+                                                print(f"⚠️ {self.account_name}: Failed to click check-in button: {click_result}")
+                                                return {"success": False, "checked_in": False, "error": "Failed to click check-in button"}
+                                        except Exception as click_err:
+                                            print(f"⚠️ {self.account_name}: Error clicking check-in button: {click_err}")
+                                            return {"success": False, "checked_in": False, "error": f"Click error: {click_err}"}
                                     elif elysiver_result.get("reason") == "feature_disabled":
                                         print(f"⚠️ {self.account_name}: elysiver check-in feature is disabled by admin")
                                         # 功能被禁用时视为成功（无需签到）
