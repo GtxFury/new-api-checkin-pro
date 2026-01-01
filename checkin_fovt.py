@@ -337,11 +337,18 @@ class FovtCheckIn:
             print(f"❌ {self.account_name}: Gift checkin error: {e}")
             return False, ""
 
-    async def _redeem_code_on_api(self, page, code: str) -> bool:
+    async def _redeem_code_on_api(self, page, code: str, api_user: str | None = None) -> bool:
         """在 api.voct.top 兑换码"""
         if not code:
             print(f"ℹ️ {self.account_name}: No code to redeem")
             return True
+
+        # 确保有 api_user
+        if not api_user:
+            api_user = await self._extract_api_user_from_localstorage(page)
+        if not api_user:
+            print(f"⚠️ {self.account_name}: No api_user for code redemption")
+            return False
 
         try:
             print(f"ℹ️ {self.account_name}: Navigating to topup page to redeem code")
@@ -349,14 +356,15 @@ class FovtCheckIn:
             await page.wait_for_timeout(2000)
 
             result = await page.evaluate(
-                """async (code) => {
+                """async ({ code, apiUser }) => {
                     try {
                         const resp = await fetch('/api/user/topup', {
                             method: 'POST',
                             credentials: 'include',
                             headers: {
                                 'Accept': 'application/json',
-                                'Content-Type': 'application/json'
+                                'Content-Type': 'application/json',
+                                'new-api-user': String(apiUser)
                             },
                             body: JSON.stringify({ key: code })
                         });
@@ -365,7 +373,7 @@ class FovtCheckIn:
                         return { status: 0, error: e.message };
                     }
                 }""",
-                code,
+                {"code": code, "apiUser": api_user},
             )
 
             if not result:
@@ -414,6 +422,69 @@ class FovtCheckIn:
                 if api_user:
                     return str(api_user)
         return None
+
+    async def _call_oauth_callback(self, page, code: str, auth_state: str) -> str | None:
+        """调用 OAuth 回调 API 建立 session，返回 api_user"""
+        import json as _json
+        from urllib.parse import urlencode
+
+        callback_url = f"{self.API_ORIGIN}/api/oauth/linuxdo"
+        params = {"code": code}
+        if auth_state:
+            params["state"] = auth_state
+        final_url = f"{callback_url}?{urlencode(params)}"
+
+        print(f"ℹ️ {self.account_name}: Calling OAuth callback: {final_url}")
+
+        try:
+            # 通过浏览器 fetch 调用回调 API（带 credentials）
+            result = await page.evaluate(
+                """async (url) => {
+                    try {
+                        const resp = await fetch(url, {
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'application/json, text/plain, */*'
+                            }
+                        });
+                        const text = await resp.text();
+                        return { status: resp.status, text: text };
+                    } catch (e) {
+                        return { status: 0, error: e.message };
+                    }
+                }""",
+                final_url,
+            )
+
+            status = (result or {}).get("status", 0)
+            text = (result or {}).get("text", "")
+
+            if status != 200 or not text:
+                print(f"⚠️ {self.account_name}: OAuth callback failed: HTTP {status}, body: {text[:200]}")
+                return None
+
+            try:
+                data = _json.loads(text)
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: OAuth callback JSON parse failed: {e}")
+                return None
+
+            if not isinstance(data, dict) or not data.get("success"):
+                msg = data.get("message") if isinstance(data, dict) else "Invalid response"
+                print(f"⚠️ {self.account_name}: OAuth callback returned success=false: {msg}")
+                return None
+
+            user_data = data.get("data", {})
+            if isinstance(user_data, dict):
+                api_user = user_data.get("id") or user_data.get("user_id") or user_data.get("userId")
+                if api_user:
+                    print(f"✅ {self.account_name}: Got api_user from OAuth callback: {api_user}")
+                    return str(api_user)
+
+            return None
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: OAuth callback error: {e}")
+            return None
 
     async def _get_user_balance(self, page, api_user: str | None = None) -> dict:
         """获取用户余额信息"""
@@ -521,11 +592,14 @@ class FovtCheckIn:
 
                     current_url = page.url or ""
                     if "/login" not in current_url:
-                        balance_info = await self._get_user_balance(page)
+                        # 先获取 api_user
+                        cached_api_user = await self._extract_api_user_from_localstorage(page)
+                        balance_info = await self._get_user_balance(page, cached_api_user)
                         if balance_info and balance_info.get("username"):
                             print(f"✅ {self.account_name}: Already logged in as {balance_info.get('username')}")
                             is_logged_in = True
                             results["linuxdo_login"] = True
+                            results["api_user"] = cached_api_user  # 保存 api_user 供后续使用
 
                     # 如果未登录，执行 Linux.do OAuth 登录
                     if not is_logged_in:
@@ -678,9 +752,34 @@ class FovtCheckIn:
                         if code:
                             print(f"ℹ️ {self.account_name}: Got OAuth code: {code[:20]}...")
 
-                        # ===== 步骤6: 等待 session 建立 =====
+                            # ===== 步骤6: 调用 OAuth 回调建立 session =====
+                            api_user = await self._call_oauth_callback(page, code, auth_state)
+
+                            if not api_user:
+                                # 回调失败，尝试等待 localStorage
+                                print(f"⚠️ {self.account_name}: OAuth callback failed, trying localStorage fallback...")
+                                await page.wait_for_timeout(3000)
+                                try:
+                                    await page.wait_for_function(
+                                        """() => {
+                                            try {
+                                                const user = localStorage.getItem('user');
+                                                return user !== null && user !== '';
+                                            } catch (e) {
+                                                return false;
+                                            }
+                                        }""",
+                                        timeout=10000,
+                                    )
+                                    api_user = await self._extract_api_user_from_localstorage(page)
+                                except Exception:
+                                    pass
+                        else:
+                            print(f"⚠️ {self.account_name}: No OAuth code found in redirect URL")
+                            api_user = None
+
                         # 等待 localStorage 中出现 user 数据
-                        await page.wait_for_timeout(3000)
+                        await page.wait_for_timeout(2000)
                         try:
                             await page.wait_for_function(
                                 """() => {
@@ -691,15 +790,19 @@ class FovtCheckIn:
                                         return false;
                                     }
                                 }""",
-                                timeout=15000,
+                                timeout=10000,
                             )
                             print(f"✅ {self.account_name}: localStorage user detected")
+                            if not api_user:
+                                api_user = await self._extract_api_user_from_localstorage(page)
                         except Exception:
                             print(f"⚠️ {self.account_name}: localStorage timeout, current URL: {page.url}")
                             # 尝试导航到 /console 触发 SPA 初始化
                             try:
                                 await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
                                 await page.wait_for_timeout(3000)
+                                if not api_user:
+                                    api_user = await self._extract_api_user_from_localstorage(page)
                             except Exception:
                                 pass
 
@@ -723,11 +826,16 @@ class FovtCheckIn:
                             await self._save_page_content(page, "login_verification_failed")
                             return False, {"error": "Login verification failed - redirected to login", **results}
 
-                        balance_info = await self._get_user_balance(page)
+                        # 使用已获取的 api_user 验证登录
+                        if not api_user:
+                            api_user = await self._extract_api_user_from_localstorage(page)
+
+                        balance_info = await self._get_user_balance(page, api_user)
                         if balance_info and balance_info.get("username"):
                             print(f"✅ {self.account_name}: Login successful as {balance_info.get('username')}")
                             is_logged_in = True
                             results["linuxdo_login"] = True
+                            results["api_user"] = api_user  # 保存 api_user 供后续使用
 
                             # 保存 session
                             try:
@@ -754,13 +862,20 @@ class FovtCheckIn:
                     print(f"ℹ️ {self.account_name}: Checkin status: {checkin_status}")
 
                     # 执行签到
-                    checkin_ok, code = await self._do_gift_checkin(page)
+                    checkin_ok, redemption_code = await self._do_gift_checkin(page)
                     results["gift_checkin"] = checkin_ok
 
                     # 步骤3: 如果获得了兑换码，去 api.voct.top 兑换
-                    if code:
-                        print(f"ℹ️ {self.account_name}: Got redemption code: {code}")
-                        redeem_ok = await self._redeem_code_on_api(page, code)
+                    # 获取当前的 api_user（可能来自登录流程或 results）
+                    current_api_user = results.get("api_user")
+                    if not current_api_user:
+                        await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                        await page.wait_for_timeout(1000)
+                        current_api_user = await self._extract_api_user_from_localstorage(page)
+
+                    if redemption_code:
+                        print(f"ℹ️ {self.account_name}: Got redemption code: {redemption_code}")
+                        redeem_ok = await self._redeem_code_on_api(page, redemption_code, current_api_user)
                         results["code_redeem"] = redeem_ok
                     else:
                         print(f"ℹ️ {self.account_name}: No new code to redeem")
@@ -769,7 +884,9 @@ class FovtCheckIn:
                     # 步骤4: 获取最终余额
                     await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
                     await page.wait_for_timeout(1000)
-                    final_balance = await self._get_user_balance(page)
+                    if not current_api_user:
+                        current_api_user = await self._extract_api_user_from_localstorage(page)
+                    final_balance = await self._get_user_balance(page, current_api_user)
                     if final_balance:
                         results["balance"] = final_balance.get("quota", 0)
                         results["used_quota"] = final_balance.get("used_quota", 0)
