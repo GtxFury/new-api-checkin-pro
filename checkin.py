@@ -339,6 +339,85 @@ class CheckIn:
         except Exception:
             pass
 
+    async def _elysiver_handle_cloudflare_challenge(self, page, max_wait_seconds: int = 30) -> bool:
+        """elysiver 专用：检测并解决 Cloudflare 全屏挑战（Just a moment 页面）
+
+        返回 True 表示页面已通过挑战或无挑战，False 表示挑战解决失败。
+        """
+        import time
+        start_time = time.time()
+
+        while time.time() - start_time < max_wait_seconds:
+            # 检测是否存在 Cloudflare 挑战
+            try:
+                cf_detected = await page.evaluate("""() => {
+                    try {
+                        const title = (document.title || '').toLowerCase();
+                        const bodyText = document.body ? (document.body.innerText || '') : '';
+
+                        // 检测 "Just a moment" 页面
+                        if (title.includes('just a moment') || title.includes('attention required')) {
+                            return { detected: true, type: 'interstitial' };
+                        }
+
+                        // 检测 Cloudflare 挑战 iframe
+                        const cfIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                        if (cfIframe) {
+                            return { detected: true, type: 'turnstile' };
+                        }
+
+                        // 检测 Cloudflare 验证表单
+                        const cfForm = document.querySelector('form[action*="__cf_chl"], input[name="cf-turnstile-response"]');
+                        if (cfForm) {
+                            return { detected: true, type: 'challenge_form' };
+                        }
+
+                        // 检测页面内容中的 Cloudflare 标记
+                        if (bodyText.includes('Checking your browser') ||
+                            bodyText.includes('DDoS protection by') ||
+                            bodyText.includes('Ray ID:')) {
+                            return { detected: true, type: 'ddos_protection' };
+                        }
+
+                        return { detected: false };
+                    } catch (e) {
+                        return { detected: false, error: e.message };
+                    }
+                }""")
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: elysiver CF detection error: {e}")
+                cf_detected = {"detected": False}
+
+            if not cf_detected.get("detected"):
+                # 无 Cloudflare 挑战，直接返回
+                return True
+
+            cf_type = cf_detected.get("type", "unknown")
+            print(f"ℹ️ {self.account_name}: elysiver Cloudflare challenge detected (type: {cf_type}), attempting to solve...")
+
+            # 尝试使用 playwright-captcha 解决
+            await self._maybe_solve_cloudflare_interstitial(page)
+            await self._maybe_solve_cloudflare_turnstile(page)
+
+            # 等待页面跳转或挑战消失
+            await page.wait_for_timeout(3000)
+
+            # 检查是否成功通过
+            try:
+                current_title = await page.title()
+                if "just a moment" not in current_title.lower():
+                    print(f"✅ {self.account_name}: elysiver Cloudflare challenge solved successfully")
+                    return True
+            except Exception:
+                pass
+
+        print(f"⚠️ {self.account_name}: elysiver Cloudflare challenge not solved within {max_wait_seconds}s")
+        try:
+            await self._take_screenshot(page, "elysiver_cf_challenge_timeout")
+        except Exception:
+            pass
+        return False
+
     @staticmethod
     def _looks_like_cloudflare_interstitial_html(body: str) -> bool:
         if not body:
@@ -3487,6 +3566,10 @@ class CheckIn:
                         # DOM 判定：按钮"今日已签到"通常 disabled；同时兼容文本提示
                         # elysiver 专用检测：等待页面完全加载后检测签到按钮状态
                         if self.provider_config.name == "elysiver":
+                            # elysiver: 再次检测并处理 Cloudflare 全屏挑战
+                            cf_solved = await self._elysiver_handle_cloudflare_challenge(page)
+                            if not cf_solved:
+                                print(f"⚠️ {self.account_name}: elysiver CF challenge not solved, check-in may fail")
                             try:
                                 # elysiver 页面初始会显示"签到功能未启用"，需要等待真正的签到按钮出现
                                 # 等待"今日已签到"或"立即签到"按钮出现，最多等待 15 秒

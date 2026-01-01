@@ -392,6 +392,92 @@ class LinuxDoSignIn:
 			print(f"⚠️ {self.account_name}: Callback navigation helper error: {e}")
 			return None
 
+	async def _handle_cloudflare_challenge(self, page, max_wait_seconds: int = 30) -> bool:
+		"""检测并解决 Cloudflare 全屏挑战（Just a moment 页面）
+
+		返回 True 表示页面已通过挑战或无挑战，False 表示挑战解决失败。
+		"""
+		import time
+		start_time = time.time()
+
+		while time.time() - start_time < max_wait_seconds:
+			# 检测是否存在 Cloudflare 挑战
+			try:
+				cf_detected = await page.evaluate("""() => {
+					try {
+						const title = (document.title || '').toLowerCase();
+						const bodyText = document.body ? (document.body.innerText || '') : '';
+
+						// 检测 "Just a moment" 页面
+						if (title.includes('just a moment') || title.includes('attention required')) {
+							return { detected: true, type: 'interstitial' };
+						}
+
+						// 检测 Cloudflare 挑战 iframe
+						const cfIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+						if (cfIframe) {
+							return { detected: true, type: 'turnstile' };
+						}
+
+						// 检测 Cloudflare 验证表单
+						const cfForm = document.querySelector('form[action*="__cf_chl"], input[name="cf-turnstile-response"]');
+						if (cfForm) {
+							return { detected: true, type: 'challenge_form' };
+						}
+
+						// 检测页面内容中的 Cloudflare 标记
+						if (bodyText.includes('Checking your browser') ||
+							bodyText.includes('DDoS protection by') ||
+							bodyText.includes('Ray ID:')) {
+							return { detected: true, type: 'ddos_protection' };
+						}
+
+						return { detected: false };
+					} catch (e) {
+						return { detected: false, error: e.message };
+					}
+				}""")
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: CF detection error: {e}")
+				cf_detected = {"detected": False}
+
+			if not cf_detected.get("detected"):
+				# 无 Cloudflare 挑战，直接返回
+				return True
+
+			cf_type = cf_detected.get("type", "unknown")
+			print(f"ℹ️ {self.account_name}: Cloudflare challenge detected (type: {cf_type}), attempting to solve...")
+
+			# 尝试使用 playwright-captcha 解决
+			try:
+				# 先尝试 interstitial
+				await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: CF interstitial solve error: {e}")
+
+			# 再尝试 turnstile
+			if _should_try_turnstile_solver():
+				try:
+					await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+				except Exception as e:
+					print(f"⚠️ {self.account_name}: CF turnstile solve error: {e}")
+
+			# 等待页面跳转或挑战消失
+			await page.wait_for_timeout(3000)
+
+			# 检查是否成功通过
+			try:
+				current_title = await page.title()
+				if "just a moment" not in current_title.lower():
+					print(f"✅ {self.account_name}: Cloudflare challenge solved successfully")
+					return True
+			except Exception:
+				pass
+
+		print(f"⚠️ {self.account_name}: Cloudflare challenge not solved within {max_wait_seconds}s")
+		await self._take_screenshot(page, f"{self.provider_config.name}_cf_challenge_timeout")
+		return False
+
 	async def _runanytime_verify_session(self, page, api_user: str) -> bool:
 		"""runanytime/new-api：用 /api/user/self 校验 session 是否有效（比看 UI 是否 NaN 更准）。"""
 		try:
@@ -533,6 +619,10 @@ class LinuxDoSignIn:
 					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
 				except Exception:
 					await page.wait_for_timeout(3000)
+
+				# elysiver: 检测并解决 Cloudflare 全屏挑战（Just a moment 页面）
+				if self.provider_config.name == "elysiver":
+					await self._handle_cloudflare_challenge(page)
 
 				# 检测是否被重定向到登录页（session 可能已过期）
 				current_url = page.url or ""
