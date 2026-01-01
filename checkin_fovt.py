@@ -489,18 +489,38 @@ class FovtCheckIn:
                     if not is_logged_in:
                         print(f"ℹ️ {self.account_name}: Need to login via Linux.do OAuth")
 
-                        # 先到 api.voct.top 的登录页
+                        # 获取 OAuth state
+                        await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
                         try:
-                            await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
-                            await self._maybe_solve_cloudflare_interstitial(page)
-                        except Exception:
-                            try:
-                                await page.goto(f"{self.API_ORIGIN}/login", wait_until="domcontentloaded")
-                            except Exception:
-                                pass
+                            state_result = await page.evaluate(
+                                """async () => {
+                                    try {
+                                        const resp = await fetch('/api/oauth/state?provider=linuxdo');
+                                        return await resp.json();
+                                    } catch (e) {
+                                        return { success: false, error: e.message };
+                                    }
+                                }"""
+                            )
+                            auth_state = (state_result or {}).get("data", "")
+                            if not auth_state:
+                                print(f"⚠️ {self.account_name}: Failed to get OAuth state")
+                                await self._take_screenshot(page, "oauth_state_failed")
+                                return False, {"error": "Failed to get OAuth state", **results}
+                            print(f"ℹ️ {self.account_name}: Got OAuth state: {auth_state}")
+                        except Exception as e:
+                            print(f"⚠️ {self.account_name}: OAuth state error: {e}")
+                            return False, {"error": f"OAuth state error: {e}", **results}
 
-                        # 点击 "使用 LinuxDO 继续" 按钮
-                        await self._click_linuxdo_login_button(page)
+                        # 直接导航到 OAuth URL（不通过点击按钮）
+                        redirect_uri = f"{self.API_ORIGIN}/api/oauth/linuxdo"
+                        oauth_url = (
+                            "https://connect.linux.do/oauth2/authorize?"
+                            f"response_type=code&client_id={self.LINUXDO_CLIENT_ID}&state={auth_state}"
+                            f"&redirect_uri={quote(redirect_uri, safe='')}"
+                        )
+                        print(f"ℹ️ {self.account_name}: Navigating to OAuth URL: {oauth_url}")
+                        await page.goto(oauth_url, wait_until="domcontentloaded")
                         await self._maybe_solve_cloudflare_interstitial(page)
 
                         # Linux.do 登录或授权
