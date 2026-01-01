@@ -389,21 +389,59 @@ class FovtCheckIn:
             print(f"❌ {self.account_name}: Code redemption error: {e}")
             return False
 
-    async def _get_user_balance(self, page) -> dict:
+    async def _extract_api_user_from_localstorage(self, page) -> str | None:
+        """从 localStorage 中读取 user id"""
+        import json as _json
+        for storage_key in ("user", "user_info", "userInfo"):
+            try:
+                user_data = await page.evaluate(f"() => localStorage.getItem('{storage_key}')")
+            except Exception:
+                user_data = None
+
+            if not user_data:
+                continue
+
+            try:
+                user_obj = _json.loads(user_data)
+            except Exception:
+                continue
+
+            if not isinstance(user_obj, dict):
+                continue
+
+            for id_key in ("id", "user_id", "userId"):
+                api_user = user_obj.get(id_key)
+                if api_user:
+                    return str(api_user)
+        return None
+
+    async def _get_user_balance(self, page, api_user: str | None = None) -> dict:
         """获取用户余额信息"""
         try:
+            # 如果没有传入 api_user，先从 localStorage 提取
+            if not api_user:
+                api_user = await self._extract_api_user_from_localstorage(page)
+
+            if not api_user:
+                print(f"⚠️ {self.account_name}: No api_user found in localStorage")
+                return {}
+
             result = await page.evaluate(
-                """async () => {
+                """async (apiUser) => {
                     try {
                         const resp = await fetch('/api/user/self', {
                             credentials: 'include',
-                            headers: { 'Accept': 'application/json' }
+                            headers: {
+                                'new-api-user': String(apiUser),
+                                'Accept': 'application/json, text/plain, */*'
+                            }
                         });
                         return { status: resp.status, data: await resp.json() };
                     } catch (e) {
                         return { status: 0, error: e.message };
                     }
-                }"""
+                }""",
+                api_user
             )
 
             print(f"ℹ️ {self.account_name}: /api/user/self response: status={result.get('status')}, data={str(result.get('data', {}))[:200]}")
