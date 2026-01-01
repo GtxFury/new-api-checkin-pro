@@ -272,19 +272,174 @@ class FovtCheckIn:
 
     async def _get_gift_checkin_status(self, page) -> dict:
         """获取 gift.voct.top 签到状态"""
+        return await self._get_gift_checkin_status_with_auth(page, auth_header=None)
+
+    @staticmethod
+    def _normalize_authorization_header(value: str | None) -> str | None:
+        if not value:
+            return None
+        v = str(value).strip()
+        if not v:
+            return None
+        low = v.lower()
+        # 允许传入完整的 "Bearer xxx" / "Token xxx" / "ApiKey xxx"
+        if low.startswith(("bearer ", "token ", "apikey ", "api-key ")):
+            return v
+        # 兜底：当只拿到 token 本体时，按 Bearer 组装
+        return f"Bearer {v}"
+
+    async def _try_capture_backend_authorization_header(self, page, *, timeout_ms: int = 8000) -> str | None:
+        """尝试从 gift 页面自身发起的请求中抓取 Authorization（最可靠）。"""
+        try:
+            req = await page.wait_for_request(
+                lambda r: (r.url or "").startswith(self.BACKEND_ORIGIN) and ("authorization" in (r.headers or {})),
+                timeout=timeout_ms,
+            )
+            headers = req.headers or {}
+            auth = headers.get("authorization") or headers.get("Authorization")
+            return self._normalize_authorization_header(auth)
+        except Exception:
+            return None
+
+    async def _try_extract_authorization_from_storage(self, page) -> str | None:
+        """尝试从 localStorage/sessionStorage 里提取 token。"""
+        try:
+            token = await page.evaluate(
+                """() => {
+                    const CANDIDATE_KEYS = [
+                        'token', 'access_token', 'accessToken', 'jwt', 'id_token', 'idToken',
+                        'Authorization', 'authorization', 'auth', 'authToken', 'auth_token'
+                    ];
+
+                    const looksLikeJwt = (s) => typeof s === 'string' && s.split('.').length === 3 && s.length > 40;
+                    const looksLikeToken = (s) => typeof s === 'string' && s.length >= 16;
+
+                    const pickFromStorage = (st) => {
+                        if (!st) return null;
+                        for (const k of CANDIDATE_KEYS) {
+                            const v = st.getItem(k);
+                            if (v && (looksLikeJwt(v) || looksLikeToken(v))) return v;
+                        }
+                        // 扫描所有 key，尝试解析 JSON 找 token 字段
+                        for (let i = 0; i < st.length; i++) {
+                            const key = st.key(i);
+                            if (!key) continue;
+                            const raw = st.getItem(key);
+                            if (!raw) continue;
+                            if (looksLikeJwt(raw)) return raw;
+                            try {
+                                const obj = JSON.parse(raw);
+                                if (obj && typeof obj === 'object') {
+                                    const candidates = [
+                                        obj.token, obj.access_token, obj.accessToken, obj.jwt, obj.id_token, obj.idToken,
+                                        obj?.data?.token, obj?.data?.access_token, obj?.data?.accessToken
+                                    ].filter(Boolean);
+                                    for (const c of candidates) {
+                                        if (looksLikeJwt(c) || looksLikeToken(c)) return String(c);
+                                    }
+                                }
+                            } catch (e) {
+                                // ignore
+                            }
+                        }
+                        return null;
+                    };
+
+                    return pickFromStorage(localStorage) || pickFromStorage(sessionStorage) || null;
+                }"""
+            )
+            return self._normalize_authorization_header(token)
+        except Exception:
+            return None
+
+    async def _try_extract_authorization_from_cookie(self, page) -> str | None:
+        """尝试从 document.cookie 里提取 token（仅适用于非 HttpOnly 的 token cookie）。"""
+        try:
+            token = await page.evaluate(
+                """() => {
+                    try {
+                        const c = document.cookie || '';
+                        const parts = c.split(';').map(x => x.trim()).filter(Boolean);
+                        const byName = (name) => {
+                            const p = parts.find(x => x.toLowerCase().startsWith(name.toLowerCase() + '='));
+                            if (!p) return null;
+                            const idx = p.indexOf('=');
+                            if (idx < 0) return null;
+                            return decodeURIComponent(p.slice(idx + 1));
+                        };
+                        // 常见命名
+                        return byName('token') || byName('access_token') || byName('accessToken') || null;
+                    } catch (e) {
+                        return null;
+                    }
+                }"""
+            )
+            return self._normalize_authorization_header(token)
+        except Exception:
+            return None
+
+    async def _try_click_gift_checkin_and_capture_auth(self, page, *, timeout_ms: int = 8000) -> str | None:
+        """尝试点击 gift 页面自带的“签到”按钮，从其真实请求中抓取 Authorization。"""
+        try:
+            # 先找按钮（不同站点可能叫“签到/立即签到/Check in”）
+            btn = None
+            for sel in (
+                'button:has-text("签到")',
+                'button:has-text("立即签到")',
+                'button:has-text("Check")',
+                'button:has-text("Check in")',
+                'button:has-text("Check-in")',
+            ):
+                try:
+                    ele = await page.query_selector(sel)
+                    if ele:
+                        btn = ele
+                        break
+                except Exception:
+                    continue
+
+            if not btn:
+                return None
+
+            # 点击后等待后端 /api/checkin 的 POST 请求出现
+            try:
+                await btn.click(no_wait_after=True, timeout=3000)
+            except Exception:
+                try:
+                    await page.evaluate("(el) => el && el.click && el.click()", btn)
+                except Exception:
+                    return None
+
+            req = await page.wait_for_request(
+                lambda r: (r.url or "").startswith(f"{self.BACKEND_ORIGIN}/api/checkin")
+                and ((r.method or "") == "POST"),
+                timeout=timeout_ms,
+            )
+            headers = req.headers or {}
+            auth = headers.get("authorization") or headers.get("Authorization")
+            return self._normalize_authorization_header(auth)
+        except Exception:
+            return None
+
+    async def _get_gift_checkin_status_with_auth(self, page, *, auth_header: str | None) -> dict:
+        """获取 gift.voct.top 签到状态（可选携带 Authorization）"""
         try:
             result = await page.evaluate(
-                """async () => {
+                """async (authHeader) => {
                     try {
                         const resp = await fetch('https://backend.voct.top/api/checkin/status', {
                             credentials: 'include',
-                            headers: { 'Accept': 'application/json' }
+                            headers: {
+                                'Accept': 'application/json',
+                                ...(authHeader ? { 'Authorization': authHeader } : {}),
+                            }
                         });
                         return { status: resp.status, data: await resp.json() };
                     } catch (e) {
                         return { status: 0, error: e.message };
                     }
-                }"""
+                }""",
+                auth_header,
             )
             return result or {}
         except Exception as e:
@@ -292,17 +447,22 @@ class FovtCheckIn:
             return {}
 
     async def _do_gift_checkin(self, page) -> tuple[bool, str]:
+        ok, code, _msg = await self._do_gift_checkin_with_auth(page, auth_header=None)
+        return ok, code
+
+    async def _do_gift_checkin_with_auth(self, page, *, auth_header: str | None) -> tuple[bool, str, str]:
         """在 gift.voct.top 执行签到"""
         try:
             result = await page.evaluate(
-                """async () => {
+                """async (authHeader) => {
                     try {
                         const resp = await fetch('https://backend.voct.top/api/checkin', {
                             method: 'POST',
                             credentials: 'include',
                             headers: {
                                 'Accept': 'application/json',
-                                'Content-Type': 'application/json'
+                                'Content-Type': 'application/json',
+                                ...(authHeader ? { 'Authorization': authHeader } : {}),
                             }
                         });
                         const data = await resp.json();
@@ -310,11 +470,12 @@ class FovtCheckIn:
                     } catch (e) {
                         return { status: 0, error: e.message };
                     }
-                }"""
+                }""",
+                auth_header,
             )
 
             if not result:
-                return False, ""
+                return False, "", "empty response"
 
             status = result.get("status", 0)
             data = result.get("data", {})
@@ -323,19 +484,19 @@ class FovtCheckIn:
                 code = data.get("data", {}).get("code", "")
                 quota = data.get("data", {}).get("quota", 0)
                 print(f"✅ {self.account_name}: Gift checkin successful! Quota: {quota}, Code: {code}")
-                return True, code
+                return True, code, "success"
 
             message = data.get("message", data.get("error", "Unknown error"))
             if "already" in str(message).lower() or "已签到" in str(message) or "已经签到" in str(message):
                 print(f"ℹ️ {self.account_name}: Already checked in today on gift site")
                 existing_code = data.get("data", {}).get("code", "")
-                return True, existing_code
+                return True, existing_code, "already"
 
             print(f"⚠️ {self.account_name}: Gift checkin failed: {message}")
-            return False, ""
+            return False, "", str(message)
         except Exception as e:
             print(f"❌ {self.account_name}: Gift checkin error: {e}")
-            return False, ""
+            return False, "", str(e)
 
     async def _redeem_code_on_api(self, page, code: str, api_user: str | None = None) -> bool:
         """在 api.voct.top 兑换码"""
@@ -352,7 +513,7 @@ class FovtCheckIn:
 
         try:
             print(f"ℹ️ {self.account_name}: Navigating to topup page to redeem code")
-            await page.goto(f"{self.API_ORIGIN}/console/topup", wait_until="networkidle")
+            await page.goto(f"{self.API_ORIGIN}/console/topup", wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
 
             result = await page.evaluate(
@@ -587,7 +748,7 @@ class FovtCheckIn:
 
                     # 步骤1: 检查是否已登录 api.voct.top
                     print(f"ℹ️ {self.account_name}: Checking login status on api.voct.top")
-                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
                     await page.wait_for_timeout(2000)
 
                     current_url = page.url or ""
@@ -606,7 +767,7 @@ class FovtCheckIn:
                         print(f"ℹ️ {self.account_name}: Need to login via Linux.do OAuth")
 
                         # 获取 OAuth state
-                        await page.goto(f"{self.API_ORIGIN}/login", wait_until="networkidle")
+                        await page.goto(f"{self.API_ORIGIN}/login", wait_until="domcontentloaded")
                         try:
                             state_result = await page.evaluate(
                                 """async () => {
@@ -799,7 +960,7 @@ class FovtCheckIn:
                             print(f"⚠️ {self.account_name}: localStorage timeout, current URL: {page.url}")
                             # 尝试导航到 /console 触发 SPA 初始化
                             try:
-                                await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                                await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
                                 await page.wait_for_timeout(3000)
                                 if not api_user:
                                     api_user = await self._extract_api_user_from_localstorage(page)
@@ -817,7 +978,7 @@ class FovtCheckIn:
 
                         # 确保在 console 页面
                         if "/console" not in current_url and "/login" not in current_url:
-                            await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                            await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
                             await page.wait_for_timeout(2000)
                             current_url = page.url or ""
 
@@ -852,24 +1013,96 @@ class FovtCheckIn:
                             await self._save_page_content(page, "login_verification_failed")
                             return False, {"error": "Login verification failed", **results}
 
+                    # 尝试在 api.voct.top 侧提前拿到用于 gift/backend 的 Authorization（避免 gift 侧拿不到 token）
+                    api_side_auth_header: str | None = None
+                    try:
+                        await page.goto(f"{self.API_ORIGIN}/console/token", wait_until="domcontentloaded")
+                        await page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+                    api_side_auth_header = await self._try_extract_authorization_from_storage(page)
+                    if api_side_auth_header:
+                        print(f"ℹ️ {self.account_name}: Found an auth token in api site storage (will try for gift checkin)")
+
                     # 步骤2: 访问 gift.voct.top 进行签到
                     print(f"ℹ️ {self.account_name}: Navigating to gift site for checkin")
-                    await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="networkidle")
+
+                    captured_auth: dict[str, str | None] = {"auth": None}
+
+                    def _maybe_capture_auth(req) -> None:
+                        try:
+                            if captured_auth.get("auth"):
+                                return
+                            u = getattr(req, "url", "") or ""
+                            if not u.startswith(self.BACKEND_ORIGIN):
+                                return
+                            headers = getattr(req, "headers", None) or {}
+                            auth = headers.get("authorization") or headers.get("Authorization")
+                            auth2 = self._normalize_authorization_header(auth)
+                            if auth2:
+                                captured_auth["auth"] = auth2
+                        except Exception:
+                            return
+
+                    try:
+                        page.on("request", _maybe_capture_auth)
+                    except Exception:
+                        pass
+
+                    await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
                     await page.wait_for_timeout(2000)
 
+                    gift_auth_header = captured_auth.get("auth")
+                    if not gift_auth_header:
+                        gift_auth_header = await self._try_capture_backend_authorization_header(page, timeout_ms=6000)
+                    if not gift_auth_header:
+                        gift_auth_header = await self._try_extract_authorization_from_storage(page)
+                    if not gift_auth_header:
+                        gift_auth_header = await self._try_extract_authorization_from_cookie(page)
+                    if not gift_auth_header:
+                        gift_auth_header = api_side_auth_header
+                    if not gift_auth_header:
+                        gift_auth_header = await self._try_click_gift_checkin_and_capture_auth(page, timeout_ms=8000)
+
+                    if gift_auth_header:
+                        print(f"✅ {self.account_name}: Gift/backend Authorization ready")
+                    else:
+                        print(
+                            f"⚠️ {self.account_name}: No Authorization token detected for gift/backend; "
+                            "backend may return 401"
+                        )
+
                     # 检查签到状态
-                    checkin_status = await self._get_gift_checkin_status(page)
+                    checkin_status = await self._get_gift_checkin_status_with_auth(page, auth_header=gift_auth_header)
                     print(f"ℹ️ {self.account_name}: Checkin status: {checkin_status}")
 
                     # 执行签到
-                    checkin_ok, redemption_code = await self._do_gift_checkin(page)
+                    checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
+                        page, auth_header=gift_auth_header
+                    )
+                    # 如果提示缺少鉴权，且我们未能拿到 token，则再尝试一次“点击按钮抓取 token → 重新 fetch”
+                    try:
+                        status0 = int((checkin_status or {}).get("status", 0) or 0)
+                    except Exception:
+                        status0 = 0
+                    if (not checkin_ok) and (not gift_auth_header) and (
+                        status0 == 401 or "authorization" in str(gift_msg).lower()
+                    ):
+                        retry_auth = await self._try_click_gift_checkin_and_capture_auth(page, timeout_ms=8000)
+                        if retry_auth:
+                            print(f"ℹ️ {self.account_name}: Captured Authorization after retry, re-trying checkin fetch")
+                            checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
+                                page, auth_header=retry_auth
+                            )
                     results["gift_checkin"] = checkin_ok
+                    if not checkin_ok and gift_msg and not results.get("error"):
+                        results["error"] = f"Gift checkin failed: {gift_msg}"
 
                     # 步骤3: 如果获得了兑换码，去 api.voct.top 兑换
                     # 获取当前的 api_user（可能来自登录流程或 results）
                     current_api_user = results.get("api_user")
                     if not current_api_user:
-                        await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                        await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
                         await page.wait_for_timeout(1000)
                         current_api_user = await self._extract_api_user_from_localstorage(page)
 
@@ -882,7 +1115,7 @@ class FovtCheckIn:
                         results["code_redeem"] = True
 
                     # 步骤4: 获取最终余额
-                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="networkidle")
+                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
                     await page.wait_for_timeout(1000)
                     if not current_api_user:
                         current_api_user = await self._extract_api_user_from_localstorage(page)
