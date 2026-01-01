@@ -209,6 +209,13 @@ class FovtCheckIn:
 
         完全复用 checkin.py 的 _ensure_runanytime_logged_in 逻辑
         """
+        # 关键：等待页面完全渲染，确保 "使用 LinuxDO 继续" 按钮出现
+        try:
+            await page.wait_for_selector('button:has-text("使用 LinuxDO 继续")', timeout=10000)
+            print(f"ℹ️ {self.account_name}: LinuxDO button appeared")
+        except Exception:
+            print(f"⚠️ {self.account_name}: Timeout waiting for LinuxDO button")
+
         login_btn = None
         for sel in [
             'button:has-text("使用 LinuxDO 继续")',
@@ -233,23 +240,34 @@ class FovtCheckIn:
             await login_btn.click()
             print(f"ℹ️ {self.account_name}: Clicked LinuxDO login button")
         else:
-            # 兜底：从所有链接里找包含 linuxdo 的跳转
+            # 兜底：用 JS 精确查找第一个包含 "LinuxDO 继续" 的按钮
             print(f"ℹ️ {self.account_name}: Button not found, trying JS fallback...")
             try:
-                await page.evaluate(
+                clicked = await page.evaluate(
                     """() => {
-                        const a = Array.from(document.querySelectorAll('a, button')).find(x => {
-                            const h = (x.getAttribute('href') || '').toLowerCase();
-                            const t = (x.innerText || '').toLowerCase();
-                            return h.includes('linuxdo') || t.includes('linux do') || t.includes('linuxdo');
+                        // 精确查找包含 "LinuxDO" 且包含 "继续" 的按钮（排除邮箱按钮）
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        const btn = buttons.find(x => {
+                            const t = x.innerText || '';
+                            return t.includes('LinuxDO') && t.includes('继续');
                         });
-                        if (a) a.click();
+                        if (btn) {
+                            btn.click();
+                            return true;
+                        }
+                        return false;
                     }"""
                 )
-            except Exception:
-                pass
+                if clicked:
+                    print(f"ℹ️ {self.account_name}: Clicked via JS (LinuxDO 继续)")
+                else:
+                    print(f"⚠️ {self.account_name}: JS fallback also failed")
+                    return False
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: JS click error: {e}")
+                return False
 
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(2000)
         return True
 
     async def _get_gift_checkin_status(self, page) -> dict:
