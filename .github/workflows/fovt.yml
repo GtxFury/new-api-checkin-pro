@@ -46,9 +46,9 @@ jobs:
         uv sync
         echo "✅ 环境初始化完成"
 
-    - name: 安装 Playwright 浏览器依赖
+    - name: 安装 Playwright 浏览器
       run: |
-        uv run playwright install-deps
+        uv run python -m playwright install
 
     - name: 获取 Camoufox 浏览器缓存路径
       id: camoufox-path
