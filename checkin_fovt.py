@@ -275,6 +275,15 @@ class FovtCheckIn:
         return await self._get_gift_checkin_status_with_auth(page, auth_header=None)
 
     @staticmethod
+    def _mask_secret(value: str | None, *, keep_start: int = 8, keep_end: int = 4) -> str:
+        if not value:
+            return ""
+        v = str(value)
+        if len(v) <= keep_start + keep_end + 3:
+            return f"{v[: max(0, keep_start)]}***"
+        return f"{v[:keep_start]}...{v[-keep_end:]}(len={len(v)})"
+
+    @staticmethod
     def _normalize_authorization_header(value: str | None) -> str | None:
         if not value:
             return None
@@ -288,23 +297,79 @@ class FovtCheckIn:
         # 兜底：当只拿到 token 本体时，按 Bearer 组装
         return f"Bearer {v}"
 
+    @staticmethod
+    def _extract_auth_from_headers(headers: dict | None) -> str | None:
+        if not headers or not isinstance(headers, dict):
+            return None
+        # Playwright 的 headers 通常是小写 key
+        for k in (
+            "authorization",
+            "Authorization",
+            "x-authorization",
+            "X-Authorization",
+            "x-auth-token",
+            "X-Auth-Token",
+            "x-token",
+            "X-Token",
+        ):
+            v = headers.get(k)
+            if v:
+                return str(v)
+        return None
+
+    @staticmethod
+    def _expand_auth_header_variants(auth_header: str) -> list[str]:
+        v = (auth_header or "").strip()
+        if not v:
+            return []
+        variants: list[str] = []
+        low = v.lower()
+        variants.append(v)
+        if low.startswith("bearer "):
+            token = v[7:].strip()
+            if token:
+                variants.extend([token, f"Token {token}"])
+        elif low.startswith("token "):
+            token = v[6:].strip()
+            if token:
+                variants.extend([f"Bearer {token}", token])
+        else:
+            variants.extend([f"Bearer {v}", f"Token {v}"])
+
+        # 去重（保持顺序）
+        seen: set[str] = set()
+        out: list[str] = []
+        for x in variants:
+            x2 = (x or "").strip()
+            if not x2 or x2 in seen:
+                continue
+            seen.add(x2)
+            out.append(x2)
+        return out
+
     async def _try_capture_backend_authorization_header(self, page, *, timeout_ms: int = 8000) -> str | None:
         """尝试从 gift 页面自身发起的请求中抓取 Authorization（最可靠）。"""
         try:
             req = await page.wait_for_request(
-                lambda r: (r.url or "").startswith(self.BACKEND_ORIGIN) and ("authorization" in (r.headers or {})),
+                lambda r: (r.url or "").startswith(self.BACKEND_ORIGIN)
+                and bool(self._extract_auth_from_headers(getattr(r, "headers", None) or {})),
                 timeout=timeout_ms,
             )
             headers = req.headers or {}
-            auth = headers.get("authorization") or headers.get("Authorization")
+            auth = self._extract_auth_from_headers(headers)
             return self._normalize_authorization_header(auth)
         except Exception:
             return None
 
     async def _try_extract_authorization_from_storage(self, page) -> str | None:
         """尝试从 localStorage/sessionStorage 里提取 token。"""
+        auth, _src = await self._try_extract_authorization_from_storage_debug(page)
+        return auth
+
+    async def _try_extract_authorization_from_storage_debug(self, page) -> tuple[str | None, str | None]:
+        """尝试从 localStorage/sessionStorage 里提取 token，并返回来源信息（不打印明文）。"""
         try:
-            token = await page.evaluate(
+            found = await page.evaluate(
                 """() => {
                     const CANDIDATE_KEYS = [
                         'token', 'access_token', 'accessToken', 'jwt', 'id_token', 'idToken',
@@ -312,13 +377,13 @@ class FovtCheckIn:
                     ];
 
                     const looksLikeJwt = (s) => typeof s === 'string' && s.split('.').length === 3 && s.length > 40;
-                    const looksLikeToken = (s) => typeof s === 'string' && s.length >= 16;
+                    const looksLikeToken = (s) => typeof s === 'string' && s.length >= 24;
 
-                    const pickFromStorage = (st) => {
+                    const pickFromStorage = (st, stName) => {
                         if (!st) return null;
                         for (const k of CANDIDATE_KEYS) {
                             const v = st.getItem(k);
-                            if (v && (looksLikeJwt(v) || looksLikeToken(v))) return v;
+                            if (v && (looksLikeJwt(v) || looksLikeToken(v))) return { value: v, source: `${stName}:${k}` };
                         }
                         // 扫描所有 key，尝试解析 JSON 找 token 字段
                         for (let i = 0; i < st.length; i++) {
@@ -326,7 +391,7 @@ class FovtCheckIn:
                             if (!key) continue;
                             const raw = st.getItem(key);
                             if (!raw) continue;
-                            if (looksLikeJwt(raw)) return raw;
+                            if (looksLikeJwt(raw)) return { value: raw, source: `${stName}:${key}(raw)` };
                             try {
                                 const obj = JSON.parse(raw);
                                 if (obj && typeof obj === 'object') {
@@ -335,7 +400,7 @@ class FovtCheckIn:
                                         obj?.data?.token, obj?.data?.access_token, obj?.data?.accessToken
                                     ].filter(Boolean);
                                     for (const c of candidates) {
-                                        if (looksLikeJwt(c) || looksLikeToken(c)) return String(c);
+                                        if (looksLikeJwt(c) || looksLikeToken(c)) return { value: String(c), source: `${stName}:${key}(json)` };
                                     }
                                 }
                             } catch (e) {
@@ -345,12 +410,22 @@ class FovtCheckIn:
                         return null;
                     };
 
-                    return pickFromStorage(localStorage) || pickFromStorage(sessionStorage) || null;
+                    return pickFromStorage(localStorage, 'localStorage') || pickFromStorage(sessionStorage, 'sessionStorage') || null;
                 }"""
             )
-            return self._normalize_authorization_header(token)
+            if not found or not isinstance(found, dict):
+                return None, None
         except Exception:
-            return None
+            return None, None
+
+        try:
+            token = (found or {}).get("value")
+            src = (found or {}).get("source")
+        except Exception:
+            token, src = None, None
+
+        auth = self._normalize_authorization_header(token)
+        return auth, (str(src) if src else None)
 
     async def _try_extract_authorization_from_cookie(self, page) -> str | None:
         """尝试从 document.cookie 里提取 token（仅适用于非 HttpOnly 的 token cookie）。"""
@@ -377,6 +452,32 @@ class FovtCheckIn:
             return self._normalize_authorization_header(token)
         except Exception:
             return None
+
+    async def _try_extract_authorization_from_context_cookies(self, context) -> tuple[str | None, str | None]:
+        """从浏览器上下文 cookies 中提取 token（支持 HttpOnly）。"""
+        try:
+            cookies = await context.cookies([self.GIFT_ORIGIN, self.BACKEND_ORIGIN])
+        except Exception:
+            cookies = []
+
+        best: tuple[str | None, str | None] = (None, None)
+        for c in cookies or []:
+            try:
+                name = str(c.get("name") or "")
+                value = str(c.get("value") or "")
+                if not name or not value:
+                    continue
+                low = name.lower()
+                if low in ("token", "access_token", "accesstoken", "authorization", "auth", "jwt"):
+                    auth = self._normalize_authorization_header(value)
+                    if auth:
+                        best = (auth, f"cookie:{name}")
+                        # 优先 JWT-like（尽早返回）
+                        if value.count(".") == 2 and len(value) > 40:
+                            return best
+            except Exception:
+                continue
+        return best
 
     async def _try_click_gift_checkin_and_capture_auth(self, page, *, timeout_ms: int = 8000) -> str | None:
         """尝试点击 gift 页面自带的“签到”按钮，从其真实请求中抓取 Authorization。"""
@@ -416,10 +517,90 @@ class FovtCheckIn:
                 timeout=timeout_ms,
             )
             headers = req.headers or {}
-            auth = headers.get("authorization") or headers.get("Authorization")
+            auth = self._extract_auth_from_headers(headers)
             return self._normalize_authorization_header(auth)
         except Exception:
             return None
+
+    async def _try_gift_ui_checkin(self, page, *, timeout_ms: int = 12000) -> tuple[bool, str, str]:
+        """通过 gift 页面 UI 触发签到（更贴近站点真实流程），并尝试从响应中提取兑换码。"""
+        try:
+            # 有些页面会直接展示“已签到”，此时不强制点击按钮
+            try:
+                body_text = await page.evaluate("() => (document.body && document.body.innerText) ? document.body.innerText : ''")
+            except Exception:
+                body_text = ""
+            if isinstance(body_text, str) and ("已签到" in body_text or "已经签到" in body_text):
+                return True, "", "ui_already"
+
+            btn = None
+            for sel in (
+                'button:has-text("立即签到")',
+                'button:has-text("签到")',
+                'button:has-text("Check in")',
+                'button:has-text("Check-in")',
+                'button:has-text("Check")',
+            ):
+                try:
+                    ele = await page.query_selector(sel)
+                    if ele:
+                        btn = ele
+                        break
+                except Exception:
+                    continue
+
+            if not btn:
+                return False, "", "ui_button_not_found"
+
+            # 等待点击后触发的后端请求/响应
+            try:
+                await btn.click(no_wait_after=True, timeout=3000)
+            except Exception:
+                try:
+                    await page.evaluate("(el) => el && el.click && el.click()", btn)
+                except Exception:
+                    return False, "", "ui_click_failed"
+
+            resp = await page.wait_for_response(
+                lambda r: (r.url or "").startswith(f"{self.BACKEND_ORIGIN}/api/checkin")
+                and ((r.request.method or "") == "POST"),
+                timeout=timeout_ms,
+            )
+
+            status = getattr(resp, "status", None) or 0
+            try:
+                text = await resp.text()
+            except Exception:
+                text = ""
+
+            # 尝试解析 JSON
+            import json as _json
+
+            data = None
+            if text:
+                try:
+                    data = _json.loads(text)
+                except Exception:
+                    data = text
+
+            if int(status) == 200 and isinstance(data, dict) and data.get("success"):
+                code = (data.get("data") or {}).get("code") or ""
+                return True, str(code or ""), "ui_success"
+
+            # 已签到也视为成功
+            msg = ""
+            if isinstance(data, dict):
+                msg = str(data.get("message") or data.get("error") or data.get("msg") or "")
+            elif isinstance(data, str):
+                msg = data
+
+            if "already" in msg.lower() or "已签到" in msg or "已经签到" in msg:
+                code = (data.get("data") or {}).get("code") if isinstance(data, dict) else ""
+                return True, str(code or ""), "ui_already"
+
+            return False, "", f"ui_failed_http_{status}:{msg[:120]}"
+        except Exception as e:
+            return False, "", f"ui_exception:{e}"
 
     async def _get_gift_checkin_status_with_auth(self, page, *, auth_header: str | None) -> dict:
         """获取 gift.voct.top 签到状态（可选携带 Authorization）"""
@@ -434,7 +615,10 @@ class FovtCheckIn:
                                 ...(authHeader ? { 'Authorization': authHeader } : {}),
                             }
                         });
-                        return { status: resp.status, data: await resp.json() };
+                        const text = await resp.text();
+                        let data = null;
+                        try { data = JSON.parse(text); } catch (e) { data = text; }
+                        return { status: resp.status, data: data, text: text.slice(0, 600) };
                     } catch (e) {
                         return { status: 0, error: e.message };
                     }
@@ -445,6 +629,182 @@ class FovtCheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to get checkin status: {e}")
             return {}
+
+    async def _get_gift_oauth_url(self, page) -> str | None:
+        """获取 gift 站点的 LinuxDO OAuth URL（由 backend 下发）。"""
+        try:
+            result = await page.evaluate(
+                """async () => {
+                    try {
+                        const url = 'https://backend.voct.top/api/auth/url?redirect_origin=' + encodeURIComponent('https://gift.voct.top');
+                        const resp = await fetch(url, {
+                            credentials: 'include',
+                            headers: { 'Accept': 'application/json, text/plain, */*' },
+                        });
+                        const text = await resp.text();
+                        let data = null;
+                        try { data = JSON.parse(text); } catch (e) { data = text; }
+                        return { status: resp.status, data, text: text.slice(0, 400) };
+                    } catch (e) {
+                        return { status: 0, error: e.message };
+                    }
+                }"""
+            )
+
+            status = (result or {}).get("status", 0)
+            data = (result or {}).get("data")
+            if status != 200 or not isinstance(data, dict):
+                print(f"⚠️ {self.account_name}: Failed to get gift auth url: HTTP {status}, body={str((result or {}).get('text',''))[:160]}")
+                return None
+
+            if not data.get("success"):
+                print(f"⚠️ {self.account_name}: Gift auth url api returned success=false: {data.get('message') or data.get('error') or ''}")
+                return None
+
+            url = None
+            payload = data.get("data")
+            if isinstance(payload, dict):
+                url = payload.get("url") or payload.get("auth_url")
+            if not url and isinstance(payload, str):
+                url = payload
+
+            if url and isinstance(url, str) and url.startswith("http"):
+                return url
+            print(f"⚠️ {self.account_name}: Gift auth url missing or invalid")
+            return None
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Gift auth url error: {e}")
+            return None
+
+    async def _ensure_gift_logged_in(self, page, context, linuxdo_username: str, linuxdo_password: str) -> str | None:
+        """确保 gift 站点已完成 LinuxDO OAuth，并返回可用的 Authorization header（Bearer ...）。"""
+        async def _read_fo_token() -> str | None:
+            try:
+                t = await page.evaluate("() => localStorage.getItem('fo_token')")
+            except Exception:
+                t = None
+            return self._normalize_authorization_header(t)
+
+        # 先尝试直接用本地 fo_token 校验
+        existing = await _read_fo_token()
+        if existing:
+            ok, _resp = await self._validate_gift_auth_header(page, existing)
+            if ok:
+                return existing
+
+        oauth_url = await self._get_gift_oauth_url(page)
+        if not oauth_url:
+            return None
+
+        # 注意：不要直接打印完整 URL（可能包含敏感参数）
+        try:
+            print(f"ℹ️ {self.account_name}: Starting gift OAuth via LinuxDO (auth url origin: {oauth_url.split('?')[0]})")
+        except Exception:
+            print(f"ℹ️ {self.account_name}: Starting gift OAuth via LinuxDO")
+
+        try:
+            await page.goto(oauth_url, wait_until="domcontentloaded")
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to navigate to gift OAuth url: {e}")
+            return None
+
+        # 若跳到 linux.do/login，自动填表登录
+        try:
+            await self._linuxdo_login_if_needed(page, linuxdo_username, linuxdo_password)
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Gift OAuth linux.do login failed: {e}")
+            return None
+
+        # 授权按钮
+        try:
+            await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+        except Exception:
+            await self._take_screenshot(page, "gift_oauth_approve_not_found")
+            await self._save_page_content(page, "gift_oauth_approve_not_found")
+            return None
+
+        allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
+        if not allow_btn:
+            return None
+
+        try:
+            await allow_btn.click(no_wait_after=True, timeout=15000)
+        except Exception:
+            try:
+                await page.evaluate("(el) => el && el.click && el.click()", allow_btn)
+            except Exception:
+                return None
+
+        # 等待回到 gift 站点；该站点常见会先落在 /auth/success?token=... 再跳转 dashboard
+        try:
+            await page.wait_for_url(f"**{self.GIFT_ORIGIN}/**", timeout=30000)
+        except Exception:
+            # 兜底等待
+            await page.wait_for_timeout(3000)
+
+        # 等待 localStorage fo_token 落地（避免 URL 含 token 的瞬态页没来得及写入）
+        try:
+            await page.wait_for_function(
+                """() => {
+                    try {
+                        const t = localStorage.getItem('fo_token');
+                        return t !== null && t !== '';
+                    } catch (e) {
+                        return false;
+                    }
+                }""",
+                timeout=15000,
+            )
+        except Exception:
+            pass
+
+        token = await _read_fo_token()
+        if not token:
+            await self._take_screenshot(page, "gift_oauth_no_token")
+            return None
+
+        ok, resp = await self._validate_gift_auth_header(page, token)
+        if not ok:
+            err = ""
+            try:
+                d = (resp or {}).get("data")
+                if isinstance(d, dict):
+                    err = str(d.get("error") or d.get("message") or "")
+                else:
+                    err = str(d or "")
+            except Exception:
+                err = ""
+            print(f"⚠️ {self.account_name}: Gift fo_token validation failed after OAuth: {err[:120]}")
+            return None
+
+        # 保存 session（包含 gift 的 localStorage/cookies）
+        try:
+            await context.storage_state()
+        except Exception:
+            pass
+
+        return token
+
+    async def _validate_gift_auth_header(self, page, auth_header: str | None) -> tuple[bool, dict]:
+        resp = await self._get_gift_checkin_status_with_auth(page, auth_header=auth_header)
+        try:
+            st = int((resp or {}).get("status", 0) or 0)
+        except Exception:
+            st = 0
+        msg = ""
+        try:
+            d = (resp or {}).get("data")
+            if isinstance(d, dict):
+                msg = str(d.get("error") or d.get("message") or "")
+            else:
+                msg = str(d or "")
+        except Exception:
+            msg = ""
+        if st == 0:
+            return False, resp
+        if st == 401 and ("invalid token" in msg.lower() or "missing authorization" in msg.lower()):
+            return False, resp
+        return True, resp
 
     async def _do_gift_checkin(self, page) -> tuple[bool, str]:
         ok, code, _msg = await self._do_gift_checkin_with_auth(page, auth_header=None)
@@ -465,8 +825,10 @@ class FovtCheckIn:
                                 ...(authHeader ? { 'Authorization': authHeader } : {}),
                             }
                         });
-                        const data = await resp.json();
-                        return { status: resp.status, data: data };
+                        const text = await resp.text();
+                        let data = null;
+                        try { data = JSON.parse(text); } catch (e) { data = text; }
+                        return { status: resp.status, data: data, text: text.slice(0, 600) };
                     } catch (e) {
                         return { status: 0, error: e.message };
                     }
@@ -486,10 +848,10 @@ class FovtCheckIn:
                 print(f"✅ {self.account_name}: Gift checkin successful! Quota: {quota}, Code: {code}")
                 return True, code, "success"
 
-            message = data.get("message", data.get("error", "Unknown error"))
+            message = data.get("message", data.get("error", "Unknown error")) if isinstance(data, dict) else str(data)
             if "already" in str(message).lower() or "已签到" in str(message) or "已经签到" in str(message):
                 print(f"ℹ️ {self.account_name}: Already checked in today on gift site")
-                existing_code = data.get("data", {}).get("code", "")
+                existing_code = data.get("data", {}).get("code", "") if isinstance(data, dict) else ""
                 return True, existing_code, "already"
 
             print(f"⚠️ {self.account_name}: Gift checkin failed: {message}")
@@ -1020,14 +1382,53 @@ class FovtCheckIn:
                         await page.wait_for_timeout(1500)
                     except Exception:
                         pass
-                    api_side_auth_header = await self._try_extract_authorization_from_storage(page)
+                    api_side_auth_header, api_side_auth_src = await self._try_extract_authorization_from_storage_debug(
+                        page
+                    )
                     if api_side_auth_header:
-                        print(f"ℹ️ {self.account_name}: Found an auth token in api site storage (will try for gift checkin)")
+                        print(
+                            f"ℹ️ {self.account_name}: Found an auth token in api site storage ({api_side_auth_src or 'unknown'}), "
+                            "will only use it if validation passes"
+                        )
 
                     # 步骤2: 访问 gift.voct.top 进行签到
                     print(f"ℹ️ {self.account_name}: Navigating to gift site for checkin")
 
-                    captured_auth: dict[str, str | None] = {"auth": None}
+                    # 先访问 gift 站点根路径，触发潜在的 SSO/cookie 初始化，再进入 /dashboard/checkin
+                    try:
+                        await page.goto(f"{self.GIFT_ORIGIN}/", wait_until="domcontentloaded")
+                        await page.wait_for_timeout(800)
+                    except Exception:
+                        pass
+
+                    await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
+                    await page.wait_for_timeout(2500)
+
+                    # 关键：gift 有自己独立的 LinuxDO OAuth（client_id/redirect_uri 与 api.voct 不同）
+                    # 如果未登录 gift，就必须跑一遍 gift OAuth 来拿到 fo_token（否则用 api 侧 token 会 invalid token）。
+                    ensured = await self._ensure_gift_logged_in(page, context, linuxdo_username, linuxdo_password)
+                    if ensured:
+                        print(f"✅ {self.account_name}: Gift OAuth session ready (fo_token={self._mask_secret(ensured)})")
+                        # 保存包含 gift 登录态的 storage_state，避免下次重复 OAuth
+                        try:
+                            if cache_file_path:
+                                cache_dir = os.path.dirname(cache_file_path)
+                                if cache_dir:
+                                    os.makedirs(cache_dir, exist_ok=True)
+                                await context.storage_state(path=cache_file_path)
+                                print(f"✅ {self.account_name}: Gift session saved to cache")
+                        except Exception as e:
+                            print(f"⚠️ {self.account_name}: Failed to save gift session: {e}")
+                        # OAuth 完成后回到签到页，避免后续 DOM/请求状态不一致
+                        try:
+                            await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
+                            await page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
+
+                    # gift/back-end 调试信息：抓取请求/响应、存储 key 等（避免打印明文 token）
+                    captured_auth: dict[str, str | None] = {"auth": None, "src": None}
+                    backend_recent: list[dict] = []
 
                     def _maybe_capture_auth(req) -> None:
                         try:
@@ -1037,10 +1438,11 @@ class FovtCheckIn:
                             if not u.startswith(self.BACKEND_ORIGIN):
                                 return
                             headers = getattr(req, "headers", None) or {}
-                            auth = headers.get("authorization") or headers.get("Authorization")
+                            auth = self._extract_auth_from_headers(headers)
                             auth2 = self._normalize_authorization_header(auth)
                             if auth2:
                                 captured_auth["auth"] = auth2
+                                captured_auth["src"] = "request:backend"
                         except Exception:
                             return
 
@@ -1049,51 +1451,231 @@ class FovtCheckIn:
                     except Exception:
                         pass
 
-                    await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2000)
+                    def _record_backend_response(resp) -> None:
+                        try:
+                            url = getattr(resp, "url", "") or ""
+                            if not url.startswith(self.BACKEND_ORIGIN):
+                                return
+                            if len(backend_recent) >= 25:
+                                return
+                            backend_recent.append(
+                                {
+                                    "status": getattr(resp, "status", None),
+                                    "url": url[:120],
+                                }
+                            )
+                        except Exception:
+                            return
 
-                    gift_auth_header = captured_auth.get("auth")
-                    if not gift_auth_header:
-                        gift_auth_header = await self._try_capture_backend_authorization_header(page, timeout_ms=6000)
-                    if not gift_auth_header:
-                        gift_auth_header = await self._try_extract_authorization_from_storage(page)
-                    if not gift_auth_header:
-                        gift_auth_header = await self._try_extract_authorization_from_cookie(page)
-                    if not gift_auth_header:
-                        gift_auth_header = api_side_auth_header
-                    if not gift_auth_header:
-                        gift_auth_header = await self._try_click_gift_checkin_and_capture_auth(page, timeout_ms=8000)
+                    try:
+                        page.on("response", _record_backend_response)
+                    except Exception:
+                        pass
 
-                    if gift_auth_header:
-                        print(f"✅ {self.account_name}: Gift/backend Authorization ready")
+                    try:
+                        print(f"ℹ️ {self.account_name}: Gift page URL: {page.url}")
+                        t = await page.title()
+                        if t:
+                            print(f"ℹ️ {self.account_name}: Gift page title: {t[:80]}")
+                    except Exception:
+                        pass
+
+                    # 打印 gift/backend cookie 名称（不打印 value）
+                    try:
+                        ck = await context.cookies([self.GIFT_ORIGIN, self.BACKEND_ORIGIN])
+                        ck_names = sorted({str(x.get('name') or '') for x in (ck or []) if x.get('name')})
+                        if ck_names:
+                            print(f"ℹ️ {self.account_name}: Gift/backend cookies: {', '.join(ck_names[:25])}")
+                    except Exception:
+                        pass
+
+                    # 打印存储中疑似 token 相关 key（不打印 value）
+                    try:
+                        keys = await page.evaluate(
+                            """() => {
+                                const pick = (st) => {
+                                    const out = [];
+                                    for (let i = 0; i < st.length; i++) {
+                                        const k = st.key(i);
+                                        if (!k) continue;
+                                        const low = k.toLowerCase();
+                                        if (low.includes('token') || low.includes('auth') || low.includes('jwt')) out.push(k);
+                                    }
+                                    return out.slice(0, 25);
+                                };
+                                return { local: pick(localStorage), session: pick(sessionStorage) };
+                            }"""
+                        )
+                        if keys and isinstance(keys, dict):
+                            local_keys = keys.get("local") or []
+                            session_keys = keys.get("session") or []
+                            if local_keys:
+                                print(f"ℹ️ {self.account_name}: Gift localStorage token-like keys: {local_keys}")
+                            if session_keys:
+                                print(f"ℹ️ {self.account_name}: Gift sessionStorage token-like keys: {session_keys}")
+                    except Exception:
+                        pass
+
+                    # Best practice：只信任 gift 页自身的登录态/真实请求里拿到的 token；其他来源一律先验证再使用。
+                    candidates: list[tuple[str, str]] = []
+
+                    if captured_auth.get("auth"):
+                        candidates.append((captured_auth.get("src") or "request:backend", captured_auth["auth"]))
+
+                    req_auth = await self._try_capture_backend_authorization_header(page, timeout_ms=4000)
+                    if req_auth:
+                        candidates.append(("wait_for_request:backend", req_auth))
+
+                    gift_storage_auth, gift_storage_src = await self._try_extract_authorization_from_storage_debug(page)
+                    if gift_storage_auth:
+                        candidates.append((gift_storage_src or "gift_storage", gift_storage_auth))
+
+                    gift_cookie_js = await self._try_extract_authorization_from_cookie(page)
+                    if gift_cookie_js:
+                        candidates.append(("document.cookie", gift_cookie_js))
+
+                    gift_cookie_ctx, gift_cookie_ctx_src = await self._try_extract_authorization_from_context_cookies(context)
+                    if gift_cookie_ctx:
+                        candidates.append((gift_cookie_ctx_src or "context.cookies", gift_cookie_ctx))
+
+                    # 最后才尝试 api 侧 token，并且必须通过校验
+                    if api_side_auth_header:
+                        candidates.append((api_side_auth_src or "api_storage", api_side_auth_header))
+
+                    chosen_auth: str | None = None
+                    chosen_src: str | None = None
+                    chosen_status: dict = {}
+
+                    # 先用“状态接口”校验 token，避免拿错 token 直接导致 401 invalid token
+                    max_attempts = 12
+                    attempts = 0
+                    for src, cand in candidates:
+                        for v in self._expand_auth_header_variants(cand):
+                            attempts += 1
+                            ok_auth, st_resp = await self._validate_gift_auth_header(page, v)
+                            st_code = (st_resp or {}).get("status")
+                            err_msg = ""
+                            try:
+                                d = (st_resp or {}).get("data")
+                                if isinstance(d, dict):
+                                    err_msg = str(d.get("error") or d.get("message") or "")
+                                else:
+                                    err_msg = str(d or "")
+                            except Exception:
+                                err_msg = ""
+                            print(
+                                f"ℹ️ {self.account_name}: Gift auth validate: src={src}, status={st_code}, "
+                                f"auth={self._mask_secret(v)}, err={str(err_msg)[:80]}"
+                            )
+                            if ok_auth:
+                                chosen_auth = v
+                                chosen_src = src
+                                chosen_status = st_resp or {}
+                                break
+                            if attempts >= max_attempts:
+                                break
+                        if chosen_auth or attempts >= max_attempts:
+                            break
+
+                    # 如果都失败，尝试一次 reload 触发前端刷新 token，再重复一次捕获/校验
+                    if not chosen_auth:
+                        print(f"⚠️ {self.account_name}: No valid gift token yet, reloading gift page to refresh session/token...")
+                        try:
+                            await page.reload(wait_until="domcontentloaded")
+                            await page.wait_for_timeout(2500)
+                        except Exception:
+                            pass
+                        # 重新抓一轮
+                        req_auth2 = await self._try_capture_backend_authorization_header(page, timeout_ms=5000)
+                        gift_storage_auth2, gift_storage_src2 = await self._try_extract_authorization_from_storage_debug(page)
+                        retry_candidates: list[tuple[str, str]] = []
+                        if req_auth2:
+                            retry_candidates.append(("reload:wait_for_request", req_auth2))
+                        if gift_storage_auth2:
+                            retry_candidates.append((f"reload:{gift_storage_src2 or 'gift_storage'}", gift_storage_auth2))
+                        gift_cookie_ctx2, gift_cookie_ctx_src2 = await self._try_extract_authorization_from_context_cookies(context)
+                        if gift_cookie_ctx2:
+                            retry_candidates.append((f"reload:{gift_cookie_ctx_src2 or 'context.cookies'}", gift_cookie_ctx2))
+                        for src, cand in retry_candidates:
+                            for v in self._expand_auth_header_variants(cand):
+                                ok_auth, st_resp = await self._validate_gift_auth_header(page, v)
+                                st_code = (st_resp or {}).get("status")
+                                err_msg = ""
+                                try:
+                                    d = (st_resp or {}).get("data")
+                                    if isinstance(d, dict):
+                                        err_msg = str(d.get("error") or d.get("message") or "")
+                                    else:
+                                        err_msg = str(d or "")
+                                except Exception:
+                                    err_msg = ""
+                                print(
+                                    f"ℹ️ {self.account_name}: Gift auth validate (reload): src={src}, status={st_code}, "
+                                    f"auth={self._mask_secret(v)}, err={str(err_msg)[:80]}"
+                                )
+                                if ok_auth:
+                                    chosen_auth = v
+                                    chosen_src = src
+                                    chosen_status = st_resp or {}
+                                    break
+                            if chosen_auth:
+                                break
+
+                    if chosen_auth:
+                        print(f"✅ {self.account_name}: Gift/backend Authorization selected from {chosen_src}")
                     else:
                         print(
-                            f"⚠️ {self.account_name}: No Authorization token detected for gift/backend; "
-                            "backend may return 401"
+                            f"⚠️ {self.account_name}: No valid Authorization token detected for gift/backend; "
+                            "backend will likely return 401"
                         )
+                        if backend_recent:
+                            print(f"ℹ️ {self.account_name}: Recent backend responses: {backend_recent[:10]}")
 
-                    # 检查签到状态
-                    checkin_status = await self._get_gift_checkin_status_with_auth(page, auth_header=gift_auth_header)
-                    print(f"ℹ️ {self.account_name}: Checkin status: {checkin_status}")
-
-                    # 执行签到
-                    checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
-                        page, auth_header=gift_auth_header
+                    # 检查签到状态（使用通过校验的 token）
+                    checkin_status = chosen_status or await self._get_gift_checkin_status_with_auth(
+                        page, auth_header=chosen_auth
                     )
-                    # 如果提示缺少鉴权，且我们未能拿到 token，则再尝试一次“点击按钮抓取 token → 重新 fetch”
+                    print(
+                        f"ℹ️ {self.account_name}: Checkin status: status={(checkin_status or {}).get('status')}, "
+                        f"data={str((checkin_status or {}).get('data'))[:160]}"
+                    )
+
+                    # 执行签到：优先走后端 fetch（可控），拿不到/校验不过则回退 UI 流程（更贴近站点真实逻辑）
+                    if not chosen_auth:
+                        print(f"⚠️ {self.account_name}: No validated Authorization for backend, trying UI checkin fallback...")
+                        checkin_ok, redemption_code, gift_msg = await self._try_gift_ui_checkin(page)
+                        print(
+                            f"ℹ️ {self.account_name}: UI checkin result: ok={checkin_ok}, msg={gift_msg}, "
+                            f"code={(redemption_code[:12] + '...' if redemption_code and len(redemption_code) > 12 else redemption_code)}"
+                        )
+                    else:
+                        checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
+                            page, auth_header=chosen_auth
+                        )
+                    # 如果仍然是 401 invalid token，尝试点击 gift 页面按钮触发其内部流程刷新 token，再重试一次 fetch
                     try:
                         status0 = int((checkin_status or {}).get("status", 0) or 0)
                     except Exception:
                         status0 = 0
-                    if (not checkin_ok) and (not gift_auth_header) and (
-                        status0 == 401 or "authorization" in str(gift_msg).lower()
-                    ):
-                        retry_auth = await self._try_click_gift_checkin_and_capture_auth(page, timeout_ms=8000)
-                        if retry_auth:
-                            print(f"ℹ️ {self.account_name}: Captured Authorization after retry, re-trying checkin fetch")
-                            checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
-                                page, auth_header=retry_auth
-                            )
+                    if (not checkin_ok) and (status0 == 401 or "invalid token" in str(gift_msg).lower()):
+                        print(f"⚠️ {self.account_name}: Backend token rejected, trying UI checkin to refresh token/session...")
+                        ui_ok, ui_code, ui_msg = await self._try_gift_ui_checkin(page)
+                        print(
+                            f"ℹ️ {self.account_name}: UI checkin retry result: ok={ui_ok}, msg={ui_msg}, "
+                            f"code={(ui_code[:12] + '...' if ui_code and len(ui_code) > 12 else ui_code)}"
+                        )
+                        if ui_ok:
+                            checkin_ok, redemption_code, gift_msg = True, ui_code, ui_msg
+                        else:
+                            retry_auth = await self._try_click_gift_checkin_and_capture_auth(page, timeout_ms=8000)
+                            if retry_auth:
+                                print(
+                                    f"ℹ️ {self.account_name}: Captured Authorization via gift button, retrying checkin: "
+                                    f"{self._mask_secret(retry_auth)}"
+                                )
+                                checkin_ok, redemption_code, gift_msg = await self._do_gift_checkin_with_auth(
+                                    page, auth_header=retry_auth
+                                )
                     results["gift_checkin"] = checkin_ok
                     if not checkin_ok and gift_msg and not results.get("error"):
                         results["error"] = f"Gift checkin failed: {gift_msg}"
