@@ -40,6 +40,10 @@ class FovtCheckIn:
     BACKEND_ORIGIN = "https://backend.voct.top"
     LINUXDO_CLIENT_ID = "gO5j0MafWWtkDgU2OsHfMFKbekJUFsIA"
 
+    # gift.voct.top 独立的 LinuxDO OAuth（与 api.voct.top 不同）
+    GIFT_LINUXDO_CLIENT_ID = "Aw6rTYW8xdo6lC2kdeDjLdsDQyKtQ7py"
+    GIFT_REDIRECT_URI = "https://gift.voct.top/api/auth/callback"
+
     def __init__(self, account_name: str, *, proxy_config: dict | None = None):
         self.account_name = account_name
         self.safe_account_name = "".join(c if c.isalnum() else "_" for c in account_name)
@@ -372,6 +376,7 @@ class FovtCheckIn:
             found = await page.evaluate(
                 """() => {
                     const CANDIDATE_KEYS = [
+                        'fo_token',
                         'token', 'access_token', 'accessToken', 'jwt', 'id_token', 'idToken',
                         'Authorization', 'authorization', 'auth', 'authToken', 'auth_token'
                     ];
@@ -658,7 +663,14 @@ class FovtCheckIn:
                 return None
 
             if not data.get("success"):
-                print(f"⚠️ {self.account_name}: Gift auth url api returned success=false: {data.get('message') or data.get('error') or ''}")
+                print(
+                    f"⚠️ {self.account_name}: Gift auth url api returned success=false: "
+                    f"{data.get('message') or data.get('error') or ''}"
+                )
+                try:
+                    print(f"ℹ️ {self.account_name}: Gift auth url raw body: {str((result or {}).get('text',''))[:200]}")
+                except Exception:
+                    pass
                 return None
 
             url = None
@@ -675,6 +687,47 @@ class FovtCheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Gift auth url error: {e}")
             return None
+
+    async def _start_gift_oauth_via_ui(self, page) -> str | None:
+        """从 gift 首页通过点击“立即开始/登录”触发 OAuth 跳转，并返回跳转到的 authorize URL。"""
+        try:
+            await page.goto(self.GIFT_ORIGIN, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1200)
+        except Exception:
+            pass
+
+        btn = None
+        for sel in (
+            'button:has-text("立即开始")',
+            'a:has-text("立即开始")',
+            'button:has-text("登录")',
+            'a:has-text("登录")',
+        ):
+            try:
+                ele = await page.query_selector(sel)
+                if ele:
+                    btn = ele
+                    break
+            except Exception:
+                continue
+
+        if not btn:
+            return None
+
+        try:
+            await btn.click(no_wait_after=True, timeout=5000)
+        except Exception:
+            try:
+                await page.evaluate("(el) => el && el.click && el.click()", btn)
+            except Exception:
+                return None
+
+        try:
+            await page.wait_for_url("**connect.linux.do/oauth2/authorize**", timeout=15000)
+        except Exception:
+            return None
+
+        return page.url
 
     async def _ensure_gift_logged_in(self, page, context, linuxdo_username: str, linuxdo_password: str) -> str | None:
         """确保 gift 站点已完成 LinuxDO OAuth，并返回可用的 Authorization header（Bearer ...）。"""
@@ -694,11 +747,24 @@ class FovtCheckIn:
 
         oauth_url = await self._get_gift_oauth_url(page)
         if not oauth_url:
-            return None
+            # 后端下发失败时，回退到 UI 点击触发（更贴近真实站点逻辑）
+            oauth_url = await self._start_gift_oauth_via_ui(page)
+
+        if not oauth_url:
+            # 最后兜底：根据实际站点观测到的参数拼一个 authorize URL
+            from urllib.parse import quote as _quote
+
+            oauth_url = (
+                "https://connect.linux.do/oauth2/authorize?"
+                f"client_id={self.GIFT_LINUXDO_CLIENT_ID}&response_type=code"
+                f"&redirect_uri={_quote(self.GIFT_REDIRECT_URI, safe='')}&scope=read"
+            )
+            print(f"⚠️ {self.account_name}: Gift auth url api/ui failed, using fallback authorize URL")
 
         # 注意：不要直接打印完整 URL（可能包含敏感参数）
         try:
-            print(f"ℹ️ {self.account_name}: Starting gift OAuth via LinuxDO (auth url origin: {oauth_url.split('?')[0]})")
+            base = oauth_url.split("?")[0]
+            print(f"ℹ️ {self.account_name}: Starting gift OAuth via LinuxDO (authorize: {base})")
         except Exception:
             print(f"ℹ️ {self.account_name}: Starting gift OAuth via LinuxDO")
 
@@ -707,6 +773,19 @@ class FovtCheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to navigate to gift OAuth url: {e}")
             return None
+
+        # 记录 authorize 参数（便于核对 client_id/redirect_uri）
+        try:
+            from urllib.parse import urlparse, parse_qs
+
+            p = urlparse(page.url or "")
+            q = parse_qs(p.query)
+            cid = (q.get("client_id") or [""])[0]
+            ruri = (q.get("redirect_uri") or [""])[0]
+            scope = (q.get("scope") or [""])[0]
+            print(f"ℹ️ {self.account_name}: Gift OAuth params: client_id={cid}, redirect_uri={ruri}, scope={scope}")
+        except Exception:
+            pass
 
         # 若跳到 linux.do/login，自动填表登录
         try:
@@ -741,6 +820,29 @@ class FovtCheckIn:
         except Exception:
             # 兜底等待
             await page.wait_for_timeout(3000)
+
+        # 若当前落在 /auth/success?token=...，优先从 URL 读取 token 并写入 localStorage
+        try:
+            from urllib.parse import urlparse, parse_qs
+
+            u = page.url or ""
+            if "/auth/success" in u and "token=" in u:
+                qs = parse_qs(urlparse(u).query)
+                t_url = (qs.get("token") or [""])[0]
+                if t_url:
+                    try:
+                        await page.evaluate(
+                            """(t) => {
+                                try {
+                                    if (!localStorage.getItem('fo_token')) localStorage.setItem('fo_token', String(t));
+                                } catch (e) {}
+                            }""",
+                            t_url,
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # 等待 localStorage fo_token 落地（避免 URL 含 token 的瞬态页没来得及写入）
         try:
@@ -1038,7 +1140,30 @@ class FovtCheckIn:
                 api_user
             )
 
-            print(f"ℹ️ {self.account_name}: /api/user/self response: status={result.get('status')}, data={str(result.get('data', {}))[:200]}")
+            # 注意：避免把 /api/user/self 的完整返回（包含隐私字段）打到日志里
+            try:
+                _status = result.get("status")
+                _data = result.get("data", {}) or {}
+                _success = _data.get("success") if isinstance(_data, dict) else None
+                _msg = ""
+                if isinstance(_data, dict):
+                    _msg = str(_data.get("message") or _data.get("error") or _data.get("msg") or "")
+                _ud = _data.get("data", {}) if isinstance(_data, dict) else {}
+                if isinstance(_ud, dict) and _success:
+                    _uname = _ud.get("username", "Unknown")
+                    _quota = _ud.get("quota", 0)
+                    _used = _ud.get("used_quota", 0)
+                    print(
+                        f"ℹ️ {self.account_name}: /api/user/self response: status={_status}, success={_success}, "
+                        f"username={_uname}, quota={_quota}, used_quota={_used}"
+                    )
+                else:
+                    print(
+                        f"ℹ️ {self.account_name}: /api/user/self response: status={_status}, success={_success}, "
+                        f"message={_msg[:120]}"
+                    )
+            except Exception:
+                print(f"ℹ️ {self.account_name}: /api/user/self response received")
 
             if not result or result.get("status") != 200:
                 print(f"⚠️ {self.account_name}: API returned non-200 status: {result}")
