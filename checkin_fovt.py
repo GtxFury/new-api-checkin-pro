@@ -945,9 +945,10 @@ class FovtCheckIn:
             data = result.get("data", {})
 
             if status == 200 and data.get("success"):
+                # code 可能不在同一个字段里，先按常规路径取一次；若为空后续会通过 /api/records 再补取
                 code = data.get("data", {}).get("code", "")
                 quota = data.get("data", {}).get("quota", 0)
-                print(f"✅ {self.account_name}: Gift checkin successful! Quota: {quota}, Code: {code}")
+                print(f"✅ {self.account_name}: Gift checkin successful! Quota: {quota}, Code: {self._mask_secret(code)}")
                 return True, code, "success"
 
             message = data.get("message", data.get("error", "Unknown error")) if isinstance(data, dict) else str(data)
@@ -961,6 +962,91 @@ class FovtCheckIn:
         except Exception as e:
             print(f"❌ {self.account_name}: Gift checkin error: {e}")
             return False, "", str(e)
+
+    async def _get_gift_records(self, page, *, auth_header: str | None) -> dict:
+        """获取 gift 历史记录（用于补取兑换码）。"""
+        try:
+            result = await page.evaluate(
+                """async (authHeader) => {
+                    try {
+                        const resp = await fetch('https://backend.voct.top/api/records', {
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'application/json',
+                                ...(authHeader ? { 'Authorization': authHeader } : {}),
+                            }
+                        });
+                        const text = await resp.text();
+                        let data = null;
+                        try { data = JSON.parse(text); } catch (e) { data = text; }
+                        return { status: resp.status, data: data, text: text.slice(0, 600) };
+                    } catch (e) {
+                        return { status: 0, error: e.message };
+                    }
+                }""",
+                auth_header,
+            )
+            return result or {}
+        except Exception as e:
+            return {"status": 0, "error": str(e)}
+
+    @staticmethod
+    def _extract_redeem_code_from_records_payload(payload) -> str | None:
+        """从 /api/records 的返回中尽量提取最新的兑换码。"""
+        if not payload:
+            return None
+
+        # 兼容各种结构：{success,data:[...]}/{success,data:{records:[...]}}/直接 list
+        records = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                records = data
+            elif isinstance(data, dict):
+                for k in ("records", "items", "list", "rows"):
+                    if isinstance(data.get(k), list):
+                        records = data.get(k)
+                        break
+        elif isinstance(payload, list):
+            records = payload
+
+        if not records or not isinstance(records, list):
+            return None
+
+        def _pick_code(obj: dict) -> str | None:
+            # 常见字段名
+            for k in ("code", "cdk", "key"):
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            # 有些是嵌套在 data 里
+            d = obj.get("data")
+            if isinstance(d, dict):
+                for k in ("code", "cdk", "key"):
+                    v = d.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+            return None
+
+        # 记录通常按时间倒序；从前往后找第一个“像签到”的记录
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            typ = str(rec.get("type") or rec.get("record_type") or rec.get("kind") or "")
+            if typ and ("check" in typ.lower() or "sign" in typ.lower() or "签到" in typ):
+                code = _pick_code(rec)
+                if code:
+                    return code
+
+        # 兜底：直接找第一个有 code 的记录
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            code = _pick_code(rec)
+            if code:
+                return code
+
+        return None
 
     async def _redeem_code_on_api(self, page, code: str, api_user: str | None = None) -> bool:
         """在 api.voct.top 兑换码"""
@@ -1150,12 +1236,16 @@ class FovtCheckIn:
                     _msg = str(_data.get("message") or _data.get("error") or _data.get("msg") or "")
                 _ud = _data.get("data", {}) if isinstance(_data, dict) else {}
                 if isinstance(_ud, dict) and _success:
-                    _uname = _ud.get("username", "Unknown")
-                    _quota = _ud.get("quota", 0)
-                    _used = _ud.get("used_quota", 0)
+                    try:
+                        _quota_raw = float(_ud.get("quota", 0) or 0)
+                    except Exception:
+                        _quota_raw = 0.0
+                    quota_per_unit = 500000
+                    _balance = round(_quota_raw / quota_per_unit, 2) if _quota_raw else 0.0
+                    # 仅输出转换后的余额（不输出用户名等隐私信息）
                     print(
                         f"ℹ️ {self.account_name}: /api/user/self response: status={_status}, success={_success}, "
-                        f"username={_uname}, quota={_quota}, used_quota={_used}"
+                        f"balance=${_balance}"
                     )
                 else:
                     print(
@@ -1184,7 +1274,6 @@ class FovtCheckIn:
             used = used_quota / quota_per_unit if used_quota else 0
 
             return {
-                "username": username,
                 "quota": round(balance, 2),
                 "used_quota": round(used, 2),
                 "raw_quota": quota,
@@ -1243,8 +1332,8 @@ class FovtCheckIn:
                         # 先获取 api_user
                         cached_api_user = await self._extract_api_user_from_localstorage(page)
                         balance_info = await self._get_user_balance(page, cached_api_user)
-                        if balance_info and balance_info.get("username"):
-                            print(f"✅ {self.account_name}: Already logged in as {balance_info.get('username')}")
+                        if balance_info and balance_info.get("raw_quota") is not None:
+                            print(f"✅ {self.account_name}: Already logged in")
                             is_logged_in = True
                             results["linuxdo_login"] = True
                             results["api_user"] = cached_api_user  # 保存 api_user 供后续使用
@@ -1479,8 +1568,8 @@ class FovtCheckIn:
                             api_user = await self._extract_api_user_from_localstorage(page)
 
                         balance_info = await self._get_user_balance(page, api_user)
-                        if balance_info and balance_info.get("username"):
-                            print(f"✅ {self.account_name}: Login successful as {balance_info.get('username')}")
+                        if balance_info and balance_info.get("raw_quota") is not None:
+                            print(f"✅ {self.account_name}: Login successful")
                             is_logged_in = True
                             results["linuxdo_login"] = True
                             results["api_user"] = api_user  # 保存 api_user 供后续使用
@@ -1813,8 +1902,24 @@ class FovtCheckIn:
                         await page.wait_for_timeout(1000)
                         current_api_user = await self._extract_api_user_from_localstorage(page)
 
+                    # 补取兑换码：有些情况下 /api/checkin 不直接返回 code，需要从 /api/records 查
+                    if (not redemption_code) and chosen_auth and results.get("gift_checkin"):
+                        rec_resp = await self._get_gift_records(page, auth_header=chosen_auth)
+                        try:
+                            rec_status = int((rec_resp or {}).get("status", 0) or 0)
+                        except Exception:
+                            rec_status = 0
+                        if rec_status == 200:
+                            payload = (rec_resp or {}).get("data")
+                            if isinstance(payload, dict) and payload.get("success") is False:
+                                pass
+                            else:
+                                redemption_code = self._extract_redeem_code_from_records_payload(payload) or ""
+                                if redemption_code:
+                                    print(f"ℹ️ {self.account_name}: Found redemption code from gift records: {self._mask_secret(redemption_code)}")
+
                     if redemption_code:
-                        print(f"ℹ️ {self.account_name}: Got redemption code: {redemption_code}")
+                        print(f"ℹ️ {self.account_name}: Redeeming code: {self._mask_secret(redemption_code)}")
                         redeem_ok = await self._redeem_code_on_api(page, redemption_code, current_api_user)
                         results["code_redeem"] = redeem_ok
                     else:
@@ -1830,7 +1935,6 @@ class FovtCheckIn:
                     if final_balance:
                         results["balance"] = final_balance.get("quota", 0)
                         results["used_quota"] = final_balance.get("used_quota", 0)
-                        results["username"] = final_balance.get("username", "Unknown")
                         print(
                             f"✅ {self.account_name}: Final balance: ${results['balance']}, "
                             f"Used: ${results.get('used_quota', 0)}"
