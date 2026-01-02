@@ -158,7 +158,8 @@ async def main() -> int:
             gift_ok = "✓" if (result or {}).get("gift_checkin") else "✗"
             redeem_ok = "✓" if (result or {}).get("code_redeem") else "✗"
             balance = (result or {}).get("balance", 0)
-            username = (result or {}).get("username", "Unknown")
+            # 避免在日志/通知中输出用户名（隐私）
+            username = "已隐藏"
 
             if ok:
                 success_count += 1
