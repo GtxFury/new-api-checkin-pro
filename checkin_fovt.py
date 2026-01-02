@@ -65,6 +65,55 @@ class FovtCheckIn:
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to take screenshot: {e}")
 
+    async def _safe_goto(
+        self,
+        page,
+        url: str,
+        *,
+        wait_until: str = "domcontentloaded",
+        timeout_ms: int = 30000,
+        retries: int = 3,
+        expected_prefixes: list[str] | None = None,
+    ) -> None:
+        """更稳健的 page.goto：处理重定向/并发导航导致的 NS_BINDING_ABORTED。"""
+        expected = expected_prefixes or [url.split("?")[0]]
+        last_err: Exception | None = None
+
+        for i in range(max(1, retries)):
+            try:
+                await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                return
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                cur = ""
+                try:
+                    cur = page.url or ""
+                except Exception:
+                    cur = ""
+
+                # 常见：站点在跳转/SPA 内部二次导航时，会中止当前 goto
+                aborted = ("NS_BINDING_ABORTED" in msg) or ("net::ERR_ABORTED" in msg) or ("ERR_ABORTED" in msg)
+                if aborted:
+                    if any(cur.startswith(p) for p in expected):
+                        print(f"ℹ️ {self.account_name}: Navigation aborted but already at target: {cur}")
+                        return
+                    print(f"⚠️ {self.account_name}: Navigation aborted (attempt {i+1}/{retries}), current URL: {cur}")
+                    await page.wait_for_timeout(600 * (i + 1))
+                    continue
+
+                # 超时也重试一次（gift 偶发慢）
+                if "Timeout" in msg or "timeout" in msg:
+                    print(f"⚠️ {self.account_name}: Navigation timeout (attempt {i+1}/{retries}), current URL: {cur}")
+                    await page.wait_for_timeout(600 * (i + 1))
+                    continue
+
+                raise
+
+        # retries exhausted
+        if last_err:
+            raise last_err
+
     async def _save_page_content(self, page, reason: str) -> None:
         """保存页面 HTML 到日志文件"""
         try:
@@ -662,7 +711,16 @@ class FovtCheckIn:
                 print(f"⚠️ {self.account_name}: Failed to get gift auth url: HTTP {status}, body={str((result or {}).get('text',''))[:160]}")
                 return None
 
+            # 有时后端会返回 success=false 但仍带 url 字段（兼容处理）
             if not data.get("success"):
+                raw_url = None
+                try:
+                    raw_url = data.get("url")
+                except Exception:
+                    raw_url = None
+                if raw_url and isinstance(raw_url, str) and raw_url.startswith("http"):
+                    print(f"⚠️ {self.account_name}: Gift auth url api returned success=false but includes url, will use it")
+                    return raw_url
                 print(
                     f"⚠️ {self.account_name}: Gift auth url api returned success=false: "
                     f"{data.get('message') or data.get('error') or ''}"
@@ -1028,7 +1086,41 @@ class FovtCheckIn:
                         return v.strip()
             return None
 
-        # 记录通常按时间倒序；从前往后找第一个“像签到”的记录
+        def _parse_dt_key(obj: dict) -> tuple[int, int, int, int, int, int] | None:
+            import re as _re
+
+            for k in ("created_at", "createdAt", "time", "created", "date"):
+                v = obj.get(k)
+                if not isinstance(v, str) or not v:
+                    continue
+                m = _re.search(r"(\\d{4})[/-](\\d{1,2})[/-](\\d{1,2})\\s+(\\d{1,2}):(\\d{1,2}):(\\d{1,2})", v)
+                if not m:
+                    continue
+                try:
+                    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
+                except Exception:
+                    continue
+            return None
+
+        # 优先按时间倒序（若有 created_at）
+        try:
+            sortable: list[tuple[tuple[int, int, int, int, int, int], dict]] = []
+            rest: list[dict] = []
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                key = _parse_dt_key(rec)
+                if key:
+                    sortable.append((key, rec))
+                else:
+                    rest.append(rec)
+            if sortable:
+                sortable.sort(key=lambda x: x[0], reverse=True)
+                records = [r for _k, r in sortable] + rest
+        except Exception:
+            pass
+
+        # 从前往后找第一个“像签到”的记录
         for rec in records:
             if not isinstance(rec, dict):
                 continue
@@ -1063,7 +1155,13 @@ class FovtCheckIn:
 
         try:
             print(f"ℹ️ {self.account_name}: Navigating to topup page to redeem code")
-            await page.goto(f"{self.API_ORIGIN}/console/topup", wait_until="domcontentloaded")
+            await self._safe_goto(
+                page,
+                f"{self.API_ORIGIN}/console/topup",
+                wait_until="domcontentloaded",
+                retries=3,
+                expected_prefixes=[f"{self.API_ORIGIN}/console/topup"],
+            )
             await page.wait_for_timeout(2000)
 
             result = await page.evaluate(
@@ -1313,6 +1411,23 @@ class FovtCheckIn:
                 storage_state = cache_file_path if cache_file_path and os.path.exists(cache_file_path) else None
                 if storage_state:
                     print(f"ℹ️ {self.account_name}: Found cache file, restore storage state")
+                    # 打印缓存里包含的 origin 概览（不输出任何 localStorage/cookie 明文）
+                    try:
+                        import json as _json
+
+                        with open(storage_state, "r", encoding="utf-8") as f:
+                            ss = _json.load(f)
+                        origins = []
+                        if isinstance(ss, dict) and isinstance(ss.get("origins"), list):
+                            for o in ss.get("origins") or []:
+                                if isinstance(o, dict) and o.get("origin"):
+                                    origins.append(str(o.get("origin")))
+                        if origins:
+                            show = ", ".join(origins[:8])
+                            more = f" (+{len(origins) - 8})" if len(origins) > 8 else ""
+                            print(f"ℹ️ {self.account_name}: Cache origins: {show}{more}")
+                    except Exception:
+                        pass
                 else:
                     print(f"ℹ️ {self.account_name}: No cache file found, starting fresh")
 
@@ -1324,7 +1439,13 @@ class FovtCheckIn:
 
                     # 步骤1: 检查是否已登录 api.voct.top
                     print(f"ℹ️ {self.account_name}: Checking login status on api.voct.top")
-                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
+                    await self._safe_goto(
+                        page,
+                        f"{self.API_ORIGIN}/console",
+                        wait_until="domcontentloaded",
+                        retries=3,
+                        expected_prefixes=[f"{self.API_ORIGIN}/console", f"{self.API_ORIGIN}/login"],
+                    )
                     await page.wait_for_timeout(2000)
 
                     current_url = page.url or ""
@@ -1343,7 +1464,13 @@ class FovtCheckIn:
                         print(f"ℹ️ {self.account_name}: Need to login via Linux.do OAuth")
 
                         # 获取 OAuth state
-                        await page.goto(f"{self.API_ORIGIN}/login", wait_until="domcontentloaded")
+                        await self._safe_goto(
+                            page,
+                            f"{self.API_ORIGIN}/login",
+                            wait_until="domcontentloaded",
+                            retries=3,
+                            expected_prefixes=[f"{self.API_ORIGIN}/login"],
+                        )
                         try:
                             state_result = await page.evaluate(
                                 """async () => {
@@ -1536,7 +1663,13 @@ class FovtCheckIn:
                             print(f"⚠️ {self.account_name}: localStorage timeout, current URL: {page.url}")
                             # 尝试导航到 /console 触发 SPA 初始化
                             try:
-                                await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
+                                await self._safe_goto(
+                                    page,
+                                    f"{self.API_ORIGIN}/console",
+                                    wait_until="domcontentloaded",
+                                    retries=3,
+                                    expected_prefixes=[f"{self.API_ORIGIN}/console", f"{self.API_ORIGIN}/login"],
+                                )
                                 await page.wait_for_timeout(3000)
                                 if not api_user:
                                     api_user = await self._extract_api_user_from_localstorage(page)
@@ -1554,7 +1687,13 @@ class FovtCheckIn:
 
                         # 确保在 console 页面
                         if "/console" not in current_url and "/login" not in current_url:
-                            await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
+                            await self._safe_goto(
+                                page,
+                                f"{self.API_ORIGIN}/console",
+                                wait_until="domcontentloaded",
+                                retries=3,
+                                expected_prefixes=[f"{self.API_ORIGIN}/console", f"{self.API_ORIGIN}/login"],
+                            )
                             await page.wait_for_timeout(2000)
                             current_url = page.url or ""
 
@@ -1592,7 +1731,13 @@ class FovtCheckIn:
                     # 尝试在 api.voct.top 侧提前拿到用于 gift/backend 的 Authorization（避免 gift 侧拿不到 token）
                     api_side_auth_header: str | None = None
                     try:
-                        await page.goto(f"{self.API_ORIGIN}/console/token", wait_until="domcontentloaded")
+                        await self._safe_goto(
+                            page,
+                            f"{self.API_ORIGIN}/console/token",
+                            wait_until="domcontentloaded",
+                            retries=3,
+                            expected_prefixes=[f"{self.API_ORIGIN}/console/token", f"{self.API_ORIGIN}/console"],
+                        )
                         await page.wait_for_timeout(1500)
                     except Exception:
                         pass
@@ -1608,15 +1753,18 @@ class FovtCheckIn:
                     # 步骤2: 访问 gift.voct.top 进行签到
                     print(f"ℹ️ {self.account_name}: Navigating to gift site for checkin")
 
-                    # 先访问 gift 站点根路径，触发潜在的 SSO/cookie 初始化，再进入 /dashboard/checkin
+                    # 先访问 gift 首页，再确保 gift 登录（避免直接进 /dashboard/checkin 被 SPA/重定向中断导致 NS_BINDING_ABORTED）
                     try:
-                        await page.goto(f"{self.GIFT_ORIGIN}/", wait_until="domcontentloaded")
+                        await self._safe_goto(
+                            page,
+                            f"{self.GIFT_ORIGIN}/",
+                            wait_until="domcontentloaded",
+                            retries=3,
+                            expected_prefixes=[f"{self.GIFT_ORIGIN}/"],
+                        )
                         await page.wait_for_timeout(800)
                     except Exception:
                         pass
-
-                    await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2500)
 
                     # 关键：gift 有自己独立的 LinuxDO OAuth（client_id/redirect_uri 与 api.voct 不同）
                     # 如果未登录 gift，就必须跑一遍 gift OAuth 来拿到 fo_token（否则用 api 侧 token 会 invalid token）。
@@ -1633,12 +1781,20 @@ class FovtCheckIn:
                                 print(f"✅ {self.account_name}: Gift session saved to cache")
                         except Exception as e:
                             print(f"⚠️ {self.account_name}: Failed to save gift session: {e}")
-                        # OAuth 完成后回到签到页，避免后续 DOM/请求状态不一致
-                        try:
-                            await page.goto(f"{self.GIFT_ORIGIN}/dashboard/checkin", wait_until="domcontentloaded")
-                            await page.wait_for_timeout(1500)
-                        except Exception:
-                            pass
+
+                    # 进入签到页（无论是否 ensured，都尝试进入；失败也不应直接中断整个流程）
+                    try:
+                        await self._safe_goto(
+                            page,
+                            f"{self.GIFT_ORIGIN}/dashboard/checkin",
+                            wait_until="domcontentloaded",
+                            retries=4,
+                            expected_prefixes=[f"{self.GIFT_ORIGIN}/dashboard/checkin"],
+                        )
+                        await page.wait_for_timeout(1500)
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to open gift checkin page: {e}")
+                        await self._take_screenshot(page, "gift_checkin_page_goto_failed")
 
                     # gift/back-end 调试信息：抓取请求/响应、存储 key 等（避免打印明文 token）
                     captured_auth: dict[str, str | None] = {"auth": None, "src": None}
@@ -1898,25 +2054,36 @@ class FovtCheckIn:
                     # 获取当前的 api_user（可能来自登录流程或 results）
                     current_api_user = results.get("api_user")
                     if not current_api_user:
-                        await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
+                        await self._safe_goto(
+                            page,
+                            f"{self.API_ORIGIN}/console",
+                            wait_until="domcontentloaded",
+                            retries=3,
+                            expected_prefixes=[f"{self.API_ORIGIN}/console", f"{self.API_ORIGIN}/login"],
+                        )
                         await page.wait_for_timeout(1000)
                         current_api_user = await self._extract_api_user_from_localstorage(page)
 
                     # 补取兑换码：有些情况下 /api/checkin 不直接返回 code，需要从 /api/records 查
                     if (not redemption_code) and chosen_auth and results.get("gift_checkin"):
-                        rec_resp = await self._get_gift_records(page, auth_header=chosen_auth)
-                        try:
-                            rec_status = int((rec_resp or {}).get("status", 0) or 0)
-                        except Exception:
-                            rec_status = 0
-                        if rec_status == 200:
-                            payload = (rec_resp or {}).get("data")
-                            if isinstance(payload, dict) and payload.get("success") is False:
-                                pass
-                            else:
+                        for attempt in range(3):
+                            rec_resp = await self._get_gift_records(page, auth_header=chosen_auth)
+                            try:
+                                rec_status = int((rec_resp or {}).get("status", 0) or 0)
+                            except Exception:
+                                rec_status = 0
+                            if rec_status == 200:
+                                payload = (rec_resp or {}).get("data")
+                                if isinstance(payload, dict) and payload.get("success") is False:
+                                    break
                                 redemption_code = self._extract_redeem_code_from_records_payload(payload) or ""
                                 if redemption_code:
-                                    print(f"ℹ️ {self.account_name}: Found redemption code from gift records: {self._mask_secret(redemption_code)}")
+                                    print(
+                                        f"ℹ️ {self.account_name}: Found redemption code from gift records: "
+                                        f"{self._mask_secret(redemption_code)}"
+                                    )
+                                    break
+                            await page.wait_for_timeout(1200 * (attempt + 1))
 
                     if redemption_code:
                         print(f"ℹ️ {self.account_name}: Redeeming code: {self._mask_secret(redemption_code)}")
@@ -1927,7 +2094,13 @@ class FovtCheckIn:
                         results["code_redeem"] = True
 
                     # 步骤4: 获取最终余额
-                    await page.goto(f"{self.API_ORIGIN}/console", wait_until="domcontentloaded")
+                    await self._safe_goto(
+                        page,
+                        f"{self.API_ORIGIN}/console",
+                        wait_until="domcontentloaded",
+                        retries=3,
+                        expected_prefixes=[f"{self.API_ORIGIN}/console", f"{self.API_ORIGIN}/login"],
+                    )
                     await page.wait_for_timeout(1000)
                     if not current_api_user:
                         current_api_user = await self._extract_api_user_from_localstorage(page)
