@@ -1275,7 +1275,35 @@ class LinuxDoSignIn:
 							q_fast = parse_qs(parsed_fast.query)
 							code_fast_vals = q_fast.get("code")
 							code_fast = code_fast_vals[0] if code_fast_vals else None
-							if code_fast and not self._should_skip_fast_callback():
+
+							# elysiver：必须走前端 /oauth/linuxdo（SPA）完成 OAuth 回调，才能真正建立 session/localStorage。
+							# 若强行访问 /api/oauth/linuxdo，往往会停在 JSON 页，导致随后访问 /console/personal 被重定向到 /login?expired=true。
+							if self.provider_config.name == "elysiver" and "oauth-redirect.html" in (page.url or ""):
+								print(
+									f"ℹ️ {self.account_name}: elysiver detected oauth-redirect.html, waiting for SPA /oauth/linuxdo to complete login..."
+								)
+								try:
+									await page.wait_for_function(
+										"""() => {
+											const u = location.href || '';
+											return u.includes('/oauth/linuxdo') || u.includes('/console') || u.includes('/login');
+										}""",
+										timeout=8000,
+									)
+								except Exception:
+									# 兜底：如果 oauth-redirect 的自动跳转没触发，主动进入前端回调路由
+									try:
+										state_fast_vals = q_fast.get("state")
+										state_fast = state_fast_vals[0] if state_fast_vals else auth_state
+										if code_fast and state_fast:
+											await page.goto(
+												f"{self.provider_config.origin}/oauth/linuxdo?code={quote(code_fast, safe='')}&state={quote(str(state_fast), safe='')}",
+												wait_until="domcontentloaded",
+											)
+									except Exception:
+										pass
+
+							if code_fast and not self._should_skip_fast_callback() and self.provider_config.name != "elysiver":
 								callback_attempted = True
 								# Veloera 系站点（如 elysiver）更容易在回调接口触发 CF/WAF，避免先用 fetch 反复打回调导致 429
 								if self._prefer_callback_navigation():
@@ -1619,6 +1647,51 @@ class LinuxDoSignIn:
 						return False, {
 							"error": "Linux.do OAuth failed - no code in callback",
 						}
+
+					# elysiver：必须走前端 /oauth/linuxdo（SPA）完成 OAuth 回调，才能建立 session/localStorage。
+					# 这里如果继续调用 /api/oauth/linuxdo，往往会落在 JSON 页，导致后续 /console/personal 被重定向到 /login?expired=true。
+					if self.provider_config.name == "elysiver":
+						print(f"ℹ️ {self.account_name}: elysiver OAuth: waiting for SPA to complete OAuth flow...")
+						try:
+							state_vals = query_params.get("state")
+							state_q = state_vals[0] if state_vals else auth_state
+							cur = page.url or ""
+							if "/oauth/linuxdo" not in cur:
+								try:
+									await page.goto(
+										f"{self.provider_config.origin}/oauth/linuxdo?code={quote(code, safe='')}&state={quote(str(state_q), safe='')}",
+										wait_until="domcontentloaded",
+									)
+								except Exception:
+									pass
+
+							try:
+								await page.wait_for_function(
+									"""() => {
+										try {
+											const user = localStorage.getItem('user');
+											return user !== null && user !== '';
+										} catch (e) {
+											return false;
+										}
+									}""",
+									timeout=15000,
+								)
+							except Exception:
+								await page.wait_for_timeout(3000)
+
+							api_user_ely = await self._extract_api_user_from_localstorage(page)
+							if api_user_ely:
+								print(f"✅ {self.account_name}: Got api user from elysiver localStorage: {api_user_ely}")
+								restore_cookies_ely = await page.context.cookies()
+								user_cookies_ely = filter_cookies(restore_cookies_ely, self.provider_config.origin)
+								return True, {"cookies": user_cookies_ely, "api_user": api_user_ely}
+
+							if "/login" in (page.url or ""):
+								return False, {"error": "elysiver OAuth session not established (redirected to login)", "retry": True}
+							return False, {"error": "elysiver OAuth flow failed - no user in localStorage", "retry": True}
+						except Exception as ely_err:
+							return False, {"error": f"elysiver OAuth flow error: {ely_err}", "retry": True}
 
 					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
 					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调建立 session
