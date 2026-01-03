@@ -600,8 +600,11 @@ class LinuxDoSignIn:
 			print(f"⚠️ {self.account_name}: Manual Turnstile solving failed: {e}")
 			return False
 
-	async def _browser_check_in_with_turnstile(self, page) -> None:
-		"""在 provider 的页面中执行带 Turnstile 的每日签到"""
+	async def _browser_check_in_with_turnstile(self, page) -> bool:
+		"""在 provider 的页面中执行每日签到（部分站点可能包含 Turnstile）。
+
+		返回：True 表示已确认“今日已签到/签到成功”，False 表示未能确认。
+		"""
 		try:
 			# 如果配置了签到页面路径，只使用该路径
 			if getattr(self.provider_config, "checkin_page_path", None):
@@ -633,7 +636,7 @@ class LinuxDoSignIn:
 					# 如果是 elysiver 且只有一个签到路径，直接返回避免无效尝试
 					if self.provider_config.name == "elysiver" and len(checkin_paths) == 1:
 						print(f"❌ {self.account_name}: Cannot proceed with check-in due to session expiry")
-						return
+						return False
 					continue
 
 				# 先尝试解决 Turnstile（如果存在）
@@ -654,7 +657,7 @@ class LinuxDoSignIn:
 
 				if already_btn:
 					print(f"ℹ️ {self.account_name}: Already checked in today on provider site")
-					return
+					return True
 
 				# 查找"立即签到"按钮并点击
 				checkin_btn = None
@@ -675,18 +678,22 @@ class LinuxDoSignIn:
 				try:
 					await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
 					print(f"✅ {self.account_name}: Daily check-in completed in browser")
+					return True
 				except Exception as wait_err:
 					print(
 						f"⚠️ {self.account_name}: Daily check-in may have failed or timed out: {wait_err}"
 					)
 					await self._take_screenshot(page, f"{self.provider_config.name}_checkin_timeout")
-				return
+					return False
+				return False
 
 			print(f"⚠️ {self.account_name}: Daily check-in button not found on any known profile page")
 			await self._take_screenshot(page, f"{self.provider_config.name}_checkin_button_not_found")
+			return False
 		except Exception as e:
 			print(f"❌ {self.account_name}: Error during browser check-in: {e}")
 			await self._take_screenshot(page, f"{self.provider_config.name}_checkin_error")
+			return False
 
 	async def _extract_api_user_from_localstorage(self, page) -> str | None:
 		"""尽量从 localStorage 中读取 user id（兼容不同前端存储 key/字段）。"""
@@ -1365,8 +1372,15 @@ class LinuxDoSignIn:
 											await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_need_retry")
 											return False, {"error": "session_verify_failed_need_retry", "retry": True}
 										else:
-											await self._browser_check_in_with_turnstile(page)
+											checkin_done_fast = await self._browser_check_in_with_turnstile(page)
 											user_info_fast = await self._extract_balance_from_profile(page)
+											if checkin_done_fast and not user_info_fast and self.provider_config.name == "elysiver":
+												user_info_fast = {
+													"success": True,
+													"quota": 0.0,
+													"used_quota": 0.0,
+													"display": "今日已签到（余额解析失败）",
+												}
 
 									restore_cookies = await page.context.cookies()
 									user_cookies = filter_cookies(
@@ -1437,8 +1451,15 @@ class LinuxDoSignIn:
 												await self._take_screenshot(page, f"{self.provider_config.name}_session_expired_need_retry")
 												return False, {"error": "session_verify_failed_need_retry", "retry": True}
 											else:
-												await self._browser_check_in_with_turnstile(page)
+												checkin_done_nav = await self._browser_check_in_with_turnstile(page)
 												user_info_nav = await self._extract_balance_from_profile(page)
+												if checkin_done_nav and not user_info_nav and self.provider_config.name == "elysiver":
+													user_info_nav = {
+														"success": True,
+														"quota": 0.0,
+														"used_quota": 0.0,
+														"display": "今日已签到（余额解析失败）",
+													}
 
 										restore_cookies = await page.context.cookies()
 										user_cookies = filter_cookies(
@@ -1598,9 +1619,16 @@ class LinuxDoSignIn:
 						# newapi 通用签到入口在控制台 `/console/personal`（右侧“立即签到”）。
 						# 此处仅负责完成登录与 cookies 提取，不在登录流程里强依赖旧的 /app/me DOM 解析。
 						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
-							await self._browser_check_in_with_turnstile(page)
+							checkin_done = await self._browser_check_in_with_turnstile(page)
 							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求
 							user_info = await self._extract_balance_from_profile(page)
+							if checkin_done and not user_info and self.provider_config.name == "elysiver":
+								user_info = {
+									"success": True,
+									"quota": 0.0,
+									"used_quota": 0.0,
+									"display": "今日已签到（余额解析失败）",
+								}
 
 						# 提取 session cookie，只保留与 provider domain 匹配的
 						restore_cookies = await page.context.cookies()
@@ -1802,8 +1830,15 @@ class LinuxDoSignIn:
 									user_info_fb = None
 									try:
 										if self.provider_config.name != "runanytime":
-											await self._browser_check_in_with_turnstile(page)
+											checkin_done_fb = await self._browser_check_in_with_turnstile(page)
 											user_info_fb = await self._extract_balance_from_profile(page)
+											if checkin_done_fb and not user_info_fb and self.provider_config.name == "elysiver":
+												user_info_fb = {
+													"success": True,
+													"quota": 0.0,
+													"used_quota": 0.0,
+													"display": "今日已签到（余额解析失败）",
+												}
 									except Exception as fb_chk_err:
 										print(
 											f"⚠️ {self.account_name}: Error during browser check-in fallback: "
@@ -1968,8 +2003,15 @@ class LinuxDoSignIn:
 												# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 												user_info_cb = None
 												if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
-													await self._browser_check_in_with_turnstile(page)
+													checkin_done_cb = await self._browser_check_in_with_turnstile(page)
 													user_info_cb = await self._extract_balance_from_profile(page)
+													if checkin_done_cb and not user_info_cb and self.provider_config.name == "elysiver":
+														user_info_cb = {
+															"success": True,
+															"quota": 0.0,
+															"used_quota": 0.0,
+															"display": "今日已签到（余额解析失败）",
+														}
 
 												result_cb: dict = {
 													"cookies": user_cookies,

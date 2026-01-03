@@ -4880,6 +4880,9 @@ class CheckIn:
                                 if success2 and "cookies" in result2 and "api_user" in result2:
                                     user_cookies = result2["cookies"]
                                     api_user = result2["api_user"]
+                                    # elysiver：若重登流程中已在浏览器侧确认“已签到/并解析出余额”，直接视为成功，避免再次被二次校验翻盘。
+                                    if self.provider_config.name == "elysiver" and "user_info" in result2:
+                                        return True, result2["user_info"]
                                     if not await _elysiver_session_ok():
                                         return False, {"error": "elysiver session invalid after OAuth (retry failed)"}
                                 else:
