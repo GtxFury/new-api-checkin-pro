@@ -1623,6 +1623,43 @@ class CheckIn:
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
         await self._ensure_page_past_cloudflare(page)
 
+        # newapi 控制台有时仅靠 cookie 不会渲染（缺 localStorage.user），补种后 reload 再继续。
+        try:
+            await page.evaluate(
+                """(apiUser) => {
+                    try {
+                        const key = 'user';
+                        const cur = localStorage.getItem(key);
+                        if (cur) return;
+                        const id = typeof apiUser === 'string' ? parseInt(apiUser, 10) : apiUser;
+                        const user = { id, username: `linuxdo_${id}`, role: 1, status: 1, group: 'default', display_name: 'None' };
+                        localStorage.setItem(key, JSON.stringify(user));
+                    } catch (e) {}
+                }""",
+                str(api_user),
+            )
+            await page.reload(wait_until="domcontentloaded")
+            await self._ensure_page_past_cloudflare(page)
+        except Exception:
+            pass
+
+        try:
+            await page.wait_for_function(
+                """() => {
+                    try {
+                        const bodyText = document.body?.innerText || '';
+                        if (!bodyText) return false;
+                        if (bodyText.includes('每日签到')) return true;
+                        if (bodyText.includes('立即签到')) return true;
+                        if (bodyText.includes('今日已签到')) return true;
+                        return false;
+                    } catch (e) { return false; }
+                }""",
+                timeout=8000,
+            )
+        except Exception:
+            pass
+
         status_before = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
         try:
             if (
@@ -1637,6 +1674,7 @@ class CheckIn:
         try:
             already_btn = await page.query_selector('button:has-text("今日已签到")')
             if already_btn:
+                print(f"ℹ️ {self.account_name}: newapi console shows '今日已签到' button")
                 return True, "今日已签到"
         except Exception:
             pass
@@ -1647,6 +1685,7 @@ class CheckIn:
             btn = None
 
         if not btn:
+            print(f"⚠️ {self.account_name}: newapi console '立即签到' button not found (url={page.url})")
             if isinstance(status_before, dict) and status_before.get("success"):
                 if status_before.get("can_check_in") is False:
                     return True, "今日已签到"
@@ -1670,6 +1709,7 @@ class CheckIn:
         except Exception:
             pass
 
+        print(f"ℹ️ {self.account_name}: Clicking '立即签到' on {origin}/console/personal")
         try:
             await btn.click()
         except Exception:
@@ -2389,7 +2429,7 @@ class CheckIn:
 
     async def _ccode_check_in_via_console_personal(
         self,
-        ccode_cookies: dict,
+        ccode_cookies: dict | list[dict],
         api_user: str | int,
         linuxdo_cache_file_path: str,
     ) -> tuple[bool, dict]:
@@ -2397,6 +2437,8 @@ class CheckIn:
         origin = (self.provider_config.origin or "").rstrip("/")
         if not origin:
             return False, {"error": "missing provider origin"}
+
+        print(f"ℹ️ {self.account_name}: ccode starting check-in via newapi console (/console/personal)")
 
         async with AsyncCamoufox(
             headless=False,
@@ -2423,10 +2465,18 @@ class CheckIn:
                 except Exception:
                     pass
 
-                try:
-                    await context.add_cookies(self._cookie_dict_to_browser_cookies(ccode_cookies or {}, origin))
-                except Exception:
-                    pass
+                # 兼容 cookies 类型：linuxdo 登录返回通常是浏览器 cookie 列表；部分流程是 dict(name->value)
+                if isinstance(ccode_cookies, list):
+                    try:
+                        if ccode_cookies:
+                            await context.add_cookies(ccode_cookies)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await context.add_cookies(self._cookie_dict_to_browser_cookies(ccode_cookies or {}, origin))
+                    except Exception:
+                        pass
 
                 try:
                     await page.goto(f"{origin}/console", wait_until="domcontentloaded")
@@ -2471,6 +2521,7 @@ class CheckIn:
                     f"当前余额: {_fmt_quota(cur_quota)} | 历史消耗: {_fmt_quota(cur_used)} | "
                     f"变动: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
                 )
+                print(f"ℹ️ {self.account_name}: {summary}")
 
                 base_info = None
                 if isinstance(after_info, dict) and after_info.get("success"):

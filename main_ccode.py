@@ -157,7 +157,11 @@ async def main() -> int:
                 success_count += 1
                 quota = best_info.get("quota", 0) if best_info else 0
                 used = best_info.get("used_quota", 0) if best_info else 0
-                notification_lines.append(f"✅ {account_name}: 🏃‍♂️{quota} | Used 🏃‍♂️{used}")
+                display = (best_info or {}).get("display", "")
+                if display:
+                    notification_lines.append(f"✅ {account_name}: {display}")
+                else:
+                    notification_lines.append(f"✅ {account_name}: 🏃‍♂️{quota} | Used 🏃‍♂️{used}")
                 balances[account_name] = {"quota": quota, "used_quota": used}
             else:
                 any_failed = True
