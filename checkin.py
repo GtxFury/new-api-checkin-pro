@@ -1671,10 +1671,28 @@ class CheckIn:
         except Exception:
             pass
 
+        # DOM 兜底：部分站点“今日已签到”不一定是 button（可能是 span/div 或自定义组件），因此不只查 button。
         try:
-            already_btn = await page.query_selector('button:has-text("今日已签到")')
-            if already_btn:
-                print(f"ℹ️ {self.account_name}: newapi console shows '今日已签到' button")
+            already = await page.evaluate(
+                """() => {
+                    try {
+                        const bodyText = document.body?.innerText || '';
+                        if (bodyText.includes('今日已签到') || bodyText.includes('已签到')) return true;
+                        const nodes = [
+                            ...Array.from(document.querySelectorAll('button')),
+                            ...Array.from(document.querySelectorAll('[role=\"button\"]')),
+                            ...Array.from(document.querySelectorAll('a')),
+                        ];
+                        for (const n of nodes) {
+                            const t = (n.innerText || n.textContent || '').trim();
+                            if (t.includes('今日已签到') || t.includes('已签到')) return true;
+                        }
+                        return false;
+                    } catch (e) { return false; }
+                }"""
+            )
+            if already:
+                print(f"ℹ️ {self.account_name}: newapi console shows already-checked-in state")
                 return True, "今日已签到"
         except Exception:
             pass
@@ -1686,6 +1704,13 @@ class CheckIn:
 
         if not btn:
             print(f"⚠️ {self.account_name}: newapi console '立即签到' button not found (url={page.url})")
+            # 再兜底一次：如果页面文案已经明确“已签到”，则视为成功
+            try:
+                body_text = await page.evaluate("() => document.body?.innerText || ''")
+                if "今日已签到" in (body_text or "") or "已签到" in (body_text or ""):
+                    return True, "今日已签到"
+            except Exception:
+                pass
             if isinstance(status_before, dict) and status_before.get("success"):
                 if status_before.get("can_check_in") is False:
                     return True, "今日已签到"
@@ -1700,7 +1725,7 @@ class CheckIn:
             aria_disabled = await btn.get_attribute("aria-disabled")
             if disabled is not None or aria_disabled == "true":
                 body_text = await page.evaluate("() => document.body?.innerText || ''")
-                if "今日已签到" in (body_text or ""):
+                if "今日已签到" in (body_text or "") or "已签到" in (body_text or ""):
                     return True, "今日已签到"
                 status2 = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
                 if isinstance(status2, dict) and status2.get("success") and status2.get("can_check_in") is False:
@@ -1743,11 +1768,11 @@ class CheckIn:
                     """() => {
                         try {
                             const bodyText = document.body?.innerText || '';
-                            if (bodyText.includes('今日已签到') || bodyText.includes('签到成功')) {
+                            if (bodyText.includes('今日已签到') || bodyText.includes('已签到') || bodyText.includes('签到成功')) {
                                 return { ok: true, msg: '签到成功' };
                             }
                             const buttons = Array.from(document.querySelectorAll('button'));
-                            if (buttons.some(b => ((b.innerText || '').includes('今日已签到')))) {
+                            if (buttons.some(b => ((b.innerText || '').includes('今日已签到') || (b.innerText || '').includes('已签到')))) {
                                 return { ok: true, msg: '今日已签到' };
                             }
                             return { ok: false };
