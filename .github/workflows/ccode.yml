@@ -1,0 +1,144 @@
+name: ccode 有间公益自动签到
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+jobs:
+  ccode:
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+    - name: set beijing timezone
+      uses: szenius/set-timezone@v2.0
+      with:
+        timezoneWindows: "China Standard Time"
+
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: 缓存 UV 依赖
+      uses: actions/cache@v4
+      id: uv-cache
+      with:
+        path: |
+          ~/.cache/uv
+          .venv
+        key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-
+
+    - name: 安装依赖
+      if: steps.uv-cache.outputs.cache-hit != 'true'
+      run: |
+        echo "缓存未命中，开始安装项目依赖..."
+        uv sync
+        echo "✅ 环境初始化完成"
+
+    - name: 安装 Playwright 浏览器
+      run: |
+        uv run python -m playwright install
+
+    - name: 获取 Camoufox 版本
+      id: camoufox-version
+      run: |
+        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('camoufox'))"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Camoufox version: $version"
+
+    - name: 缓存 Camoufox 浏览器
+      uses: actions/cache@v4
+      id: camoufox-cache
+      with:
+        path: ~\AppData\Local\camoufox
+        key: ${{ runner.os }}-camoufox-${{ steps.camoufox-version.outputs.version }}
+        restore-keys: |
+          ${{ runner.os }}-camoufox-
+
+    - name: 安装 Camoufox 浏览器
+      if: steps.camoufox-cache.outputs.cache-hit != 'true'
+      run: |
+        echo "缓存未命中，开始下载 Camoufox 浏览器..."
+        uv run camoufox fetch
+        echo "✅ Camoufox 浏览器安装完成"
+
+    - name: 恢复登录状态缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          storage-states/ccode
+        key: ccode-storage-states-${{ hashFiles('storage-states/ccode/*.json') }}
+        restore-keys: |
+          ccode-storage-states-
+
+    - name: 恢复余额历史缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          balance_hash_ccode.txt
+        key: balance-hash-ccode-${{ hashFiles('balance_hash_ccode.txt') }}
+        restore-keys: |
+          balance-hash-ccode-
+
+    - name: 执行 ccode 签到
+      env:
+        ACCOUNTS_CCODE: ${{ secrets.ACCOUNTS_CCODE }}
+        PROXY: ${{ secrets.PROXY }}
+        LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
+        DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+        EMAIL_USER: ${{ secrets.EMAIL_USER }}
+        EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        uv run python -u main_ccode.py
+
+    - name: 保存登录状态缓存
+      if: hashFiles('storage-states/ccode/*.json') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          storage-states/ccode
+        key: ccode-storage-states-${{ hashFiles('storage-states/ccode/*.json') }}
+
+    - name: 保存余额历史缓存
+      if: hashFiles('balance_hash_ccode.txt') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          balance_hash_ccode.txt
+        key: balance-hash-ccode-${{ hashFiles('balance_hash_ccode.txt') }}
+
+    - name: 保存日志和截图
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ccode-artifacts-${{ github.run_number }}
+        path: |
+          logs/
+          screenshots/
+        if-no-files-found: ignore
+        retention-days: 7
+
+    - name: 执行结果
+      if: always()
+      run: |
+        echo "ccode 签到任务执行完成"
+        echo "时间: $(Get-Date)"

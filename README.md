@@ -73,11 +73,12 @@
 #### 字段说明：
 
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
-- `provider` (可选)：供应商，内置 `anyrouter`、`agentrouter`、`runanytime`，默认使用 `anyrouter`
+- `provider` (可选)：供应商，内置 `anyrouter`、`agentrouter`、`runanytime`、`ccode`，默认使用 `anyrouter`
 - `proxy` (可选)：单个账号代理配置，支持 `http`、`socks5` 代理
 - `cookies`(可选)：用于身份验证的 cookies 数据  
   - 对于 `anyrouter`、`agentrouter`：从浏览器获取 `session` 即可  
-  - 对于 `runanytime`：已改为在站点控制台 `/console/personal` 点击“立即签到”，并保留福利站转盘获取兑换码后自动兑换；需使用 `linux.do` 登录（不再支持仅 cookies）
+  - 对于 `runanytime`：newapi 通用签到入口已迁移至控制台 `/console/personal` 的“立即签到”，并保留福利站转盘获取兑换码后自动兑换；需使用 `linux.do` 登录（不再支持仅 cookies）
+  - 对于 `ccode`：newapi 通用签到入口为控制台 `/console/personal` 的“立即签到”（不走福利站转盘）；需使用 `linux.do` 登录（不再支持仅 cookies）
 - `api_user`(cookies 设置时必需)：
   - `anyrouter` / `agentrouter`：对应请求头 `new-api-user` 的值  
   - `runanytime`：对应请求头 `new-api-user`（或旧实现的 `Veloera-User`）的值（内部登录流程会自动获取，通常无需手动填写）
@@ -93,6 +94,14 @@
 在仓库的 Settings -> Environments -> production -> Environment secrets 中添加：
    - Name: `PROVIDERS`
    - Value: 供应商
+
+常用可选字段（写在 `PROVIDERS` 的单个 provider 配置里）：
+- `checkin_mode`: `"newapi_console_personal"` 表示使用 newapi 通用控制台签到（`/console/personal` 点击“立即签到”）
+- `checkin_page_path`: 自定义签到页面路径（默认会按站点内置值/候选路径探测）
+
+#### ccode 站点地址
+
+- 默认固定为 `https://api.ccode.icu`（如需自定义可通过 `PROVIDERS` 覆盖）
 
 
 #### 代理配置
