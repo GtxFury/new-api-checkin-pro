@@ -124,8 +124,8 @@ class CheckIn:
         """
         keys: list[str] = [self.provider_config.api_user_key]
 
-        # runanytime/elysiver/ccode 可能在不同实现间切换，额外注入常见 header 名
-        if self.provider_config.name in {"runanytime", "elysiver", "ccode"}:
+        # runanytime/elysiver/ccode/hotaru 可能在不同实现间切换，额外注入常见 header 名
+        if self.provider_config.name in {"runanytime", "elysiver", "ccode", "hotaru"}:
             keys.extend(["new-api-user", "New-Api-User", "Veloera-User"])
 
         # 去重（按 header 名大小写不敏感）
@@ -2427,18 +2427,19 @@ class CheckIn:
                     pass
         # runanytime 兑换/余额走浏览器上下文，不需要额外 httpx client
 
-    async def _ccode_check_in_via_console_personal(
+    async def _newapi_check_in_via_console_personal(
         self,
-        ccode_cookies: dict | list[dict],
+        auth_cookies: dict | list[dict],
         api_user: str | int,
         linuxdo_cache_file_path: str,
     ) -> tuple[bool, dict]:
-        """ccode 有间公益签到：使用 newapi 通用的 `/console/personal`“立即签到”流程（不走福利站转盘）。"""
+        """newapi 通用控制台签到：使用 `/console/personal` 右侧“立即签到”流程。"""
         origin = (self.provider_config.origin or "").rstrip("/")
         if not origin:
             return False, {"error": "missing provider origin"}
 
-        print(f"ℹ️ {self.account_name}: ccode starting check-in via newapi console (/console/personal)")
+        provider_name = getattr(self.provider_config, "name", "provider")
+        print(f"ℹ️ {self.account_name}: {provider_name} starting check-in via newapi console (/console/personal)")
 
         async with AsyncCamoufox(
             headless=False,
@@ -2466,15 +2467,15 @@ class CheckIn:
                     pass
 
                 # 兼容 cookies 类型：linuxdo 登录返回通常是浏览器 cookie 列表；部分流程是 dict(name->value)
-                if isinstance(ccode_cookies, list):
+                if isinstance(auth_cookies, list):
                     try:
-                        if ccode_cookies:
-                            await context.add_cookies(ccode_cookies)
+                        if auth_cookies:
+                            await context.add_cookies(auth_cookies)
                     except Exception:
                         pass
                 else:
                     try:
-                        await context.add_cookies(self._cookie_dict_to_browser_cookies(ccode_cookies or {}, origin))
+                        await context.add_cookies(self._cookie_dict_to_browser_cookies(auth_cookies or {}, origin))
                     except Exception:
                         pass
 
@@ -2517,7 +2518,7 @@ class CheckIn:
                 overall_success = signed_done or quota_increased
 
                 summary = (
-                    f"CCode 签到: {checkin_msg} | "
+                    f"{provider_name} 签到: {checkin_msg} | "
                     f"当前余额: {_fmt_quota(cur_quota)} | 历史消耗: {_fmt_quota(cur_used)} | "
                     f"变动: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
                 )
@@ -2544,16 +2545,29 @@ class CheckIn:
                 return True, user_info
             except Exception as e:
                 try:
-                    await self._take_screenshot(page, "ccode_checkin_flow_error")
+                    await self._take_screenshot(page, f"{provider_name}_checkin_flow_error")
                 except Exception:
                     pass
-                return False, {"error": f"ccode checkin flow error: {e}"}
+                return False, {"error": f"{provider_name} checkin flow error: {e}"}
             finally:
                 try:
                     await page.close()
                 except Exception:
                     pass
                 await context.close()
+
+    async def _ccode_check_in_via_console_personal(
+        self,
+        ccode_cookies: dict | list[dict],
+        api_user: str | int,
+        linuxdo_cache_file_path: str,
+    ) -> tuple[bool, dict]:
+        """兼容旧入口：ccode 复用 newapi 通用控制台签到流程。"""
+        return await self._newapi_check_in_via_console_personal(
+            auth_cookies=ccode_cookies,
+            api_user=api_user,
+            linuxdo_cache_file_path=linuxdo_cache_file_path,
+        )
 
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
         """检查响应类型，如果是 HTML 则保存为文件，否则返回 JSON 数据
@@ -4229,8 +4243,22 @@ class CheckIn:
         self, cookies: dict, api_user: str | int, needs_check_in: bool | None = None
     ) -> tuple[bool, dict]:
         """使用已有 cookies 执行签到操作"""
-        if self.provider_config.name in {"runanytime", "ccode"}:
-            return False, {"error": f"{self.provider_config.name} 新签到方式需要 linux.do 登录并在 /console/personal 执行签到，cookies 方式暂不支持"}
+        if self.provider_config.name == "runanytime":
+            return (
+                False,
+                {
+                    "error": "runanytime 新签到方式需要 linux.do 登录并完成控制台/福利站流程，cookies 方式暂不支持",
+                },
+            )
+
+        # newapi 通用控制台签到（/console/personal 点击“立即签到”）需要先通过 OAuth 获取登录态
+        if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
+            return (
+                False,
+                {
+                    "error": f"{self.provider_config.name} 需要 linux.do 登录并在 /console/personal 执行签到，cookies 方式暂不支持",
+                },
+            )
 
         print(
             f"ℹ️ {self.account_name}: Executing check-in with existing cookies (using proxy: {'true' if self.http_proxy_config else 'false'})"
@@ -4684,10 +4712,10 @@ class CheckIn:
                         linuxdo_cache_file_path=cache_file_path,
                     )
 
-                # ccode：newapi 通用控制台每日签到（不走福利站转盘）
-                if self.provider_config.name == "ccode":
-                    return await self._ccode_check_in_via_console_personal(
-                        ccode_cookies=user_cookies,
+                # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
+                if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
+                    return await self._newapi_check_in_via_console_personal(
+                        auth_cookies=user_cookies,
                         api_user=api_user,
                         linuxdo_cache_file_path=cache_file_path,
                     )
@@ -4761,10 +4789,10 @@ class CheckIn:
                                         linuxdo_cache_file_path=cache_file_path,
                                     )
 
-                                # ccode：newapi 通用控制台每日签到（不走福利站转盘）
-                                if self.provider_config.name == "ccode":
-                                    return await self._ccode_check_in_via_console_personal(
-                                        ccode_cookies=user_cookies,
+                                # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
+                                if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
+                                    return await self._newapi_check_in_via_console_personal(
+                                        auth_cookies=user_cookies,
                                         api_user=api_user,
                                         linuxdo_cache_file_path=cache_file_path,
                                     )
