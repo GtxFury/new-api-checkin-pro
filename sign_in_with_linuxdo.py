@@ -1567,8 +1567,8 @@ class LinuxDoSignIn:
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None
-						# runanytime/newapi 新版签到入口在控制台 `/console/personal`，并保留福利站转盘兑换逻辑；
-						# 此处仅负责完成登录与 cookies 提取，不再尝试旧的 /app/me 签到按钮与表格解析。
+						# newapi 通用签到入口在控制台 `/console/personal`（右侧“立即签到”）。
+						# 此处仅负责完成登录与 cookies 提取，不在登录流程里强依赖旧的 /app/me DOM 解析。
 						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
 							await self._browser_check_in_with_turnstile(page)
 							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求

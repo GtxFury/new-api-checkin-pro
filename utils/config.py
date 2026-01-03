@@ -33,6 +33,8 @@ class ProviderConfig:
     check_in_status_path: str | None = None
     # 可选的签到页面路径（如 /console/checkin），用于浏览器签到
     checkin_page_path: str | None = None
+    # 可选：newapi 通用控制台签到模式（/console/personal 点击“立即签到”）
+    checkin_mode: Literal["newapi_console_personal"] | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -60,6 +62,7 @@ class ProviderConfig:
             turnstile_check=data.get("turnstile_check", False),
             check_in_status_path=data.get("check_in_status_path"),
             checkin_page_path=data.get("checkin_page_path"),
+            checkin_mode=data.get("checkin_mode"),
         )
 
     def needs_waf_cookies(self) -> bool:
@@ -206,6 +209,26 @@ class AppConfig:
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
             ),
+            "ccode": ProviderConfig(
+                name="ccode",
+                origin="https://api.ccode.icu",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                check_in_status_path="/api/user/check_in_status",
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
+            ),
             "elysiver": ProviderConfig(
                 name="elysiver",
                 origin="https://elysiver.h-e.top",
@@ -227,8 +250,9 @@ class AppConfig:
                 # 在浏览器中执行每日签到，并通过 /api/user/check_in_status 校验
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
-                # elysiver 签到页面路径（2024-12 更新）
-                checkin_page_path="/console/checkin",
+                # newapi 通用签到入口：/console/personal 右侧“立即签到”
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
             ),
         }
 

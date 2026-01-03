@@ -124,8 +124,8 @@ class CheckIn:
         """
         keys: list[str] = [self.provider_config.api_user_key]
 
-        # runanytime/elysiver 可能在不同实现间切换，额外注入常见 header 名
-        if self.provider_config.name in {"runanytime", "elysiver"}:
+        # runanytime/elysiver/ccode 可能在不同实现间切换，额外注入常见 header 名
+        if self.provider_config.name in {"runanytime", "elysiver", "ccode"}:
             keys.extend(["new-api-user", "New-Api-User", "Veloera-User"])
 
         # 去重（按 header 名大小写不敏感）
@@ -1511,6 +1511,219 @@ class CheckIn:
 
         return success, msg or "已提交兑换请求"
 
+    def _newapi_build_browser_headers(self, origin: str, referer: str, api_user: str | int) -> dict:
+        """构造在浏览器 fetch 中使用的通用 headers（new-api/veloera 系站点）。
+
+        注意：浏览器 fetch 不能自定义 User-Agent，且 Cloudflare clearance 往往与浏览器指纹绑定；
+        因此这里不要在浏览器路径中塞随机 UA。
+        """
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Origin": origin,
+            "Referer": referer,
+        }
+        self._inject_api_user_headers(headers, api_user)
+        return headers
+
+    async def _newapi_get_user_info_via_browser(self, page, origin: str, api_user: str | int) -> dict:
+        """在站点页面内用 fetch('/api/user/self') 获取余额（不依赖 UI 渲染）。"""
+        resp = await self._browser_fetch_json(
+            page,
+            f"{origin}/api/user/self",
+            method="GET",
+            headers=self._newapi_build_browser_headers(origin, f"{origin}/console", api_user),
+        )
+        status = int(resp.get("status", 0) or 0)
+        text = (resp.get("text") or "")[:200]
+
+        if status != 200:
+            if status in (403, 503) and self._looks_like_cloudflare_interstitial_html(text):
+                await self._ensure_page_past_cloudflare(page)
+                resp = await self._browser_fetch_json(
+                    page,
+                    f"{origin}/api/user/self",
+                    method="GET",
+                    headers=self._newapi_build_browser_headers(origin, f"{origin}/console", api_user),
+                )
+                status = int(resp.get("status", 0) or 0)
+                text = (resp.get("text") or "")[:200]
+            if status:
+                return {"success": False, "error": f"HTTP {status}: {text}", "status_code": status}
+            return {"success": False, "error": f"request_error: {resp.get('text')}"}
+
+        data = resp.get("json")
+        if not isinstance(data, dict):
+            return {"success": False, "error": "response_not_json"}
+        if not data.get("success"):
+            msg = data.get("message") or data.get("msg") or ""
+            return {"success": False, "error": msg or "response_success=false"}
+
+        user_data = data.get("data", {}) or {}
+        try:
+            quota = round(float(user_data.get("quota", 0)) / 500000, 2)
+            used_quota = round(float(user_data.get("used_quota", 0)) / 500000, 2)
+        except Exception:
+            return {"success": False, "error": "parse_quota_failed"}
+        return {
+            "success": True,
+            "quota": quota,
+            "used_quota": used_quota,
+            "display": f"Current balance: 🏃‍♂️{quota:.2f}, Used: 🏃‍♂️{used_quota:.2f}",
+        }
+
+    async def _newapi_get_check_in_status_via_browser(self, page, origin: str, api_user: str | int) -> dict | None:
+        """在浏览器上下文内查询签到状态（若 provider 配置了 check_in_status_path）。"""
+        status_url = self.provider_config.get_check_in_status_url()
+        if not status_url:
+            return None
+
+        resp = await self._browser_fetch_json(
+            page,
+            status_url,
+            method="GET",
+            headers=self._newapi_build_browser_headers(origin, f"{origin}/console/personal", api_user),
+        )
+        status = int(resp.get("status", 0) or 0)
+        text = (resp.get("text") or "")[:200]
+
+        if status != 200:
+            if status in (403, 503) and self._looks_like_cloudflare_interstitial_html(text):
+                await self._ensure_page_past_cloudflare(page)
+                resp = await self._browser_fetch_json(
+                    page,
+                    status_url,
+                    method="GET",
+                    headers=self._newapi_build_browser_headers(origin, f"{origin}/console/personal", api_user),
+                )
+                status = int(resp.get("status", 0) or 0)
+                text = (resp.get("text") or "")[:200]
+            if status:
+                return {"success": False, "error": f"HTTP {status}: {text}", "status_code": status}
+            return {"success": False, "error": f"request_error: {resp.get('text')}"}
+
+        data = resp.get("json")
+        if not isinstance(data, dict):
+            return {"success": False, "error": "response_not_json"}
+        if not data.get("success"):
+            msg = data.get("message") or data.get("msg") or ""
+            return {"success": False, "error": msg or "response_success=false"}
+
+        payload = data.get("data", {}) or {}
+        can_check_in = payload.get("can_check_in")
+        return {"success": True, "can_check_in": can_check_in, "data": payload}
+
+    async def _newapi_daily_check_in_via_personal(self, page, origin: str, api_user: str | int) -> tuple[bool, str]:
+        """在 `/console/personal` 页面点击“立即签到”，并通过 status API/DOM 文案确认结果。"""
+        try:
+            await page.goto(f"{origin}/console/personal", wait_until="domcontentloaded")
+        except Exception:
+            await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+        await self._ensure_page_past_cloudflare(page)
+
+        status_before = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
+        try:
+            if (
+                isinstance(status_before, dict)
+                and status_before.get("success")
+                and status_before.get("can_check_in") is False
+            ):
+                return True, "今日已签到"
+        except Exception:
+            pass
+
+        try:
+            already_btn = await page.query_selector('button:has-text("今日已签到")')
+            if already_btn:
+                return True, "今日已签到"
+        except Exception:
+            pass
+
+        try:
+            btn = await page.query_selector('button:has-text("立即签到")')
+        except Exception:
+            btn = None
+
+        if not btn:
+            if isinstance(status_before, dict) and status_before.get("success"):
+                if status_before.get("can_check_in") is False:
+                    return True, "今日已签到"
+                if status_before.get("can_check_in") is True:
+                    await self._take_screenshot(page, "newapi_checkin_button_missing")
+                    return False, "未找到“立即签到”按钮"
+            await self._take_screenshot(page, "newapi_checkin_button_missing")
+            return False, "未找到签到按钮"
+
+        try:
+            disabled = await btn.get_attribute("disabled")
+            aria_disabled = await btn.get_attribute("aria-disabled")
+            if disabled is not None or aria_disabled == "true":
+                body_text = await page.evaluate("() => document.body?.innerText || ''")
+                if "今日已签到" in (body_text or ""):
+                    return True, "今日已签到"
+                status2 = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
+                if isinstance(status2, dict) and status2.get("success") and status2.get("can_check_in") is False:
+                    return True, "今日已签到"
+                return False, "签到按钮不可用"
+        except Exception:
+            pass
+
+        try:
+            await btn.click()
+        except Exception:
+            try:
+                await page.evaluate(
+                    """() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        const target = buttons.find(b => (b.innerText || '').includes('立即签到'));
+                        if (target) target.click();
+                    }"""
+                )
+            except Exception:
+                await self._take_screenshot(page, "newapi_checkin_click_failed")
+                return False, "点击签到失败"
+
+        await page.wait_for_timeout(1200)
+        for _ in range(10):
+            try:
+                status_after = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
+                if (
+                    isinstance(status_after, dict)
+                    and status_after.get("success")
+                    and status_after.get("can_check_in") is False
+                ):
+                    return True, "签到成功"
+            except Exception:
+                pass
+
+            try:
+                recheck = await page.evaluate(
+                    """() => {
+                        try {
+                            const bodyText = document.body?.innerText || '';
+                            if (bodyText.includes('今日已签到') || bodyText.includes('签到成功')) {
+                                return { ok: true, msg: '签到成功' };
+                            }
+                            const buttons = Array.from(document.querySelectorAll('button'));
+                            if (buttons.some(b => ((b.innerText || '').includes('今日已签到')))) {
+                                return { ok: true, msg: '今日已签到' };
+                            }
+                            return { ok: false };
+                        } catch (e) { return { ok: false, err: e.message }; }
+                    }"""
+                )
+                if isinstance(recheck, dict) and recheck.get("ok"):
+                    return True, str(recheck.get("msg") or "签到成功")
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(1000)
+
+        await self._take_screenshot(page, "newapi_checkin_status_unclear")
+        return False, "签到状态不明确"
+
     async def _runanytime_check_in_via_fuli_and_topup(
         self,
         runanytime_cookies: dict,
@@ -2173,6 +2386,123 @@ class CheckIn:
                 except Exception:
                     pass
         # runanytime 兑换/余额走浏览器上下文，不需要额外 httpx client
+
+    async def _ccode_check_in_via_console_personal(
+        self,
+        ccode_cookies: dict,
+        api_user: str | int,
+        linuxdo_cache_file_path: str,
+    ) -> tuple[bool, dict]:
+        """ccode 有间公益签到：使用 newapi 通用的 `/console/personal`“立即签到”流程（不走福利站转盘）。"""
+        origin = (self.provider_config.origin or "").rstrip("/")
+        if not origin:
+            return False, {"error": "missing provider origin"}
+
+        async with AsyncCamoufox(
+            headless=False,
+            humanize=True,
+            locale="zh-CN",
+            geoip=True if self.camoufox_proxy_config else False,
+            proxy=self.camoufox_proxy_config,
+            disable_coop=True,
+            config={"forceScopeAccess": True},
+            i_know_what_im_doing=True,
+        ) as browser:
+            storage_state = (
+                linuxdo_cache_file_path
+                if linuxdo_cache_file_path and os.path.exists(linuxdo_cache_file_path)
+                else None
+            )
+            context = await browser.new_context(storage_state=storage_state)
+            page = await context.new_page()
+            try:
+                try:
+                    cached_cf = self._load_cf_cookies_from_cache() or []
+                    if cached_cf:
+                        await context.add_cookies(cached_cf)
+                except Exception:
+                    pass
+
+                try:
+                    await context.add_cookies(self._cookie_dict_to_browser_cookies(ccode_cookies or {}, origin))
+                except Exception:
+                    pass
+
+                try:
+                    await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+                except Exception:
+                    await page.goto(origin, wait_until="domcontentloaded")
+                await self._ensure_page_past_cloudflare(page)
+
+                try:
+                    self._save_cf_cookies_to_cache(await context.cookies())
+                except Exception:
+                    pass
+
+                before_info = await self._newapi_get_user_info_via_browser(page, origin, api_user)
+                checkin_ok, checkin_msg = await self._newapi_daily_check_in_via_personal(page, origin, api_user)
+                after_info = await self._newapi_get_user_info_via_browser(page, origin, api_user)
+
+                before_quota = before_info.get("quota") if isinstance(before_info, dict) else None
+                after_quota = after_info.get("quota") if isinstance(after_info, dict) else None
+                before_used = before_info.get("used_quota") if isinstance(before_info, dict) else None
+                after_used = after_info.get("used_quota") if isinstance(after_info, dict) else None
+
+                def _fmt_quota(v) -> str:
+                    if isinstance(v, (int, float)):
+                        return f"🏃‍♂️{v:.2f}"
+                    return "N/A"
+
+                cur_quota = after_quota if isinstance(after_quota, (int, float)) else before_quota
+                cur_used = after_used if isinstance(after_used, (int, float)) else before_used
+                if not isinstance(cur_used, (int, float)):
+                    cur_used = 0.0
+
+                quota_increased = (
+                    isinstance(before_quota, (int, float))
+                    and isinstance(after_quota, (int, float))
+                    and after_quota > before_quota
+                )
+                signed_done = bool(checkin_ok) or (checkin_msg in ("今日已签到", "签到成功"))
+                overall_success = signed_done or quota_increased
+
+                summary = (
+                    f"CCode 签到: {checkin_msg} | "
+                    f"当前余额: {_fmt_quota(cur_quota)} | 历史消耗: {_fmt_quota(cur_used)} | "
+                    f"变动: {_fmt_quota(before_quota)} -> {_fmt_quota(after_quota)}"
+                )
+
+                base_info = None
+                if isinstance(after_info, dict) and after_info.get("success"):
+                    base_info = after_info
+                elif isinstance(before_info, dict) and before_info.get("success"):
+                    base_info = before_info
+                else:
+                    base_info = {"success": False, "quota": 0, "used_quota": 0, "display": ""}
+
+                user_info = dict(base_info)
+                user_info.update({"success": overall_success, "display": summary})
+
+                if isinstance(cur_quota, (int, float)):
+                    user_info["quota"] = float(cur_quota)
+                if isinstance(cur_used, (int, float)):
+                    user_info["used_quota"] = float(cur_used)
+
+                if not overall_success:
+                    return False, user_info
+                return True, user_info
+            except Exception as e:
+                try:
+                    await self._take_screenshot(page, "ccode_checkin_flow_error")
+                except Exception:
+                    pass
+                return False, {"error": f"ccode checkin flow error: {e}"}
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                await context.close()
 
     def _check_and_handle_response(self, response: httpx.Response, context: str = "response") -> dict | None:
         """检查响应类型，如果是 HTML 则保存为文件，否则返回 JSON 数据
@@ -3351,12 +3681,15 @@ class CheckIn:
                             print(f"⚠️ {self.account_name}: Failed to add cookies to browser context: {e}")
 
                     # 进入控制台/签到页
-                    paths = []
+                    paths: list[str] = []
                     configured = getattr(self.provider_config, "checkin_page_path", None)
                     if configured:
                         paths.append(str(configured))
-                    # elysiver: 签到状态只在 /console/checkin 页面可确认，不需要回退到 /console
-                    if self.provider_config.name != "elysiver":
+
+                    # newapi 通用签到入口：/console/personal 右侧“立即签到”
+                    if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
+                        paths.extend(["/console/personal", "/console"])
+                    else:
                         paths.extend(["/console/checkin", "/console"])
 
                     seen: set[str] = set()
@@ -3472,7 +3805,19 @@ class CheckIn:
                                 pass
 
                         # DOM 判定：按钮"今日已签到"通常 disabled；同时兼容文本提示
-                        # elysiver 专用检测：等待页面完全加载后检测签到按钮状态
+                        # newapi 通用签到模式：直接在 /console/personal 尝试点击并确认（不依赖 elysiver 旧页面实现）
+                        if (
+                            getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal"
+                            and api_user is not None
+                        ):
+                            ok, msg = await self._newapi_daily_check_in_via_personal(page, origin, api_user)
+                            if ok:
+                                print(f"✅ {self.account_name}: Check-in confirmed by newapi console flow: {msg}")
+                                return {"success": True, "checked_in": True}
+                            print(f"⚠️ {self.account_name}: newapi console check-in not confirmed: {msg}")
+                            return {"success": False, "checked_in": False, "error": msg}
+
+                        # elysiver 旧专用检测：等待页面完全加载后检测签到按钮状态
                         if self.provider_config.name == "elysiver":
                             # elysiver: 再次检测并处理 Cloudflare 全屏挑战
                             cf_solved = await self._elysiver_handle_cloudflare_challenge(page)
@@ -3833,8 +4178,8 @@ class CheckIn:
         self, cookies: dict, api_user: str | int, needs_check_in: bool | None = None
     ) -> tuple[bool, dict]:
         """使用已有 cookies 执行签到操作"""
-        if self.provider_config.name == "runanytime":
-            return False, {"error": "runanytime 新签到方式需要 linux.do 登录并在 /console/personal 执行签到，cookies 方式暂不支持"}
+        if self.provider_config.name in {"runanytime", "ccode"}:
+            return False, {"error": f"{self.provider_config.name} 新签到方式需要 linux.do 登录并在 /console/personal 执行签到，cookies 方式暂不支持"}
 
         print(
             f"ℹ️ {self.account_name}: Executing check-in with existing cookies (using proxy: {'true' if self.http_proxy_config else 'false'})"
@@ -3992,7 +4337,7 @@ class CheckIn:
                                 "error": "Check-in status indicates not checked in yet (can_check_in=true)"
                             }
 
-                # API 被 Cloudflare/WAF 拦截时：回退到浏览器 DOM 确认（例如 elysiver /console/checkin 显示“今日已签到”）
+                # API 被 Cloudflare/WAF 拦截时：回退到浏览器 DOM 确认（例如 newapi 控制台 /console/personal 显示“今日已签到”）
                 try:
                     camoufox_cookies = self._cookie_dict_to_browser_cookies(cookies, self.provider_config.origin)
                     confirm = await self.confirm_check_in_with_browser(camoufox_cookies, api_user)
@@ -4278,13 +4623,21 @@ class CheckIn:
                 user_cookies = result_data["cookies"]
                 api_user = result_data["api_user"]
 
-                # runanytime：改为 fuli 获取兑换码 + 控制台兑换
+                # runanytime：控制台每日签到 + fuli 转盘兑换
                 if self.provider_config.name == "runanytime":
                     return await self._runanytime_check_in_via_fuli_and_topup(
                         runanytime_cookies=user_cookies,
                         api_user=api_user,
                         linuxdo_username=username,
                         linuxdo_password=password,
+                        linuxdo_cache_file_path=cache_file_path,
+                    )
+
+                # ccode：newapi 通用控制台每日签到（不走福利站转盘）
+                if self.provider_config.name == "ccode":
+                    return await self._ccode_check_in_via_console_personal(
+                        ccode_cookies=user_cookies,
+                        api_user=api_user,
                         linuxdo_cache_file_path=cache_file_path,
                     )
 
@@ -4347,13 +4700,21 @@ class CheckIn:
                                     f"{list(user_cookies.keys())}"
                                 )
 
-                                # runanytime：改为 fuli 获取兑换码 + 控制台兑换
+                                # runanytime：控制台每日签到 + fuli 转盘兑换
                                 if self.provider_config.name == "runanytime":
                                     return await self._runanytime_check_in_via_fuli_and_topup(
                                         runanytime_cookies=user_cookies,
                                         api_user=api_user,
                                         linuxdo_username=username,
                                         linuxdo_password=password,
+                                        linuxdo_cache_file_path=cache_file_path,
+                                    )
+
+                                # ccode：newapi 通用控制台每日签到（不走福利站转盘）
+                                if self.provider_config.name == "ccode":
+                                    return await self._ccode_check_in_via_console_personal(
+                                        ccode_cookies=user_cookies,
+                                        api_user=api_user,
                                         linuxdo_cache_file_path=cache_file_path,
                                     )
 
