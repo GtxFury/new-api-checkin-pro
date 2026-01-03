@@ -2971,7 +2971,16 @@ class CheckIn:
 
                 try:
                     print(f"ℹ️ {self.account_name}: Access status page to get status from localStorage")
-                    await page.goto(self.provider_config.get_login_url(), wait_until="networkidle")
+                    try:
+                        await page.goto(self.provider_config.get_login_url(), wait_until="domcontentloaded")
+                    except Exception:
+                        await page.goto(self.provider_config.origin, wait_until="domcontentloaded")
+
+                    # 先尽量通过 Cloudflare interstitial，避免后续一直拿不到 status
+                    try:
+                        await self._ensure_page_past_cloudflare(page)
+                    except Exception:
+                        pass
 
                     try:
                         await page.wait_for_function('document.readyState === "complete"', timeout=5000)
@@ -2986,6 +2995,14 @@ class CheckIn:
                     # 从 localStorage 获取 status
                     status_data = None
                     try:
+                        # SPA 可能需要一点时间把 /api/status 写入 localStorage
+                        try:
+                            await page.wait_for_function(
+                                "() => !!localStorage.getItem('status')",
+                                timeout=15000,
+                            )
+                        except Exception:
+                            pass
                         status_str = await page.evaluate("() => localStorage.getItem('status')")
                         if status_str:
                             status_data = json.loads(status_str)
@@ -2994,6 +3011,15 @@ class CheckIn:
                             print(f"⚠️ {self.account_name}: No status found in localStorage")
                     except Exception as e:
                         print(f"⚠️ {self.account_name}: Error reading status from localStorage: {e}")
+
+                    # 缓存 Cloudflare 相关 cookies，减少后续 HTTP 403 概率
+                    try:
+                        ctx = page.context
+                        cookies = await ctx.cookies()
+                        if cookies:
+                            self._save_cf_cookies_to_cache(cookies)
+                    except Exception:
+                        pass
 
                     return status_data
 
@@ -3025,36 +3051,47 @@ class CheckIn:
 
             response = client.get(self.provider_config.get_status_url(), headers=headers, timeout=30)
 
+            async def _fallback_from_browser(reason: str) -> dict:
+                print(
+                    f"⚠️ {self.account_name}: Status API blocked ({reason}), trying to get client_id from browser localStorage"
+                )
+                try:
+                    status_data = await self.get_status_with_browser()
+                except Exception as browser_err:
+                    return {
+                        "success": False,
+                        "error": f"Failed to get client id: browser fallback error: {browser_err}",
+                    }
+
+                if not status_data or not isinstance(status_data, dict):
+                    return {
+                        "success": False,
+                        "error": "Failed to get client id: browser fallback returned empty status",
+                    }
+
+                # localStorage 的 status 可能是 data 本身，也可能是 {success,data}
+                data_obj = status_data.get("data") if isinstance(status_data.get("data"), dict) else status_data
+                oauth_flag = data_obj.get(f"{provider}_oauth")
+                client_id = data_obj.get(f"{provider}_client_id") or ""
+
+                if oauth_flag is False:
+                    return {
+                        "success": False,
+                        "error": f"{provider} OAuth is not enabled.",
+                    }
+
+                if client_id:
+                    return {"success": True, "client_id": client_id}
+
+                return {
+                    "success": False,
+                    "error": "Failed to get client id: browser fallback status missing client_id",
+                }
+
             if response.status_code == 200:
                 data = self._check_and_handle_response(response, f"get_auth_client_id_{provider}")
                 if data is None:
-
-                    # 尝试从浏览器 localStorage 获取状态
-                    # print(f"ℹ️ {self.account_name}: Getting status from browser")
-                    # try:
-                    #     status_data = await self.get_status_with_browser()
-                    #     if status_data:
-                    #         oauth = status_data.get(f"{provider}_oauth", False)
-                    #         if not oauth:
-                    #             return {
-                    #                 "success": False,
-                    #                 "error": f"{provider} OAuth is not enabled.",
-                    #             }
-
-                    #         client_id = status_data.get(f"{provider}_client_id", "")
-                    #         if client_id:
-                    #             print(f"✅ {self.account_name}: Got client ID from localStorage: " f"{client_id}")
-                    #             return {
-                    #                 "success": True,
-                    #                 "client_id": client_id,
-                    #             }
-                    # except Exception as browser_err:
-                    #     print(f"⚠️ {self.account_name}: Failed to get status from browser: " f"{browser_err}")
-
-                    return {
-                        "success": False,
-                        "error": "Failed to get client id: Invalid response type (saved to logs)",
-                    }
+                    return await _fallback_from_browser("invalid response type")
 
                 if data.get("success"):
                     status_data = data.get("data", {})
@@ -3066,6 +3103,8 @@ class CheckIn:
                         }
 
                     client_id = status_data.get(f"{provider}_client_id", "")
+                    if not client_id:
+                        return await _fallback_from_browser("missing client_id in /api/status")
                     return {
                         "success": True,
                         "client_id": client_id,
@@ -3076,6 +3115,11 @@ class CheckIn:
                         "success": False,
                         "error": f"Failed to get client id: {error_msg}",
                     }
+
+            # /api/status 403/503 等：常见是 Cloudflare/WAF 拦截，回退到浏览器读取 localStorage
+            if response.status_code in (401, 403, 429, 503):
+                return await _fallback_from_browser(f"HTTP {response.status_code}")
+
             return {
                 "success": False,
                 "error": f"Failed to get client id: HTTP {response.status_code}",
