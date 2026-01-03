@@ -4771,6 +4771,119 @@ class CheckIn:
                 user_cookies = result_data["cookies"]
                 api_user = result_data["api_user"]
 
+                # elysiver 特殊处理：
+                # 部分情况下 Linux.do 授权页显示成功，但 provider 端 session 实际未建立（跳回 /login?expired=true）。
+                # 为避免影响其它站点，这里仅对 elysiver 做一次“浏览器同源校验 + 失败后强制重登”的兜底。
+                if self.provider_config.name == "elysiver":
+                    async def _elysiver_session_ok() -> bool:
+                        origin = (self.provider_config.origin or "").rstrip("/")
+                        if not origin:
+                            return False
+
+                        async with AsyncCamoufox(
+                            headless=False,
+                            humanize=True,
+                            locale="zh-CN",
+                            geoip=True if self.camoufox_proxy_config else False,
+                            proxy=self.camoufox_proxy_config,
+                            disable_coop=True,
+                            config={"forceScopeAccess": True},
+                            i_know_what_im_doing=True,
+                        ) as browser:
+                            storage_state = cache_file_path if (cache_file_path and os.path.exists(cache_file_path)) else None
+                            context = await browser.new_context(storage_state=storage_state)
+                            page = await context.new_page()
+                            try:
+                                # 注入缓存的 Cloudflare cookies，减少被 interstitial 拦截概率
+                                try:
+                                    cached_cf = self._load_cf_cookies_from_cache() or []
+                                    if cached_cf:
+                                        await context.add_cookies(cached_cf)
+                                except Exception:
+                                    pass
+
+                                # 仅用于校验：不强依赖 cookies 字典（storage_state 优先），但可补充一份 host-only cookie
+                                try:
+                                    if isinstance(user_cookies, dict) and user_cookies:
+                                        await context.add_cookies(self._cookie_dict_to_browser_cookies(user_cookies, origin))
+                                except Exception:
+                                    pass
+
+                                try:
+                                    await page.goto(f"{origin}/console/personal", wait_until="domcontentloaded")
+                                except Exception:
+                                    await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+                                await self._ensure_page_past_cloudflare(page)
+
+                                cur = page.url or ""
+                                if "/login" in cur:
+                                    return False
+
+                                # 同源 fetch /api/user/self：若 401/未登录则判定 session 无效
+                                try:
+                                    resp = await self._browser_fetch_json(
+                                        page,
+                                        f"{origin}/api/user/self",
+                                        method="GET",
+                                        headers={
+                                            "Accept": "application/json, text/plain, */*",
+                                            "Origin": origin,
+                                            "Referer": f"{origin}/console",
+                                            self.provider_config.api_user_key: str(api_user),
+                                        },
+                                    )
+                                    status = int(resp.get("status", 0) or 0)
+                                    if status == 401:
+                                        return False
+                                    if status == 200 and isinstance(resp.get("json"), dict):
+                                        j = resp.get("json") or {}
+                                        if isinstance(j, dict) and j.get("success"):
+                                            return True
+                                except Exception:
+                                    pass
+
+                                # 兜底：不跳回登录页则暂视为可继续（后续签到流程会再判定）
+                                return True
+                            finally:
+                                try:
+                                    await page.close()
+                                except Exception:
+                                    pass
+                                await context.close()
+
+                    try:
+                        if not await _elysiver_session_ok():
+                            print(f"⚠️ {self.account_name}: elysiver session invalid after OAuth, forcing fresh login once...")
+                            # 删除缓存文件，强制重新登录
+                            try:
+                                if cache_file_path and os.path.exists(cache_file_path):
+                                    os.remove(cache_file_path)
+                            except Exception:
+                                pass
+
+                            retry_auth_state_result = await self.get_auth_state(
+                                client=client,
+                                headers=headers,
+                            )
+                            if retry_auth_state_result and retry_auth_state_result.get("success"):
+                                success2, result2 = await linuxdo.signin(
+                                    client_id=client_id_result["client_id"],
+                                    auth_state=retry_auth_state_result["state"],
+                                    auth_cookies=retry_auth_state_result.get("cookies", []),
+                                    cache_file_path=cache_file_path,
+                                )
+                                if success2 and "cookies" in result2 and "api_user" in result2:
+                                    user_cookies = result2["cookies"]
+                                    api_user = result2["api_user"]
+                                    if not await _elysiver_session_ok():
+                                        return False, {"error": "elysiver session invalid after OAuth (retry failed)"}
+                                else:
+                                    return False, result2 if isinstance(result2, dict) else {"error": "elysiver re-login failed"}
+                            else:
+                                return False, {"error": "Failed to get Linux.do auth state for elysiver retry"}
+                    except Exception as e:
+                        return False, {"error": f"elysiver session verify error: {e}"}
+
                 # runanytime：控制台每日签到 + fuli 转盘兑换
                 if self.provider_config.name == "runanytime":
                     return await self._runanytime_check_in_via_fuli_and_topup(
