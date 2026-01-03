@@ -4771,6 +4771,11 @@ class CheckIn:
                 user_cookies = result_data["cookies"]
                 api_user = result_data["api_user"]
 
+                # elysiver：如果登录流程已经在浏览器中完成了控制台签到/并解析出余额信息，
+                # 则视为本次认证成功，避免后续“新上下文 session 校验/强制重登”把一次成功变成失败。
+                if self.provider_config.name == "elysiver" and "user_info" in result_data:
+                    return True, result_data["user_info"]
+
                 # elysiver 特殊处理：
                 # 部分情况下 Linux.do 授权页显示成功，但 provider 端 session 实际未建立（跳回 /login?expired=true）。
                 # 为避免影响其它站点，这里仅对 elysiver 做一次“浏览器同源校验 + 失败后强制重登”的兜底。
