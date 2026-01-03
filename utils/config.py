@@ -209,9 +209,30 @@ class AppConfig:
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
             ),
+            "hotaru": ProviderConfig(
+                name="hotaru",
+                origin="https://api.hotaruapi.top",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                check_in_status_path="/api/user/check_in_status",
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
+            ),
+            # 兼容旧名称：ccode（有间公益）当前已迁移为 hotaru
             "ccode": ProviderConfig(
                 name="ccode",
-                origin="https://api.ccode.icu",
+                origin="https://api.hotaruapi.top",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
