@@ -19,6 +19,7 @@ from camoufox.async_api import AsyncCamoufox
 
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
+from utils.redact import redact_url_for_log, redact_value_for_log
 
 # 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
 try:
@@ -293,7 +294,8 @@ class LinuxDoSignIn:
 			final_callback_url = parsed_cb._replace(query=final_query).geturl()
 
 			print(
-				f"ℹ️ {self.account_name}: Fast-calling Linux.do callback via browser fetch: {final_callback_url}"
+				f"ℹ️ {self.account_name}: Fast-calling Linux.do callback via browser fetch: "
+				f"{redact_url_for_log(final_callback_url)}"
 			)
 
 			# 某些站点会校验 api_user header，这里统一以 -1 作为“未登录”占位
@@ -372,7 +374,7 @@ class LinuxDoSignIn:
 
 			print(
 				f"ℹ️ {self.account_name}: Calling Linux.do callback via browser navigation (helper): "
-				f"{final_callback_url}"
+				f"{redact_url_for_log(final_callback_url)}"
 			)
 
 			# 允许重试（应对 CF interstitial / WAF 429）
@@ -1075,11 +1077,13 @@ class LinuxDoSignIn:
 				# 如果存在缓存，先尝试直接访问授权页面
 				if os.path.exists(cache_file_path):
 					try:
-						print(f"ℹ️ {self.account_name}: Checking login status at {oauth_url}")
+						print(
+							f"ℹ️ {self.account_name}: Checking login status at {redact_url_for_log(oauth_url)}"
+						)
 						response = await page.goto(oauth_url, wait_until="domcontentloaded")
 						print(
 							f"ℹ️ {self.account_name}: redirected to app page "
-							f"{response.url if response else 'N/A'}"
+							f"{redact_url_for_log(response.url) if response else 'N/A'}"
 						)
 						await self._save_page_content_to_file(page, "sign_in_check")
 
@@ -1246,7 +1250,10 @@ class LinuxDoSignIn:
 
 					# 登录后访问授权页面
 					try:
-						print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
+						print(
+							f"ℹ️ {self.account_name}: Navigating to authorization page: "
+							f"{redact_url_for_log(oauth_url)}"
+						)
 						await page.goto(oauth_url, wait_until="domcontentloaded")
 					except Exception as e:
 						print(f"❌ {self.account_name}: Failed to navigate to authorization page: {e}")
@@ -1320,7 +1327,8 @@ class LinuxDoSignIn:
 						# 优先使用“带 code 的最早一次跳转”，否则回退到当前 URL
 						oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
 						print(
-							f"ℹ️ {self.account_name}: Captured OAuth redirect URL: {oauth_redirect_url}"
+							f"ℹ️ {self.account_name}: Captured OAuth redirect URL: "
+							f"{redact_url_for_log(oauth_redirect_url)}"
 						)
 					except Exception as nav_err:
 						print(
@@ -1731,12 +1739,12 @@ class LinuxDoSignIn:
 					if oauth_redirect_url:
 						print(
 							f"ℹ️ {self.account_name}: Using captured OAuth redirect URL for code parsing: "
-							f"{oauth_redirect_url}"
+							f"{redact_url_for_log(oauth_redirect_url)}"
 						)
 					else:
 						print(
 							f"ℹ️ {self.account_name}: No captured OAuth redirect URL, fallback to current page URL: "
-							f"{page.url}"
+							f"{redact_url_for_log(page.url)}"
 						)
 
 					parsed_url = urlparse(source_url)
@@ -1745,7 +1753,10 @@ class LinuxDoSignIn:
 					code_values = query_params.get("code")
 					code = code_values[0] if code_values else None
 					if code:
-						print(f"✅ {self.account_name}: OAuth code received: {code}")
+						print(
+							f"✅ {self.account_name}: OAuth code received: "
+							f"{redact_value_for_log(code) or '***'}"
+						)
 					else:
 						print(f"❌ {self.account_name}: OAuth failed, no code in callback")
 						return False, {
@@ -1972,7 +1983,7 @@ class LinuxDoSignIn:
 
 							print(
 								f"ℹ️ {self.account_name}: Calling Linux.do callback via browser navigation: "
-								f"{final_callback_url}"
+								f"{redact_url_for_log(final_callback_url)}"
 							)
 
 							status = 0
@@ -1982,7 +1993,10 @@ class LinuxDoSignIn:
 								response = await page.goto(final_callback_url, wait_until="domcontentloaded")
 
 								current_url = page.url
-								print(f"ℹ️ {self.account_name}: Callback page current url is {current_url}")
+								print(
+									f"ℹ️ {self.account_name}: Callback page current url is "
+									f"{redact_url_for_log(current_url)}"
+								)
 
 								# 读取本次响应的状态码和正文文本
 								status = 0
