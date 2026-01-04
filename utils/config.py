@@ -35,6 +35,12 @@ class ProviderConfig:
     checkin_page_path: str | None = None
     # 可选：newapi 通用控制台签到模式（/console/personal 点击“立即签到”）
     checkin_mode: Literal["newapi_console_personal"] | None = None
+    # Linux.do OAuth 回调策略：
+    # - auto: 维持默认兼容逻辑（按站点特性/历史行为自动选择）
+    # - fast_fetch: 在浏览器内 fetch 调用 /api/oauth/linuxdo
+    # - navigation: 浏览器导航到 /api/oauth/linuxdo（更容易通过部分 WAF/CF）
+    # - spa: 依赖站点同源前端 /oauth/linuxdo 完成回调并写入 localStorage
+    linuxdo_callback_mode: Literal["auto", "fast_fetch", "navigation", "spa"] = "auto"
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -63,6 +69,7 @@ class ProviderConfig:
             check_in_status_path=data.get("check_in_status_path"),
             checkin_page_path=data.get("checkin_page_path"),
             checkin_mode=data.get("checkin_mode"),
+            linuxdo_callback_mode=data.get("linuxdo_callback_mode", "auto"),
         )
 
     def needs_waf_cookies(self) -> bool:
@@ -169,6 +176,8 @@ class AppConfig:
                 # 该站点不需要 WAF cookies
                 bypass_method=None,
                 turnstile_check=False,
+                # 该站点需要 SPA 完成回调建立 session/localStorage
+                linuxdo_callback_mode="spa",
             ),
             "agentrouter": ProviderConfig(
                 name="agentrouter",
@@ -290,6 +299,29 @@ class AppConfig:
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
                 checkin_mode="newapi_console_personal",
+                # 该站点更依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
+                linuxdo_callback_mode="spa",
+            ),
+            "daiju": ProviderConfig(
+                name="daiju",
+                origin="https://api.daiju.live",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 从 /api/status 获取，避免写死导致配置过期
+                linuxdo_client_id=None,
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                check_in_status_path="/api/user/check_in_status",
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
             ),
             # 兼容旧名称：ccode（有间公益）当前已迁移为 hotaru
             "ccode": ProviderConfig(
@@ -336,6 +368,8 @@ class AppConfig:
                 # newapi 通用签到入口：/console/personal 右侧“立即签到”
                 checkin_page_path="/console/personal",
                 checkin_mode="newapi_console_personal",
+                # 该站点必须依赖 SPA 完成回调（避免回调接口触发 CF/WAF 或 session 未建立）
+                linuxdo_callback_mode="spa",
             ),
         }
 

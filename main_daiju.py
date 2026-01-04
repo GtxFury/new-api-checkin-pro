@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-kfc 自动签到脚本（独立入口）
+daiju（小呆公益站）自动签到脚本（独立入口）
 """
 
 import asyncio
@@ -18,56 +18,50 @@ from utils.notify import notify
 
 load_dotenv(override=True)
 
-BALANCE_HASH_FILE = "balance_hash_kfc.txt"
-CACHE_DIR = os.path.join("storage-states", "kfc")
+BALANCE_HASH_FILE = "balance_hash_daiju.txt"
+CACHE_DIR = os.path.join("storage-states", "daiju")
 
 
-def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
-    accounts_str = os.getenv("ACCOUNTS_KFC")
+def _load_accounts() -> list[AccountConfig] | None:
+    accounts_str = os.getenv("ACCOUNTS_DAIJU")
     if not accounts_str:
-        msg = "❌ ACCOUNTS_KFC environment variable not found"
-        print(msg)
-        return None, msg
+        print("❌ ACCOUNTS_DAIJU environment variable not found")
+        return None
 
     try:
         data = json.loads(accounts_str)
     except json.JSONDecodeError as e:
-        msg = f"❌ Failed to parse ACCOUNTS_KFC as JSON: {e}"
-        print(msg)
-        return None, msg
+        print(f"❌ Failed to parse ACCOUNTS_DAIJU as JSON: {e}")
+        return None
 
     if isinstance(data, dict):
         accounts_data = [data]
     elif isinstance(data, list):
         accounts_data = data
     else:
-        msg = "❌ ACCOUNTS_KFC must be a JSON object or array"
-        print(msg)
-        return None, msg
+        print("❌ ACCOUNTS_DAIJU must be a JSON object or array")
+        return None
 
     accounts: list[AccountConfig] = []
     for i, account in enumerate(accounts_data):
         if not isinstance(account, dict):
-            msg = f"❌ Account {i + 1} is not a valid object"
-            print(msg)
-            return None, msg
+            print(f"❌ Account {i + 1} is not a valid object")
+            return None
 
         linuxdo = account.get("linux.do")
         if not isinstance(linuxdo, dict) or not linuxdo.get("username") or not linuxdo.get("password"):
-            msg = f"❌ Account {i + 1} missing linux.do credentials"
-            print(msg)
-            return None, msg
+            print(f"❌ Account {i + 1} missing linux.do credentials")
+            return None
 
-        # 默认强制 provider=kfc（也允许用户显式填写）
-        account.setdefault("provider", "kfc")
+        # 默认强制 provider=daiju（也允许用户显式填写）
+        account.setdefault("provider", "daiju")
 
         accounts.append(AccountConfig.from_dict(account, i))
 
     if not accounts:
-        msg = "❌ No valid accounts found"
-        print(msg)
-        return None, msg
-    return accounts, None
+        print("❌ No valid accounts found")
+        return None
+    return accounts
 
 
 def _load_global_proxy() -> dict | None:
@@ -109,34 +103,18 @@ def _generate_balance_hash(balances: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _notify_fatal(title: str, message: str) -> None:
-    try:
-        content = "\n\n".join(
-            [
-                f"🕓 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                message,
-            ]
-        )
-        notify.push_message(title, content, msg_type="text")
-    except Exception:
-        pass
-
-
 async def main() -> int:
-    print("🚀 kfc 自动签到脚本启动")
+    print("🚀 daiju（小呆公益站）自动签到脚本启动")
     print(f"🕒 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     app_config = AppConfig.load_from_env()
-    provider = app_config.get_provider("kfc")
+    provider = app_config.get_provider("daiju")
     if not provider:
-        msg = "❌ Provider 'kfc' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置"
-        print(msg)
-        _notify_fatal("kfc 签到告警", msg)
+        print("❌ Provider 'daiju' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置")
         return 1
 
-    accounts, accounts_err = _load_accounts()
+    accounts = _load_accounts()
     if not accounts:
-        _notify_fatal("kfc 签到告警", accounts_err or "❌ ACCOUNTS_KFC 未配置或格式不正确")
         return 1
 
     global_proxy = _load_global_proxy()
@@ -210,7 +188,7 @@ async def main() -> int:
     if need_notify and notification_lines:
         summary = [
             "-------------------------------",
-            "📢 kfc 签到统计:",
+            "📢 daiju（小呆公益站）签到统计:",
             f"🔵 Success: {success_count}/{total_count}",
             f"🔴 Failed: {total_count - success_count}/{total_count}",
         ]
@@ -221,7 +199,7 @@ async def main() -> int:
                 "\n".join(summary),
             ]
         )
-        title = "kfc 签到成功" if success_count == total_count else "kfc 签到告警"
+        title = "daiju 签到成功" if success_count == total_count else "daiju 签到告警"
         print(content)
         notify.push_message(title, content, msg_type="text")
 

@@ -199,17 +199,78 @@ class LinuxDoSignIn:
 		except Exception:
 			return False
 
-	def _should_skip_fast_callback(self) -> bool:
-		"""判断是否应该跳过 fast callback，让浏览器自然完成 OAuth 流程。
-
-		wzw 站点需要让前端 SPA 自行处理 OAuth 回调建立 session，
-		而不是主动调用回调接口（会导致 session 不正确，后续签到 401）。
-		"""
-		return self.provider_config.name == "wzw"
+	def _linuxdo_callback_mode(self) -> str:
+		"""获取 Linux.do OAuth 回调策略（来自 provider 配置）。"""
+		try:
+			mode = str(getattr(self.provider_config, "linuxdo_callback_mode", "auto") or "auto").strip().lower()
+		except Exception:
+			mode = "auto"
+		if mode in {"auto", "fast_fetch", "navigation", "spa"}:
+			return mode
+		return "auto"
 
 	def _is_wzw_provider(self) -> bool:
 		"""判断是否是 wzw 站点"""
 		return self.provider_config.name == "wzw"
+
+	async def _complete_oauth_via_spa(
+		self,
+		page,
+		code: str,
+		auth_state: str | None,
+	) -> tuple[bool, dict]:
+		"""依赖站点同源前端 /oauth/linuxdo 完成 OAuth 回调，并从 localStorage 读取 api_user。"""
+		origin = self.provider_config.origin
+		state_q = auth_state or ""
+		try:
+			cur = page.url or ""
+		except Exception:
+			cur = ""
+
+		# 确保进入前端回调路由
+		if "/oauth/linuxdo" not in cur:
+			try:
+				await page.goto(
+					f"{origin}/oauth/linuxdo?code={quote(code, safe='')}&state={quote(str(state_q), safe='')}",
+					wait_until="domcontentloaded",
+				)
+			except Exception:
+				pass
+
+		# 等待 SPA 写入 localStorage；若失败，导航 /console 触发初始化
+		try:
+			await page.wait_for_function(
+				"""() => {
+					try {
+						return (
+							localStorage.getItem('user') !== null ||
+							localStorage.getItem('user_info') !== null ||
+							localStorage.getItem('userInfo') !== null
+						);
+					} catch (e) { return false; }
+				}""",
+				timeout=20000,
+			)
+		except Exception:
+			try:
+				await page.goto(f"{origin}/console", wait_until="domcontentloaded")
+				await page.wait_for_timeout(2000)
+			except Exception:
+				pass
+
+		api_user = await self._extract_api_user_from_localstorage(page)
+		if api_user:
+			restore_cookies = await page.context.cookies()
+			user_cookies = filter_cookies(restore_cookies, origin)
+			return True, {"cookies": user_cookies, "api_user": api_user}
+
+		# 若落回登录页，提示重试（可能是回调未完成/会话失效/站点回调失败）
+		try:
+			if "/login" in (page.url or ""):
+				return False, {"error": "OAuth session not established (redirected to login)", "retry": True}
+		except Exception:
+			pass
+		return False, {"error": "OAuth flow failed - no user in localStorage", "retry": True}
 
 	async def _call_provider_linuxdo_callback_fast(
 		self,
@@ -1310,10 +1371,25 @@ class LinuxDoSignIn:
 									except Exception:
 										pass
 
-							if code_fast and not self._should_skip_fast_callback() and self.provider_config.name != "elysiver":
+							# 可配置的 SPA 回调：依赖同源 /oauth/linuxdo 完成回调并写入 localStorage。
+							# 为避免改变 wzw/elysiver 的既有特殊处理逻辑，这里仅对其它站点启用通用 SPA 回调。
+							if (
+								code_fast
+								and self._linuxdo_callback_mode() == "spa"
+								and self.provider_config.name not in {"wzw", "elysiver"}
+							):
+								print(
+									f"ℹ️ {self.account_name}: {self.provider_config.name} OAuth: waiting for SPA /oauth/linuxdo to complete login..."
+								)
+								state_fast_vals = q_fast.get("state")
+								state_fast = state_fast_vals[0] if state_fast_vals else auth_state
+								return await self._complete_oauth_via_spa(page, code_fast, state_fast)
+
+							mode = self._linuxdo_callback_mode()
+							if code_fast and mode != "spa" and self.provider_config.name != "elysiver":
 								callback_attempted = True
 								# Veloera 系站点（如 elysiver）更容易在回调接口触发 CF/WAF，避免先用 fetch 反复打回调导致 429
-								if self._prefer_callback_navigation():
+								if mode == "navigation" or (mode == "auto" and self._prefer_callback_navigation()):
 									api_user_fast = await self._call_provider_linuxdo_callback_via_navigation(
 										page, code_fast, auth_state
 									)
@@ -1723,7 +1799,7 @@ class LinuxDoSignIn:
 
 					# 快路径：先直接调用后端回调接口拿到 api_user（通常比等 localStorage/跳转更快）
 					# wzw 站点例外：需要让 SPA 自行处理 OAuth 回调建立 session
-					if self._should_skip_fast_callback():
+					if self.provider_config.name == "wzw":
 						# wzw: 等待 SPA 自然完成 OAuth 流程，不要手动导航到 API 端点
 						# 这样可以让前端正确建立 session，避免后续签到 401
 						print(f"ℹ️ {self.account_name}: wzw OAuth: waiting for SPA to complete OAuth flow...")
@@ -1770,12 +1846,21 @@ class LinuxDoSignIn:
 							# 返回 OAuth code 让上层处理
 							return True, {"code": [code], "state": [auth_state] if auth_state else []}
 
+					# 可配置的通用 SPA 回调（非 wzw/elysiver）：依赖同源 /oauth/linuxdo 完成回调并写入 localStorage。
+					if self._linuxdo_callback_mode() == "spa" and self.provider_config.name not in {"wzw", "elysiver"}:
+						print(
+							f"ℹ️ {self.account_name}: {self.provider_config.name} OAuth: waiting for SPA /oauth/linuxdo to complete OAuth flow..."
+						)
+						ok_spa, data_spa = await self._complete_oauth_via_spa(page, code, auth_state)
+						return ok_spa, data_spa
+
 					if callback_attempted and self._prefer_callback_navigation():
 						return False, {"error": "Linux.do 回调被 Cloudflare/WAF 拦截或限流(429)，请稍后重试"}
 
 					try:
 						callback_attempted = True
-						if self._prefer_callback_navigation():
+						mode2 = self._linuxdo_callback_mode()
+						if mode2 == "navigation" or (mode2 == "auto" and self._prefer_callback_navigation()):
 							api_user_fast2 = await self._call_provider_linuxdo_callback_via_navigation(
 								page, code, auth_state
 							)
