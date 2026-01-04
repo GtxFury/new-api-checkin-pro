@@ -34,7 +34,14 @@ class ProviderConfig:
     # 可选的签到页面路径（如 /console/checkin），用于浏览器签到
     checkin_page_path: str | None = None
     # 可选：newapi 通用控制台签到模式（/console/personal 点击“立即签到”）
-    checkin_mode: Literal["newapi_console_personal"] | None = None
+    # - newapi_console_personal: 浏览器进入 /console/personal 点击“立即签到”
+    # - new_api_post: 通过后端接口 POST 触发签到（适用于部分站点控制台会跳转 /login 的情况）
+    # 兼容：历史值 "api_post" 会被自动映射为 "new_api_post"
+    checkin_mode: Literal["newapi_console_personal", "new_api_post"] | None = None
+    # api_post 模式：可选的“是否已签到”查询策略（用于避免重复 POST）
+    # - newapi_monthly: GET {path}?month=YYYY-MM，读取 data.stats.checked_in_today
+    post_checkin_status_kind: Literal["newapi_monthly"] | None = None
+    post_checkin_status_path: str | None = None
     # Linux.do OAuth 回调策略：
     # - auto: 维持默认兼容逻辑（按站点特性/历史行为自动选择）
     # - fast_fetch: 在浏览器内 fetch 调用 /api/oauth/linuxdo
@@ -50,6 +57,11 @@ class ProviderConfig:
         - 基础: {"origin": "https://example.com"}
         - 完整: {"origin": "https://example.com", "login_path": "/login", "api_user_key": "x-api-user", "bypass_method": "waf_cookies", ...}
         """
+        raw_checkin_mode = data.get("checkin_mode")
+        # 兼容旧值：api_post -> new_api_post
+        if raw_checkin_mode == "api_post":
+            raw_checkin_mode = "new_api_post"
+
         return cls(
             name=name,
             origin=data["origin"],
@@ -68,7 +80,9 @@ class ProviderConfig:
             turnstile_check=data.get("turnstile_check", False),
             check_in_status_path=data.get("check_in_status_path"),
             checkin_page_path=data.get("checkin_page_path"),
-            checkin_mode=data.get("checkin_mode"),
+            checkin_mode=raw_checkin_mode,
+            post_checkin_status_kind=data.get("post_checkin_status_kind"),
+            post_checkin_status_path=data.get("post_checkin_status_path"),
             linuxdo_callback_mode=data.get("linuxdo_callback_mode", "auto"),
         )
 
@@ -285,7 +299,8 @@ class AppConfig:
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
-                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                # huan：控制台易跳回 /login，这里改用后端接口 POST 触发签到
+                sign_in_path="/api/user/checkin",
                 user_info_path="/api/user/self",
                 api_user_key="new-api-user",
                 github_client_id=None,
@@ -296,9 +311,10 @@ class AppConfig:
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
-                check_in_status_path="/api/user/check_in_status",
-                checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="new_api_post",
+                # newapi 月度状态接口：/api/user/checkin?month=YYYY-MM
+                post_checkin_status_kind="newapi_monthly",
+                post_checkin_status_path="/api/user/checkin",
                 # 该站点更依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
                 linuxdo_callback_mode="spa",
             ),

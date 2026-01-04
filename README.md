@@ -96,7 +96,11 @@
    - Value: 供应商
 
 常用可选字段（写在 `PROVIDERS` 的单个 provider 配置里）：
-- `checkin_mode`: `"newapi_console_personal"` 表示使用 newapi 通用控制台签到（`/console/personal` 点击“立即签到”）
+- `checkin_mode`：
+  - `"newapi_console_personal"`：使用 newapi 通用控制台签到（浏览器进入 `/console/personal` 点击“立即签到”）
+  - `"new_api_post"`：使用后端接口 POST 触发签到（适用于控制台会跳转 `/login` 的站点）
+- `post_checkin_status_kind` / `post_checkin_status_path`（仅 `checkin_mode="new_api_post"` 时使用）：
+  - `"newapi_monthly"` + `"/api/user/checkin"`：GET `{path}?month=YYYY-MM`，读取 `data.stats.checked_in_today` 判断是否已签到
 - `checkin_page_path`: 自定义签到页面路径（默认会按站点内置值/候选路径探测）
 - `linuxdo_callback_mode`: Linux.do OAuth 回调策略（默认 `"auto"`）
   - `"fast_fetch"`：在浏览器内 `fetch` 调用 `/api/oauth/linuxdo`（更快，但部分站点会因 SameSite/会话校验失败）
