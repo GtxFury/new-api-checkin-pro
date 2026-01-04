@@ -73,7 +73,7 @@
 #### 字段说明：
 
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
-- `provider` (可选)：供应商，内置 `anyrouter`、`agentrouter`、`runanytime`、`hotaru`（兼容旧名 `ccode`）、`kfc`、`neb`、`huan`、`daiju`，默认使用 `anyrouter`
+- `provider` (可选)：供应商，内置 `anyrouter`、`agentrouter`、`runanytime`、`hotaru`（兼容旧名 `ccode`）、`kfc`、`neb`、`huan`、`dik3`、`daiju`，默认使用 `anyrouter`
 - `proxy` (可选)：单个账号代理配置，支持 `http`、`socks5` 代理
 - `cookies`(可选)：用于身份验证的 cookies 数据  
   - 对于 `anyrouter`、`agentrouter`：从浏览器获取 `session` 即可  
@@ -122,6 +122,10 @@
 #### huan 站点地址
 
 - 默认固定为 `https://ai.huan666.de`（如需自定义可通过 `PROVIDERS` 覆盖）
+
+#### dik3（曼波api）站点地址
+
+- 默认固定为 `https://ai.dik3.cn`（如需自定义可通过 `PROVIDERS` 覆盖）
 
 #### daiju（小呆公益站）站点地址
 
@@ -238,6 +242,14 @@
 - Workflow：`.github/workflows/huan.yml`
 
 配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_HUAN`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "huan"`（未填写时 `main_huan.py` 会自动补全）。
+
+## dik3（曼波api）（独立签到）
+
+本仓库额外提供了 `dik3`（曼波api）的独立签到入口与独立 Action：
+- 入口脚本：`main_dik3.py`
+- Workflow：`.github/workflows/dik3.yml`
+
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_DIK3`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "dik3"`（未填写时 `main_dik3.py` 会自动补全）。
 
 ## daiju（小呆公益站）（独立签到）
 

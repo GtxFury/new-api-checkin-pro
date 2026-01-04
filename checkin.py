@@ -4311,13 +4311,13 @@ class CheckIn:
             return False
 
     def execute_check_in_post(self, client: httpx.Client, headers: dict, api_user: str | int) -> dict:
-        """通用 POST 签到（api_post 模式专用）
+        """通用 POST 签到（new_api_post 模式专用）
 
         说明：
         - 兼容部分站点用 HTTP 400 返回“已签到/重复签到”的 JSON 响应。
         - 尽量复用当前 headers/cookies，避免因为缺少 cf_clearance 等 cookie 被 WAF/CF 拦截。
         """
-        print(f"🌐 {self.account_name}: Executing check-in (api_post)")
+        print(f"🌐 {self.account_name}: Executing check-in (new_api_post)")
 
         checkin_headers = headers.copy()
         checkin_headers.update({"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"})
