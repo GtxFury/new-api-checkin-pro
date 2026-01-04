@@ -4310,6 +4310,93 @@ class CheckIn:
             print(f"❌ {self.account_name}: Check-in failed - HTTP {response.status_code}")
             return False
 
+    def execute_check_in_post(self, client: httpx.Client, headers: dict, api_user: str | int) -> dict:
+        """通用 POST 签到（api_post 模式专用）
+
+        说明：
+        - 兼容部分站点用 HTTP 400 返回“已签到/重复签到”的 JSON 响应。
+        - 尽量复用当前 headers/cookies，避免因为缺少 cf_clearance 等 cookie 被 WAF/CF 拦截。
+        """
+        print(f"🌐 {self.account_name}: Executing check-in (api_post)")
+
+        checkin_headers = headers.copy()
+        checkin_headers.update({"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"})
+
+        # 在发起签到请求之前尝试复用已缓存的 Cloudflare 相关 cookies
+        try:
+            cached_cf_cookies = self._load_cf_cookies_from_cache()
+            if cached_cf_cookies:
+                self._apply_cf_cookies_to_client(client, cached_cf_cookies)
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to apply cached Cloudflare cookies: {e}")
+
+        url = self.provider_config.get_sign_in_url(api_user)
+        if not url:
+            return {"success": False, "error": "No check-in URL configured"}
+
+        response = client.post(url, headers=checkin_headers, timeout=30)
+        print(f"📨 {self.account_name}: Response status code {response.status_code}")
+
+        # newapi 分支站点偶尔会用 400 返回“已签到”的 JSON，这里一起解析
+        if response.status_code not in (200, 400):
+            return {"success": False, "error": f"HTTP {response.status_code}"}
+
+        json_data = self._check_and_handle_response(response, "execute_check_in_api_post")
+        if json_data is None:
+            # 如果不是 JSON 响应（可能是 HTML），检查是否包含成功标识
+            if "success" in response.text.lower():
+                print(f"✅ {self.account_name}: Check-in successful! (non-json)")
+                return {"success": True, "message": "Check-in successful"}
+            return {"success": False, "error": "Invalid response format"}
+
+        message = json_data.get("message") or json_data.get("msg") or ""
+        if not isinstance(message, str):
+            message = str(message)
+
+        if (
+            json_data.get("ret") == 1
+            or json_data.get("code") == 0
+            or json_data.get("success")
+            or "已经签到" in message
+            or "已签到" in message
+            or "签到成功" in message
+        ):
+            return {"success": True, "message": message or "Check-in successful", "data": json_data.get("data", {})}
+
+        err = json_data.get("msg") or json_data.get("message") or "Unknown error"
+        return {"success": False, "error": err}
+
+    def _get_newapi_monthly_checked_in_today(self, client: httpx.Client, headers: dict) -> bool | None:
+        """newapi 月度签到状态：GET /api/user/checkin?month=YYYY-MM -> data.stats.checked_in_today"""
+        kind = getattr(self.provider_config, "post_checkin_status_kind", None)
+        path = getattr(self.provider_config, "post_checkin_status_path", None)
+        if kind != "newapi_monthly" or not path:
+            return None
+
+        origin = (self.provider_config.origin or "").rstrip("/")
+        month = datetime.now().strftime("%Y-%m")
+        url = f"{origin}{path}?month={month}"
+        try:
+            resp = client.get(url, headers=headers, timeout=30)
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed to get monthly check-in status: {e}")
+            return None
+
+        if resp.status_code != 200:
+            print(f"⚠️ {self.account_name}: Monthly check-in status HTTP {resp.status_code}")
+            return None
+
+        data = self._check_and_handle_response(resp, "newapi_monthly_checkin_status")
+        if not isinstance(data, dict) or not data.get("success"):
+            return None
+
+        payload = data.get("data", {}) or {}
+        stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
+        checked = stats.get("checked_in_today") if isinstance(stats, dict) else None
+        if isinstance(checked, bool):
+            return checked
+        return None
+
     async def get_check_in_status(self, client: httpx.Client, headers: dict) -> dict | None:
         """获取签到状态（仅在配置了 check_in_status_path 时可用）"""
         status_url = self.provider_config.get_check_in_status_url()
@@ -4386,6 +4473,29 @@ class CheckIn:
                 "Sec-Fetch-Site": "same-origin",
             }
             self._inject_api_user_headers(headers, api_user)
+
+            # new_api_post：用后端接口 POST 触发签到（适用于控制台会跳 /login 的站点）
+            # 兼容旧值：api_post（通过 ProviderConfig.from_dict 自动映射）
+            if getattr(self.provider_config, "checkin_mode", None) == "new_api_post":
+                # 1) 可选：先查询“今日是否已签到”
+                checked_in = self._get_newapi_monthly_checked_in_today(client, headers)
+                if checked_in is True:
+                    print(f"ℹ️ {self.account_name}: Already checked in today (monthly status), skipping check-in")
+                    user_info = await self.get_user_info(client, headers)
+                    if user_info and user_info.get("success"):
+                        return True, user_info
+                    return True, {"success": True, "display": "今日已签到"}
+
+                # 2) 未确认已签到 -> 执行 POST 签到
+                check_in_result = self.execute_check_in_post(client, headers, api_user)
+                if not check_in_result.get("success"):
+                    return False, {"error": check_in_result.get("error", "Check-in failed")}
+
+                # 3) 签到后重新拉取用户信息（余额/消耗以最新为准）
+                user_info = await self.get_user_info(client, headers)
+                if user_info and user_info.get("success"):
+                    return True, user_info
+                return True, {"success": True, "display": check_in_result.get("message", "Check-in successful")}
 
             # wzw 专用逻辑：先签到，再查余额，避免只拿到签到前的额度
             if self.provider_config.name == "wzw":
