@@ -31,3 +31,14 @@ def test_default_providers_include_neb(monkeypatch: pytest.MonkeyPatch):
 	assert provider.sign_in_path is None
 	assert provider.checkin_mode == 'newapi_console_personal'
 
+
+def test_default_providers_include_huan(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.delenv('PROVIDERS', raising=False)
+	cfg = AppConfig.load_from_env()
+
+	provider = cfg.get_provider('huan')
+	assert provider is not None
+	assert provider.origin == 'https://ai.huan666.de'
+	assert provider.sign_in_path is None
+	assert provider.checkin_mode == 'newapi_console_personal'
+
