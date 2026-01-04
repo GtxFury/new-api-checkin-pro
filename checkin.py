@@ -124,8 +124,8 @@ class CheckIn:
         """
         keys: list[str] = [self.provider_config.api_user_key]
 
-        # runanytime/elysiver/ccode/hotaru 可能在不同实现间切换，额外注入常见 header 名
-        if self.provider_config.name in {"runanytime", "elysiver", "ccode", "hotaru"}:
+        # runanytime/elysiver/ccode/hotaru/kfc 可能在不同实现间切换，额外注入常见 header 名
+        if self.provider_config.name in {"runanytime", "elysiver", "ccode", "hotaru", "kfc"}:
             keys.extend(["new-api-user", "New-Api-User", "Veloera-User"])
 
         # 去重（按 header 名大小写不敏感）
