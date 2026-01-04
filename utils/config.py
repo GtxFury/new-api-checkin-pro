@@ -343,6 +343,31 @@ class AppConfig:
                 # 该站点依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
                 linuxdo_callback_mode="spa",
             ),
+            "mu": ProviderConfig(
+                name="mu",
+                origin="https://demo.awa1.fun",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                # Mu.API：按 newapi 标准接口 POST 触发签到（部分站点控制台会跳 /login）
+                sign_in_path="/api/user/checkin",
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 从 /api/status 获取，避免写死导致配置过期
+                linuxdo_client_id=None,
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                checkin_mode="new_api_post",
+                # newapi 月度状态接口：/api/user/checkin?month=YYYY-MM
+                post_checkin_status_kind="newapi_monthly",
+                post_checkin_status_path="/api/user/checkin",
+                # 该站点按同源 SPA /oauth/linuxdo 完成回调更稳
+                linuxdo_callback_mode="spa",
+            ),
             "daiju": ProviderConfig(
                 name="daiju",
                 origin="https://api.daiju.live",
