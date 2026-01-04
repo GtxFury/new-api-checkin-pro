@@ -1623,6 +1623,22 @@ class CheckIn:
             await page.goto(f"{origin}/console", wait_until="domcontentloaded")
         await self._ensure_page_past_cloudflare(page)
 
+        # 部分站点 OAuth 显示成功，但回到站点后 session 未建立或已过期，会被重定向到 /login?expired=true
+        try:
+            cur_url = page.url or ""
+        except Exception:
+            cur_url = ""
+        if "/login" in cur_url:
+            if "expired=true" in cur_url:
+                print(f"⚠️ {self.account_name}: Redirected to login page (expired=true), session may have expired")
+            else:
+                print(f"⚠️ {self.account_name}: Redirected to login page, session may be invalid")
+            try:
+                await self._take_screenshot(page, "newapi_session_expired")
+            except Exception:
+                pass
+            return False, "登录态失效，需要重登"
+
         # newapi 控制台有时仅靠 cookie 不会渲染（缺 localStorage.user），补种后 reload 再继续。
         try:
             await page.evaluate(
@@ -1642,6 +1658,22 @@ class CheckIn:
             await self._ensure_page_past_cloudflare(page)
         except Exception:
             pass
+
+        # reload 后再次检查是否被踢回登录页
+        try:
+            cur_url = page.url or ""
+        except Exception:
+            cur_url = ""
+        if "/login" in cur_url:
+            if "expired=true" in cur_url:
+                print(f"⚠️ {self.account_name}: Redirected to login page (expired=true), session may have expired")
+            else:
+                print(f"⚠️ {self.account_name}: Redirected to login page, session may be invalid")
+            try:
+                await self._take_screenshot(page, "newapi_session_expired")
+            except Exception:
+                pass
+            return False, "登录态失效，需要重登"
 
         try:
             await page.wait_for_function(
@@ -2564,6 +2596,10 @@ class CheckIn:
                     user_info["quota"] = float(cur_quota)
                 if isinstance(cur_used, (int, float)):
                     user_info["used_quota"] = float(cur_used)
+
+                # 当被重定向到 /login?expired=true 时，提示上层删除缓存并重登一次（避免把一次可恢复的过期当成永久失败）
+                if not overall_success and checkin_msg == "登录态失效，需要重登":
+                    user_info["retry"] = True
 
                 if not overall_success:
                     return False, user_info
@@ -4904,11 +4940,44 @@ class CheckIn:
 
                 # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
                 if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
-                    return await self._newapi_check_in_via_console_personal(
+                    ok, info = await self._newapi_check_in_via_console_personal(
                         auth_cookies=user_cookies,
                         api_user=api_user,
                         linuxdo_cache_file_path=cache_file_path,
                     )
+                    if not ok and isinstance(info, dict) and info.get("retry") is True:
+                        print(f"⚠️ {self.account_name}: newapi console session expired, forcing fresh login once...")
+
+                        # 删除缓存文件，强制重新登录
+                        try:
+                            if cache_file_path and os.path.exists(cache_file_path):
+                                os.remove(cache_file_path)
+                        except Exception:
+                            pass
+
+                        retry_auth_state_result = await self.get_auth_state(
+                            client=client,
+                            headers=headers,
+                        )
+                        if retry_auth_state_result and retry_auth_state_result.get("success"):
+                            success2, result2 = await linuxdo.signin(
+                                client_id=client_id_result["client_id"],
+                                auth_state=retry_auth_state_result["state"],
+                                auth_cookies=retry_auth_state_result.get("cookies", []),
+                                cache_file_path=cache_file_path,
+                            )
+                            if success2 and "cookies" in result2 and "api_user" in result2:
+                                user_cookies2 = result2["cookies"]
+                                api_user2 = result2["api_user"]
+                                return await self._newapi_check_in_via_console_personal(
+                                    auth_cookies=user_cookies2,
+                                    api_user=api_user2,
+                                    linuxdo_cache_file_path=cache_file_path,
+                                )
+                            return False, result2 if isinstance(result2, dict) else {"error": "Linux.do re-login failed"}
+                        return False, {"error": "Failed to get Linux.do auth state for retry"}
+
+                    return ok, info
 
                 # 对于启用了 Turnstile 的站点（如 runanytime / elysiver），
                 # 如果在 LinuxDo 登录流程中已经在 /app/me 页面解析出了余额信息，
@@ -4981,11 +5050,46 @@ class CheckIn:
 
                                 # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
                                 if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
-                                    return await self._newapi_check_in_via_console_personal(
+                                    ok, info = await self._newapi_check_in_via_console_personal(
                                         auth_cookies=user_cookies,
                                         api_user=api_user,
                                         linuxdo_cache_file_path=cache_file_path,
                                     )
+                                    if not ok and isinstance(info, dict) and info.get("retry") is True:
+                                        print(
+                                            f"⚠️ {self.account_name}: newapi console session expired, forcing fresh login once..."
+                                        )
+
+                                        # 删除缓存文件，强制重新登录
+                                        try:
+                                            if cache_file_path and os.path.exists(cache_file_path):
+                                                os.remove(cache_file_path)
+                                        except Exception:
+                                            pass
+
+                                        retry_auth_state_result = await self.get_auth_state(
+                                            client=client,
+                                            headers=headers,
+                                        )
+                                        if retry_auth_state_result and retry_auth_state_result.get("success"):
+                                            success2, result2 = await linuxdo.signin(
+                                                client_id=client_id_result["client_id"],
+                                                auth_state=retry_auth_state_result["state"],
+                                                auth_cookies=retry_auth_state_result.get("cookies", []),
+                                                cache_file_path=cache_file_path,
+                                            )
+                                            if success2 and "cookies" in result2 and "api_user" in result2:
+                                                user_cookies2 = result2["cookies"]
+                                                api_user2 = result2["api_user"]
+                                                return await self._newapi_check_in_via_console_personal(
+                                                    auth_cookies=user_cookies2,
+                                                    api_user=api_user2,
+                                                    linuxdo_cache_file_path=cache_file_path,
+                                                )
+                                            return False, result2 if isinstance(result2, dict) else {"error": "Linux.do re-login failed"}
+                                        return False, {"error": "Failed to get Linux.do auth state for retry"}
+
+                                    return ok, info
 
                                 merged_cookies = {**waf_cookies, **user_cookies}
                                 return await self.check_in_with_cookies(merged_cookies, api_user)
