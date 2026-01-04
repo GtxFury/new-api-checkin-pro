@@ -39,8 +39,19 @@ def test_default_providers_include_huan(monkeypatch: pytest.MonkeyPatch):
 	provider = cfg.get_provider('huan')
 	assert provider is not None
 	assert provider.origin == 'https://ai.huan666.de'
-	assert provider.sign_in_path is None
-	assert provider.checkin_mode == 'newapi_console_personal'
+	assert provider.sign_in_path == '/api/user/checkin'
+	assert provider.checkin_mode == 'new_api_post'
+
+
+def test_default_providers_include_dik3(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.delenv('PROVIDERS', raising=False)
+	cfg = AppConfig.load_from_env()
+
+	provider = cfg.get_provider('dik3')
+	assert provider is not None
+	assert provider.origin == 'https://ai.dik3.cn'
+	assert provider.sign_in_path == '/api/user/checkin'
+	assert provider.checkin_mode == 'new_api_post'
 
 
 def test_default_providers_include_daiju(monkeypatch: pytest.MonkeyPatch):

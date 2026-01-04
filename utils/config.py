@@ -38,7 +38,7 @@ class ProviderConfig:
     # - new_api_post: 通过后端接口 POST 触发签到（适用于部分站点控制台会跳转 /login 的情况）
     # 兼容：历史值 "api_post" 会被自动映射为 "new_api_post"
     checkin_mode: Literal["newapi_console_personal", "new_api_post"] | None = None
-    # api_post 模式：可选的“是否已签到”查询策略（用于避免重复 POST）
+    # new_api_post 模式：可选的“是否已签到”查询策略（用于避免重复 POST）
     # - newapi_monthly: GET {path}?month=YYYY-MM，读取 data.stats.checked_in_today
     post_checkin_status_kind: Literal["newapi_monthly"] | None = None
     post_checkin_status_path: str | None = None
@@ -316,6 +316,31 @@ class AppConfig:
                 post_checkin_status_kind="newapi_monthly",
                 post_checkin_status_path="/api/user/checkin",
                 # 该站点更依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
+                linuxdo_callback_mode="spa",
+            ),
+            "dik3": ProviderConfig(
+                name="dik3",
+                origin="https://ai.dik3.cn",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                # 曼波api：使用 SPA 回调完成登录，再用后端接口 POST 触发签到
+                sign_in_path="/api/user/checkin",
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 从 /api/status 获取，避免写死导致配置过期
+                linuxdo_client_id=None,
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                checkin_mode="new_api_post",
+                # newapi 月度状态接口：/api/user/checkin?month=YYYY-MM
+                post_checkin_status_kind="newapi_monthly",
+                post_checkin_status_path="/api/user/checkin",
+                # 该站点依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
                 linuxdo_callback_mode="spa",
             ),
             "daiju": ProviderConfig(
