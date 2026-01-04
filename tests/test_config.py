@@ -1,0 +1,22 @@
+import sys
+from pathlib import Path
+
+import pytest
+
+# 添加项目根目录到 PATH
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from utils.config import AppConfig
+
+
+def test_default_providers_include_kfc(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.delenv('PROVIDERS', raising=False)
+	cfg = AppConfig.load_from_env()
+
+	provider = cfg.get_provider('kfc')
+	assert provider is not None
+	assert provider.origin == 'https://kfc-api.sxxe.net'
+	assert provider.sign_in_path is None
+	assert provider.checkin_mode == 'newapi_console_personal'
+
