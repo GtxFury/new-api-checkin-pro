@@ -54,6 +54,17 @@ def test_default_providers_include_dik3(monkeypatch: pytest.MonkeyPatch):
 	assert provider.checkin_mode == 'new_api_post'
 
 
+def test_default_providers_include_mu(monkeypatch: pytest.MonkeyPatch):
+	monkeypatch.delenv('PROVIDERS', raising=False)
+	cfg = AppConfig.load_from_env()
+
+	provider = cfg.get_provider('mu')
+	assert provider is not None
+	assert provider.origin == 'https://demo.awa1.fun'
+	assert provider.sign_in_path == '/api/user/checkin'
+	assert provider.checkin_mode == 'new_api_post'
+
+
 def test_default_providers_include_daiju(monkeypatch: pytest.MonkeyPatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 	cfg = AppConfig.load_from_env()
