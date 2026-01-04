@@ -835,13 +835,19 @@ class FovtCheckIn:
         # 记录 authorize 参数（便于核对 client_id/redirect_uri）
         try:
             from urllib.parse import urlparse, parse_qs
+            from utils.redact import redact_value_for_log
 
             p = urlparse(page.url or "")
             q = parse_qs(p.query)
             cid = (q.get("client_id") or [""])[0]
             ruri = (q.get("redirect_uri") or [""])[0]
             scope = (q.get("scope") or [""])[0]
-            print(f"ℹ️ {self.account_name}: Gift OAuth params: client_id={cid}, redirect_uri={ruri}, scope={scope}")
+            print(
+                f"ℹ️ {self.account_name}: Gift OAuth params: "
+                f"client_id={redact_value_for_log(cid) or '***'}, "
+                f"redirect_uri={redact_value_for_log(ruri) or '***'}, "
+                f"scope={scope}"
+            )
         except Exception:
             pass
 

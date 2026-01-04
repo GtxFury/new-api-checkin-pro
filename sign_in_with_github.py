@@ -10,6 +10,7 @@ from urllib.parse import urlparse, parse_qs
 from camoufox.async_api import AsyncCamoufox
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
+from utils.redact import redact_url_for_log
 from utils.wait_for_secrets import WaitForSecrets
 
 
@@ -140,10 +141,15 @@ class GitHubSignIn:
 
                 if os.path.exists(cache_file_path):
                     try:
-                        print(f"ℹ️ {self.account_name}: Checking login status at {oauth_url}")
+                        print(
+                            f"ℹ️ {self.account_name}: Checking login status at {redact_url_for_log(oauth_url)}"
+                        )
                         # 直接访问授权页面检查是否已登录
                         response = await page.goto(oauth_url, wait_until="domcontentloaded")
-                        print(f"ℹ️ {self.account_name}: redirected to app page {response.url if response else 'N/A'}")
+                        print(
+                            f"ℹ️ {self.account_name}: redirected to app page "
+                            f"{redact_url_for_log(response.url) if response else 'N/A'}"
+                        )
                         self._save_page_content_to_file(page, "sign_in_check")
 
                         # 登录后可能直接跳转回应用页面
@@ -277,9 +283,14 @@ class GitHubSignIn:
 
                     # 登录后访问授权页面
                     try:
-                        print(f"ℹ️ {self.account_name}: Navigating to authorization page: {oauth_url}")
+                        print(
+                            f"ℹ️ {self.account_name}: Navigating to authorization page: {redact_url_for_log(oauth_url)}"
+                        )
                         response = await page.goto(oauth_url, wait_until="domcontentloaded")
-                        print(f"ℹ️ {self.account_name}: redirected to app page {response.url if response else 'N/A'}")
+                        print(
+                            f"ℹ️ {self.account_name}: redirected to app page "
+                            f"{redact_url_for_log(response.url) if response else 'N/A'}"
+                        )
 
                         # GitHub 登录后可能直接跳转回应用页面
                         if response and response.url.startswith(self.provider_config.origin):
