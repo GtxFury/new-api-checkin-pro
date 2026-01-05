@@ -1,8 +1,8 @@
 name: linux.do 自动阅读点赞
 on:
   schedule:
-    # 每 2 小时执行一次
-    - cron: '0 */2 * * *'
+    # 每 8 小时执行一次
+    - cron: '0 */8 * * *'
   workflow_dispatch:
 
 jobs:
