@@ -23,9 +23,27 @@ from utils.redact import redact_url_for_log, redact_value_for_log
 
 # 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
 try:
+	import importlib.metadata
+
+	import playwright_captcha as _playwright_captcha
 	from playwright_captcha import ClickSolver, CaptchaType, FrameworkType  # type: ignore[assignment]
+
+	_required = ("CLOUDFLARE_TURNSTILE", "CLOUDFLARE_INTERSTITIAL")
+	if not all(hasattr(CaptchaType, k) for k in _required):
+		raise RuntimeError(f"playwright_captcha.CaptchaType 缺少成员: {_required}")
+	if not hasattr(FrameworkType, "CAMOUFOX"):
+		raise RuntimeError("playwright_captcha.FrameworkType 缺少 CAMOUFOX")
+
+	try:
+		_ver = importlib.metadata.version("playwright-captcha")
+	except Exception:
+		_ver = "unknown"
+
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = True
-	print("ℹ️ LinuxDoSignIn: playwright-captcha imported successfully")
+	print(
+		f"ℹ️ LinuxDoSignIn: playwright-captcha imported successfully "
+		f"(version={_ver}, file={getattr(_playwright_captcha, '__file__', 'unknown')})"
+	)
 except Exception as e1:  # pragma: no cover - 可选依赖
 	ClickSolver = None  # type: ignore[assignment]
 	CaptchaType = None  # type: ignore[assignment]

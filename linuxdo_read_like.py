@@ -125,6 +125,7 @@ class LinuxDoAutoReadLike:
 		self.username = username
 		self.password = password
 		self.settings = settings
+		self._warned_no_cf_solver = False
 
 		Path(self.settings.storage_state_dir).mkdir(parents=True, exist_ok=True)
 		# 复用 checkin.py 的 linux.do 登录缓存命名，避免同一账号重复触发 Cloudflare/Turnstile
@@ -180,6 +181,37 @@ class LinuxDoAutoReadLike:
 			removed = [k for k, v in m.items() if isinstance(v, int) and v < cutoff]
 			for k in removed:
 				m.pop(k, None)
+
+	async def _is_cloudflare_interstitial(self, page) -> bool:
+		try:
+			url = (page.url or "").lower()
+		except Exception:
+			url = ""
+		if any(k in url for k in ("__cf_chl", "challenges.cloudflare.com", "cf_chl")):
+			return True
+		try:
+			title = (await page.title() or "").lower()
+		except Exception:
+			title = ""
+		return any(k in title for k in ("just a moment", "attention required"))
+
+	async def _maybe_pass_cloudflare_interstitial(self, page, *, max_wait_seconds: int = 35) -> None:
+		if not await self._is_cloudflare_interstitial(page):
+			return
+		await self._maybe_solve_cloudflare(page)
+		try:
+			await page.wait_for_function(
+				"""() => {
+					const t = (document.title || '').toLowerCase();
+					const u = (location.href || '').toLowerCase();
+					return !t.includes('just a moment') && !t.includes('attention required')
+						&& !u.includes('__cf_chl') && !u.includes('challenges.cloudflare.com');
+				}""",
+				timeout=max_wait_seconds * 1000,
+			)
+		except Exception:
+			# 保持兼容：不强制抛错，让后续逻辑继续判断
+			pass
 
 	async def _dump_debug(self, page, reason: str) -> None:
 		try:
@@ -345,10 +377,25 @@ class LinuxDoAutoReadLike:
 			print(f"⚠️ {self.account_name}: [页面状态] 获取 URL 失败: {e}")
 
 		for attempt in range(max_retries):
+			# 先处理 Cloudflare “Just a moment” 全屏挑战，否则 /session/current.json 常见 429/异常
+			try:
+				await self._maybe_pass_cloudflare_interstitial(page)
+			except Exception:
+				pass
+
 			status, data = await self._fetch_json_same_origin(page, "/session/current.json")
 
 			# 处理 429 限流 - 改用 DOM 检测
 			if status == 429:
+				# 很多时候 429 是因为仍在 Cloudflare challenge 页，优先再处理一次 challenge
+				try:
+					if await self._is_cloudflare_interstitial(page):
+						print(f"⚠️ {self.account_name}: [用户检查] 仍处于 Cloudflare challenge，处理后重试")
+						await self._maybe_pass_cloudflare_interstitial(page)
+						await page.wait_for_timeout(1200)
+						continue
+				except Exception:
+					pass
 				print(f"⚠️ {self.account_name}: [用户检查] /session/current.json 返回 429 限流，改用 DOM 检测")
 				dom_user = await self._get_current_user_from_dom(page)
 				if dom_user:
@@ -381,18 +428,24 @@ class LinuxDoAutoReadLike:
 
 	async def _maybe_solve_cloudflare(self, page) -> None:
 		if linuxdo_solve_captcha is None:
+			if not self._warned_no_cf_solver:
+				self._warned_no_cf_solver = True
+				print(
+					f"⚠️ {self.account_name}: [CF] 未启用验证码求解（sign_in_with_linuxdo.solve_captcha 不可用），"
+					f"遇到 Cloudflare 可能无法自动通过"
+				)
 			return
 		print(f"🔍 {self.account_name}: [CF] 尝试解决 Cloudflare interstitial")
 		try:
-			await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
-			print(f"✅ {self.account_name}: [CF] interstitial 处理完成")
+			solved = await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+			print(f"✅ {self.account_name}: [CF] interstitial 求解结果: {solved}")
 		except Exception as e:
 			print(f"⚠️ {self.account_name}: [CF] interstitial 处理失败: {e}")
 		if self.settings.try_turnstile_solver:
 			print(f"🔍 {self.account_name}: [CF] 尝试解决 Cloudflare turnstile")
 			try:
-				await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
-				print(f"✅ {self.account_name}: [CF] turnstile 处理完成")
+				solved = await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+				print(f"✅ {self.account_name}: [CF] turnstile 求解结果: {solved}")
 			except Exception as e:
 				print(f"⚠️ {self.account_name}: [CF] turnstile 处理失败: {e}")
 
@@ -559,6 +612,12 @@ class LinuxDoAutoReadLike:
 			print(f"🔍 {self.account_name}: [登录检查] 页面已加载 URL={current_url}, title={title!r}")
 		except Exception as e:
 			print(f"⚠️ {self.account_name}: [登录检查] 获取页面信息失败: {e}")
+
+		# 先尝试通过 Cloudflare 全屏挑战，否则后续 /session/current.json 可能一直 429
+		try:
+			await self._maybe_pass_cloudflare_interstitial(page)
+		except Exception:
+			pass
 
 		user = await self._get_current_user(page)
 		if user:
