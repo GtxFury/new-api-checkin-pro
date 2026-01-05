@@ -209,7 +209,34 @@ class LinuxDoAutoReadLike:
 			title = (await page.title() or "").lower()
 		except Exception:
 			title = ""
-		return any(k in title for k in ("just a moment", "attention required"))
+		if any(k in title for k in ("just a moment", "attention required", "please wait", "请稍候", "请稍等")):
+			return True
+		# 某些情况下标题不包含关键字，但页面已经注入 Turnstile/Challenge DOM
+		try:
+			seen = await page.evaluate(
+				"""() => {
+					try {
+						const hasIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+						const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+						const hasChlForm = !!document.querySelector('form[action*="__cf_chl"], input[name^="cf_chl_"], input[name="cf_challenge_response"]');
+						const hasWidget = !!document.querySelector('[id^="cf-chl-widget-"], .cf-chl-widget, #cf-chl-widget');
+						const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+						const hasText =
+							bodyText.includes('Checking your browser') ||
+							bodyText.includes('DDoS protection by') ||
+							bodyText.includes('Ray ID') ||
+							bodyText.includes('正在检查您的浏览器') ||
+							bodyText.includes('请稍候') ||
+							bodyText.includes('安全检查');
+						return hasIframe || hasTurnstileInput || hasChlForm || hasWidget || hasText;
+					} catch (e) {
+						return false;
+					}
+				}"""
+			)
+			return bool(seen)
+		except Exception:
+			return False
 
 	async def _maybe_pass_cloudflare_interstitial(self, page, *, max_wait_seconds: int = 35) -> None:
 		if not await self._is_cloudflare_interstitial(page):
@@ -220,8 +247,15 @@ class LinuxDoAutoReadLike:
 				"""() => {
 					const t = (document.title || '').toLowerCase();
 					const u = (location.href || '').toLowerCase();
-					return !t.includes('just a moment') && !t.includes('attention required')
-						&& !u.includes('__cf_chl') && !u.includes('challenges.cloudflare.com');
+					const stillTitle =
+						t.includes('just a moment') || t.includes('attention required') || t.includes('please wait') ||
+						t.includes('请稍候') || t.includes('请稍等');
+					const stillUrl = u.includes('__cf_chl') || u.includes('challenges.cloudflare.com') || u.includes('cf_chl');
+					const hasIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+					const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+					const hasChlForm = !!document.querySelector('form[action*="__cf_chl"], input[name^="cf_chl_"], input[name="cf_challenge_response"]');
+					const hasWidget = !!document.querySelector('[id^="cf-chl-widget-"], .cf-chl-widget, #cf-chl-widget');
+					return !(stillTitle || stillUrl || hasIframe || hasTurnstileInput || hasChlForm || hasWidget);
 				}""",
 				timeout=max_wait_seconds * 1000,
 			)
@@ -596,7 +630,47 @@ class LinuxDoAutoReadLike:
 			print(f"⚠️ {self.account_name}: [登录] 获取登录页信息失败: {e}")
 
 		print(f"🔍 {self.account_name}: [登录] 步骤2: 尝试解决 Cloudflare 验证")
-		await self._maybe_solve_cloudflare(page)
+		await self._maybe_pass_cloudflare_interstitial(page, max_wait_seconds=60)
+
+		async def _has_login_inputs() -> bool:
+			try:
+				return bool(
+					await page.evaluate(
+						"""() => {
+							const sels = [
+								'#login-account-name',
+								'#signin_username',
+								'input[name="login"]',
+								'input[name="username"]',
+								'input[type="email"]',
+								'input[autocomplete="username"]',
+								'#login-account-password',
+								'#signin_password',
+								'input[name="password"]',
+								'input[type="password"]',
+								'input[autocomplete="current-password"]',
+							];
+							for (const sel of sels) {
+								const el = document.querySelector(sel);
+								if (!el) continue;
+								if (el.type === 'hidden') continue;
+								return true;
+							}
+							return false;
+						}"""
+					)
+				)
+			except Exception:
+				return False
+
+		# 若仍停留在 CF 挑战页（页面只剩 cf-turnstile-response 等隐藏 input），不要继续填表单
+		if not await _has_login_inputs():
+			if await self._is_cloudflare_interstitial(page):
+				print(f"⚠️ {self.account_name}: [登录] 仍处于 Cloudflare 验证页，继续等待通过后再尝试登录")
+				await self._maybe_pass_cloudflare_interstitial(page, max_wait_seconds=90)
+			if not await _has_login_inputs():
+				await self._dump_debug(page, "linuxdo_login_no_form_inputs")
+				raise RuntimeError("Cloudflare 验证未通过，登录页未出现账号/密码输入框")
 
 		async def _set_value(selectors: list[str], value: str) -> bool:
 			for sel in selectors:
@@ -649,6 +723,36 @@ class LinuxDoAutoReadLike:
 			self.password,
 		)
 		print(f"🔍 {self.account_name}: [登录] 密码填写结果: {'成功' if pwd_ok else '失败'}")
+
+		if not user_ok or not pwd_ok:
+			# 若此时仍是 Cloudflare challenge（页面脚本可能刷新），先尝试通过 challenge 再重试一次
+			try:
+				if await self._is_cloudflare_interstitial(page):
+					print(f"⚠️ {self.account_name}: [登录] 填写失败且检测到 Cloudflare 验证页，尝试通过后重试填写")
+					await self._maybe_pass_cloudflare_interstitial(page, max_wait_seconds=90)
+					user_ok = await _set_value(
+						[
+							"#login-account-name",
+							"#signin_username",
+							'input[name="login"]',
+							'input[name="username"]',
+							'input[type="email"]',
+							'input[autocomplete="username"]',
+						],
+						self.username,
+					)
+					pwd_ok = await _set_value(
+						[
+							"#login-account-password",
+							"#signin_password",
+							'input[name="password"]',
+							'input[type="password"]',
+							'input[autocomplete="current-password"]',
+						],
+						self.password,
+					)
+			except Exception:
+				pass
 
 		if not user_ok or not pwd_ok:
 			# 打印页面上可用的输入框以便调试

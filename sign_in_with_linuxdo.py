@@ -93,7 +93,12 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
 					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
 					const title = (document.title || '').toLowerCase();
-					const titleLooks = title.includes('just a moment') || title.includes('attention required');
+					const titleLooks =
+						title.includes('just a moment') ||
+						title.includes('attention required') ||
+						title.includes('please wait') ||
+						title.includes('请稍候') ||
+						title.includes('请稍等');
 					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
 				} catch (e) {
 					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
@@ -484,15 +489,15 @@ class LinuxDoSignIn:
 		while time.time() - start_time < max_wait_seconds:
 			# 检测是否存在 Cloudflare 挑战
 			try:
-				cf_detected = await page.evaluate("""() => {
-					try {
-						const title = (document.title || '').toLowerCase();
-						const bodyText = document.body ? (document.body.innerText || '') : '';
+					cf_detected = await page.evaluate("""() => {
+						try {
+							const title = (document.title || '').toLowerCase();
+							const bodyText = document.body ? (document.body.innerText || '') : '';
 
-						// 检测 "Just a moment" 页面
-						if (title.includes('just a moment') || title.includes('attention required')) {
-							return { detected: true, type: 'interstitial' };
-						}
+							// 检测 "Just a moment" 页面
+							if (title.includes('just a moment') || title.includes('attention required') || title.includes('please wait') || title.includes('请稍候') || title.includes('请稍等')) {
+								return { detected: true, type: 'interstitial' };
+							}
 
 						// 检测 Cloudflare 挑战 iframe
 						const cfIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
