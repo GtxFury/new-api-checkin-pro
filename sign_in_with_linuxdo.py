@@ -1092,6 +1092,18 @@ class LinuxDoSignIn:
 							if "linux.do/session/sso_provider" in redir:
 								await page.wait_for_timeout(1200)
 								await self._take_screenshot(page, "linuxdo_sso_provider_redirect")
+								# 该页面在部分环境下实际上是 Cloudflare challenge（截图可见），
+								# 这里直接用 playwright-captcha 尝试过挑战，避免误判为缓存过期进而跳去 /login。
+								try:
+									ok_cf = await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
+									if ok_cf:
+										# 过挑战后通常会继续跳回 connect.linux.do
+										try:
+											await page.wait_for_url("**connect.linux.do/**", timeout=15000)
+										except Exception:
+											pass
+								except Exception:
+									pass
 						except Exception:
 							pass
 
@@ -1100,6 +1112,7 @@ class LinuxDoSignIn:
 						async def _wait_cache_oauth_ready() -> bool:
 							try:
 								start = time.time()
+								tried_cf = False
 								# 最多等待 15s，让 SSO 中转/重定向完成
 								while time.time() - start < 15:
 									cur = page.url or ""
@@ -1115,22 +1128,27 @@ class LinuxDoSignIn:
 											return True
 									except Exception:
 										pass
-									# 若遇到 Cloudflare interstitial，尝试处理后继续等待
+									# 若遇到 Cloudflare challenge（常见于 /session/sso_provider 或 challenges.cloudflare.com），
+									# 用 playwright-captcha 尝试处理一次后继续等待。
 									try:
-										body = await page.content()
-										if self._looks_like_cloudflare_interstitial_html(body[:4000]):
+										if not tried_cf and (
+											"/session/sso_provider" in cur
+											or "challenges.cloudflare.com" in cur
+											or "/challenge" in cur
+										):
+											tried_cf = True
 											try:
-												# 避免在“仅用于判定缓存有效性”的阶段被 solver 30s 超时拖住
-												await asyncio.wait_for(
-													solve_captcha(
-														page,
-														captcha_type="cloudflare",
-														challenge_type="interstitial",
-													),
-													timeout=8.0,
-												)
+												await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
 											except Exception:
 												pass
+										elif not tried_cf:
+											body = await page.content()
+											if self._looks_like_cloudflare_interstitial_html(body[:4000]):
+												tried_cf = True
+												try:
+													await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
+												except Exception:
+													pass
 									except Exception:
 										pass
 									await page.wait_for_timeout(600)
