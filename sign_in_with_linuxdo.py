@@ -1086,6 +1086,14 @@ class LinuxDoSignIn:
 							f"{redact_url_for_log(response.url) if response else 'N/A'}"
 						)
 						await self._save_page_content_to_file(page, "sign_in_check")
+						# 调试：如果落在 Discourse SSO 中转页，截一张图便于确认页面实际内容
+						try:
+							redir = (response.url if response else "") or (page.url or "")
+							if "linux.do/session/sso_provider" in redir:
+								await page.wait_for_timeout(1200)
+								await self._take_screenshot(page, "linuxdo_sso_provider_redirect")
+						except Exception:
+							pass
 
 						# 某些情况下（如 Discourse SSO 中转页 /session/sso_provider），页面会先落在 linux.do，
 						# 然后再自动跳回 connect.linux.do 展示授权按钮；这里不能立刻判定“缓存过期”。
