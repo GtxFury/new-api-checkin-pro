@@ -468,34 +468,28 @@ class LinuxDoSignIn:
 			try:
 				cf_detected = await page.evaluate("""() => {
 					try {
-						const title = (document.title || '').toLowerCase();
-						const bodyText = document.body ? (document.body.innerText || '') : '';
+						// 不依赖 document.title（不稳定/可被站点自定义），仅基于 DOM/资源特征判断。
+						const hasCfIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+						const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+						const hasTurnstileWidget =
+							!!document.querySelector('.cf-turnstile, [data-sitekey][data-theme], [data-sitekey][data-action], [data-sitekey][data-callback]');
 
-						// 检测 "Just a moment" 页面
-						if (title.includes('just a moment') || title.includes('attention required')) {
-							return { detected: true, type: 'interstitial' };
-						}
+						const hasChallengePlatform =
+							!!document.querySelector('script[src*="/cdn-cgi/challenge-platform/"], link[href*="/cdn-cgi/challenge-platform/"]');
+						const hasChlForm =
+							!!document.querySelector(
+								'form[action*="__cf_chl"], form#challenge-form, #challenge-form, input[name^="cf_chl_"], input[name="cf_challenge_response"]'
+							);
+						const hasCfSpinner =
+							!!document.querySelector('#cf-spinner-please-wait, #cf-please-wait, #challenge-running, .cf-spinner');
+						const hasCfRay = !!document.querySelector('#cf-ray, [data-ray]');
 
-						// 检测 Cloudflare 挑战 iframe
-						const cfIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
-						if (cfIframe) {
-							return { detected: true, type: 'turnstile' };
-						}
+						const isTurnstile = hasCfIframe || hasTurnstileInput || hasTurnstileWidget;
+						const isInterstitial = hasChallengePlatform || hasChlForm || hasCfSpinner || hasCfRay;
 
-						// 检测 Cloudflare 验证表单
-						const cfForm = document.querySelector('form[action*="__cf_chl"], input[name="cf-turnstile-response"]');
-						if (cfForm) {
-							return { detected: true, type: 'challenge_form' };
-						}
-
-						// 检测页面内容中的 Cloudflare 标记
-						if (bodyText.includes('Checking your browser') ||
-							bodyText.includes('DDoS protection by') ||
-							bodyText.includes('Ray ID:')) {
-							return { detected: true, type: 'ddos_protection' };
-						}
-
-						return { detected: false };
+						if (isTurnstile) return { detected: true, type: 'turnstile' };
+						if (isInterstitial) return { detected: true, type: 'interstitial' };
+						return { detected: false, type: 'none' };
 					} catch (e) {
 						return { detected: false, error: e.message };
 					}
@@ -530,8 +524,32 @@ class LinuxDoSignIn:
 
 			# 检查是否成功通过
 			try:
-				current_title = await page.title()
-				if "just a moment" not in current_title.lower():
+				# 再跑一次 DOM 特征检测：不再依赖标题判断是否过挑战
+				check2 = await page.evaluate("""() => {
+					try {
+						const hasCfIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+						const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+						const hasTurnstileWidget =
+							!!document.querySelector('.cf-turnstile, [data-sitekey][data-theme], [data-sitekey][data-action], [data-sitekey][data-callback]');
+
+						const hasChallengePlatform =
+							!!document.querySelector('script[src*="/cdn-cgi/challenge-platform/"], link[href*="/cdn-cgi/challenge-platform/"]');
+						const hasChlForm =
+							!!document.querySelector(
+								'form[action*="__cf_chl"], form#challenge-form, #challenge-form, input[name^="cf_chl_"], input[name="cf_challenge_response"]'
+							);
+						const hasCfSpinner =
+							!!document.querySelector('#cf-spinner-please-wait, #cf-please-wait, #challenge-running, .cf-spinner');
+						const hasCfRay = !!document.querySelector('#cf-ray, [data-ray]');
+
+						const isTurnstile = hasCfIframe || hasTurnstileInput || hasTurnstileWidget;
+						const isInterstitial = hasChallengePlatform || hasChlForm || hasCfSpinner || hasCfRay;
+						return { detected: !!(isTurnstile || isInterstitial) };
+					} catch (e) {
+						return { detected: false };
+					}
+				}""")
+				if not bool((check2 or {}).get("detected")):
 					print(f"✅ {self.account_name}: Cloudflare challenge solved successfully")
 					return True
 			except Exception:
@@ -1092,16 +1110,41 @@ class LinuxDoSignIn:
 							if "linux.do/session/sso_provider" in redir:
 								await page.wait_for_timeout(1200)
 								await self._take_screenshot(page, "linuxdo_sso_provider_redirect")
-								# 该页面在部分环境下实际上是 Cloudflare challenge（截图可见），
-								# 这里直接用 playwright-captcha 尝试过挑战，避免误判为缓存过期进而跳去 /login。
+								# /session/sso_provider 既可能是正常 SSO 中转，也可能是 CF challenge。
+								# 先给它一点时间自然跳回 connect.linux.do；如果仍停留且检测到 CF 特征，再尝试解挑战。
 								try:
-									ok_cf = await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
-									if ok_cf:
-										# 过挑战后通常会继续跳回 connect.linux.do
-										try:
-											await page.wait_for_url("**connect.linux.do/**", timeout=15000)
-										except Exception:
-											pass
+									await page.wait_for_url("**connect.linux.do/**", timeout=8000)
+								except Exception:
+									pass
+								try:
+									cur2 = page.url or ""
+									if "linux.do/session/sso_provider" in cur2:
+										cf_probe = await page.evaluate(
+											"""() => {
+												try {
+													const hasCfIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+													const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+													const hasTurnstileWidget =
+														!!document.querySelector('.cf-turnstile, [data-sitekey][data-theme], [data-sitekey][data-action], [data-sitekey][data-callback]');
+													const hasChallengePlatform =
+														!!document.querySelector('script[src*="/cdn-cgi/challenge-platform/"], link[href*="/cdn-cgi/challenge-platform/"]');
+													const hasChlForm =
+														!!document.querySelector(
+															'form[action*="__cf_chl"], form#challenge-form, #challenge-form, input[name^="cf_chl_"], input[name="cf_challenge_response"]'
+														);
+													const hasCfSpinner =
+														!!document.querySelector('#cf-spinner-please-wait, #cf-please-wait, #challenge-running, .cf-spinner');
+													const hasCfRay = !!document.querySelector('#cf-ray, [data-ray]');
+													const isTurnstile = hasCfIframe || hasTurnstileInput || hasTurnstileWidget;
+													const isInterstitial = hasChallengePlatform || hasChlForm || hasCfSpinner || hasCfRay;
+													return { detected: !!(isTurnstile || isInterstitial) };
+												} catch (e) {
+													return { detected: false };
+												}
+											}""",
+										)
+										if bool((cf_probe or {}).get("detected")):
+											await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
 								except Exception:
 									pass
 						except Exception:
@@ -1128,20 +1171,39 @@ class LinuxDoSignIn:
 											return True
 									except Exception:
 										pass
-									# 若遇到 Cloudflare challenge（常见于 /session/sso_provider 或 challenges.cloudflare.com），
-									# 用 playwright-captcha 尝试处理一次后继续等待。
+									# 智能检测 Cloudflare challenge：不要仅凭 URL 粗暴判断（SSO 中转页也可能正常），
+									# 仅当页面特征显示为 CF challenge 时才尝试解。
 									try:
-										if not tried_cf and (
-											"/session/sso_provider" in cur
-											or "challenges.cloudflare.com" in cur
-											or "/challenge" in cur
-										):
-											tried_cf = True
-											try:
-												await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
-											except Exception:
-												pass
-										elif not tried_cf:
+										if not tried_cf:
+											cf_probe = await page.evaluate("""() => {
+												try {
+													const hasCfIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+													const hasTurnstileInput = !!document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+													const hasTurnstileWidget =
+														!!document.querySelector('.cf-turnstile, [data-sitekey][data-theme], [data-sitekey][data-action], [data-sitekey][data-callback]');
+													const hasChallengePlatform =
+														!!document.querySelector('script[src*="/cdn-cgi/challenge-platform/"], link[href*="/cdn-cgi/challenge-platform/"]');
+													const hasChlForm =
+														!!document.querySelector(
+															'form[action*="__cf_chl"], form#challenge-form, #challenge-form, input[name^="cf_chl_"], input[name="cf_challenge_response"]'
+														);
+													const hasCfSpinner =
+														!!document.querySelector('#cf-spinner-please-wait, #cf-please-wait, #challenge-running, .cf-spinner');
+													const hasCfRay = !!document.querySelector('#cf-ray, [data-ray]');
+													const isTurnstile = hasCfIframe || hasTurnstileInput || hasTurnstileWidget;
+													const isInterstitial = hasChallengePlatform || hasChlForm || hasCfSpinner || hasCfRay;
+													return { detected: !!(isTurnstile || isInterstitial) };
+												} catch (e) {
+													return { detected: false };
+												}
+											}""")
+											if bool((cf_probe or {}).get("detected")):
+												tried_cf = True
+												try:
+													await self._handle_cloudflare_challenge(page, max_wait_seconds=45)
+												except Exception:
+													pass
+										if not tried_cf:
 											body = await page.content()
 											if self._looks_like_cloudflare_interstitial_html(body[:4000]):
 												tried_cf = True
