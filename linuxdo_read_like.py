@@ -60,6 +60,18 @@ def _env_str(key: str, default: str) -> str:
 	return v.strip() if isinstance(v, str) and v.strip() else default
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+	raw = os.getenv(key)
+	if raw is None:
+		return default
+	s = str(raw).strip().lower()
+	if s in {"1", "true", "yes", "y", "on"}:
+		return True
+	if s in {"0", "false", "no", "n", "off"}:
+		return False
+	return default
+
+
 def _clamp(n: int, lo: int, hi: int) -> int:
 	return max(lo, min(hi, n))
 
@@ -145,6 +157,10 @@ class LinuxDoAutoReadLike:
 		self.auto_state: dict[str, Any] = self._load_auto_state()
 		self._like_rate_limited_until: float = 0.0
 		self._like_rate_limited_reason: str = ""
+
+	def _should_use_session_current_api(self) -> bool:
+		# linux.do 近期开了/关了 /session/current.json 不稳定：默认不用，必要时可手动开启
+		return _env_bool("LINUXDO_USE_SESSION_CURRENT_API", default=False)
 
 	def _load_auto_state(self) -> dict[str, Any]:
 		if not os.path.exists(self.auto_state_path):
@@ -270,6 +286,51 @@ class LinuxDoAutoReadLike:
 			print(f"⚠️ {self.account_name}: [API] JSON 解析失败: {e}")
 			return status, {"raw": text}
 
+	async def _get_current_user_from_client(self, page) -> dict[str, Any] | None:
+		"""从前端运行时对象获取当前用户（比打 /session/current.json 更稳定）。"""
+		try:
+			res = await page.evaluate(
+				"""() => {
+					const pick = (u) => {
+						if (!u) return null;
+						const username = u.username ?? u.name ?? u.userName;
+						const trust_level = u.trust_level ?? u.trustLevel;
+						return { username: username ?? null, trust_level: trust_level ?? null };
+					};
+					try {
+						const u1 = window.Discourse?.User?.current?.();
+						const r1 = pick(u1);
+						if (r1 && r1.username) return r1;
+					} catch {}
+					try {
+						const u2 = window.Discourse?.__container__?.lookup?.('current-user:main');
+						const r2 = pick(u2);
+						if (r2 && r2.username) return r2;
+					} catch {}
+					try {
+						const u3 = window.PreloadStore?.get?.('currentUser')
+							|| window.PreloadStore?.data?.currentUser
+							|| window.PreloadStore?.data?.['currentUser'];
+						const r3 = pick(u3);
+						if (r3 && r3.username) return r3;
+					} catch {}
+					return null;
+				}"""
+			)
+		except Exception:
+			return None
+		if not isinstance(res, dict):
+			return None
+		username = res.get("username")
+		if not username:
+			return None
+		try:
+			tl_raw = res.get("trust_level")
+			tl = int(tl_raw) if tl_raw is not None else None
+		except Exception:
+			tl = None
+		return {"username": str(username), "trust_level": tl, "_from_client": True}
+
 	async def _get_current_user_from_dom(self, page) -> dict[str, Any] | None:
 		"""通过 DOM 检测登录状态（备用方案，当 /session/current.json 被限流时使用）"""
 		print(f"🔍 {self.account_name}: [DOM检测] 尝试从页面 DOM 获取用户信息")
@@ -383,6 +444,23 @@ class LinuxDoAutoReadLike:
 			except Exception:
 				pass
 
+			# 1) 先用前端对象判断（最不依赖后端接口变动）
+			client_user = await self._get_current_user_from_client(page)
+			if client_user:
+				return client_user
+
+			# 2) 再用 DOM 判断（当页面脚本尚未完全加载/被拦截时）
+			dom_user = await self._get_current_user_from_dom(page)
+			if dom_user:
+				return dom_user
+
+			# 3) 最后才尝试 /session/current.json（可选；linux.do 可能已关闭/限流）
+			if not self._should_use_session_current_api():
+				if attempt < max_retries - 1:
+					await page.wait_for_timeout(1800)
+					continue
+				return None
+
 			status, data = await self._fetch_json_same_origin(page, "/session/current.json")
 
 			# 处理 429 限流 - 改用 DOM 检测
@@ -396,10 +474,7 @@ class LinuxDoAutoReadLike:
 						continue
 				except Exception:
 					pass
-				print(f"⚠️ {self.account_name}: [用户检查] /session/current.json 返回 429 限流，改用 DOM 检测")
-				dom_user = await self._get_current_user_from_dom(page)
-				if dom_user:
-					return dom_user
+				print(f"⚠️ {self.account_name}: [用户检查] /session/current.json 返回 429 限流")
 				# DOM 检测也失败，等待一小段时间后重试
 				if attempt < max_retries - 1:
 					print(f"⚠️ {self.account_name}: [用户检查] DOM 检测失败，等待 5 秒后重试 ({attempt+1}/{max_retries})")
@@ -408,22 +483,78 @@ class LinuxDoAutoReadLike:
 				return None
 
 			if status != 200 or not isinstance(data, dict):
-				print(f"⚠️ {self.account_name}: [用户检查] 获取 session 失败 status={status}，尝试 DOM 检测")
-				dom_user = await self._get_current_user_from_dom(page)
-				if dom_user:
-					return dom_user
+				print(f"⚠️ {self.account_name}: [用户检查] 获取 session 失败 status={status}")
 				return None
 			user = data.get("current_user")
 			if isinstance(user, dict) and user.get("username"):
 				print(f"✅ {self.account_name}: [用户检查] 已登录用户: {user.get('username')}, trust_level={user.get('trust_level')}")
 				return user
-			print(f"⚠️ {self.account_name}: [用户检查] session 响应中无 current_user 字段，尝试 DOM 检测")
-			dom_user = await self._get_current_user_from_dom(page)
-			if dom_user:
-				return dom_user
+			print(f"⚠️ {self.account_name}: [用户检查] session 响应中无 current_user 字段")
 			return None
 
 		print(f"⚠️ {self.account_name}: [用户检查] 重试 {max_retries} 次后仍失败")
+		return None
+
+	async def _get_trust_level_from_client(self, page) -> int | None:
+		try:
+			res = await page.evaluate(
+				"""() => {
+					try {
+						const u1 = window.Discourse?.User?.current?.();
+						const tl1 = u1?.trust_level;
+						if (typeof tl1 === 'number') return tl1;
+					} catch {}
+					try {
+						const u2 = window.Discourse?.__container__?.lookup?.('current-user:main');
+						const tl2 = u2?.trust_level;
+						if (typeof tl2 === 'number') return tl2;
+					} catch {}
+					try {
+						const u3 = window.PreloadStore?.get?.('currentUser')
+							|| window.PreloadStore?.data?.currentUser
+							|| window.PreloadStore?.data?.['currentUser'];
+						const tl3 = u3?.trust_level;
+						if (typeof tl3 === 'number') return tl3;
+					} catch {}
+					return null;
+				}"""
+			)
+		except Exception:
+			return None
+		try:
+			return int(res) if res is not None else None
+		except Exception:
+			return None
+
+	async def _get_trust_level_from_user_json(self, page, username: str) -> int | None:
+		username = str(username or "").strip()
+		if not username:
+			return None
+		candidates = [
+			f"/u/{username}.json",
+			f"/users/{username}.json",
+			f"/u/{username}/summary.json",
+			f"/users/{username}/summary.json",
+		]
+		for path in candidates:
+			try:
+				status, data = await self._fetch_json_same_origin(page, path)
+			except Exception:
+				continue
+			if status != 200 or not isinstance(data, dict):
+				continue
+			user = data.get("user")
+			if not isinstance(user, dict):
+				user = data.get("user_summary") if isinstance(data.get("user_summary"), dict) else None
+			if not isinstance(user, dict):
+				continue
+			tl = user.get("trust_level")
+			if tl is None:
+				continue
+			try:
+				return int(tl)
+			except Exception:
+				continue
 		return None
 
 	async def _maybe_solve_cloudflare(self, page) -> None:
@@ -952,12 +1083,38 @@ class LinuxDoAutoReadLike:
 			user = await self._ensure_logged_in(page)
 			trust_level = user.get("trust_level")
 			username = str(user.get("username") or self.username)
+
+			# trust_level 决定每日点赞上限；当 /session/current.json 被限流时，DOM 回退可能拿不到 trust_level
+			if trust_level is None:
+				try:
+					await page.wait_for_timeout(900)
+				except Exception:
+					pass
+				tl = await self._get_trust_level_from_client(page)
+				if tl is None:
+					tl = await self._get_trust_level_from_user_json(page, username)
+				if tl is not None:
+					trust_level = tl
+					print(f"ℹ️ {self.account_name}: [额度] 通过回退方式获取 trust_level={trust_level}")
+				else:
+					print(f"⚠️ {self.account_name}: [额度] 未能获取 trust_level，将按 50 的保守上限计算")
+
 			limit = self._get_daily_like_limit(int(trust_level) if trust_level is not None else None)
 
 			print(f"🔍 {self.account_name}: [运行] 开始同步近24小时点赞记录")
 			liked_posts_24h = await self._sync_likes_24h(page, username)
 			used = len(liked_posts_24h)
 			remaining = max(0, limit - used)
+			if remaining <= 0 and trust_level is None:
+				# 若因为 trust_level 缺失导致“误判用完”，最后再尝试一次回退获取
+				tl = await self._get_trust_level_from_client(page)
+				if tl is None:
+					tl = await self._get_trust_level_from_user_json(page, username)
+				if tl is not None:
+					trust_level = tl
+					limit = self._get_daily_like_limit(int(trust_level))
+					remaining = max(0, limit - used)
+					print(f"ℹ️ {self.account_name}: [额度] 重新计算：trust_level={trust_level}, 上限={limit}, 剩余={remaining}")
 			stats.trust_level = int(trust_level) if trust_level is not None else None
 			stats.like_limit = int(limit)
 			stats.liked_posts_24h_at_start = int(used)
