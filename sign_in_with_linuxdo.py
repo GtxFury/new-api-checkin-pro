@@ -1087,22 +1087,60 @@ class LinuxDoSignIn:
 						)
 						await self._save_page_content_to_file(page, "sign_in_check")
 
+						# 某些情况下（如 Discourse SSO 中转页 /session/sso_provider），页面会先落在 linux.do，
+						# 然后再自动跳回 connect.linux.do 展示授权按钮；这里不能立刻判定“缓存过期”。
+						async def _wait_cache_oauth_ready() -> bool:
+							try:
+								start = time.time()
+								# 最多等待 15s，让 SSO 中转/重定向完成
+								while time.time() - start < 15:
+									cur = page.url or ""
+									# 已直接回到 provider（可能已自动授权）
+									if cur.startswith(self.provider_config.origin):
+										return True
+									# 进入登录页，说明确实失效
+									if "/login" in cur:
+										return False
+									# 授权按钮出现，说明已登录
+									try:
+										if await page.query_selector('a[href^="/oauth2/approve"]'):
+											return True
+									except Exception:
+										pass
+									# 若遇到 Cloudflare interstitial，尝试处理后继续等待
+									try:
+										body = await page.content()
+										if self._looks_like_cloudflare_interstitial_html(body[:4000]):
+											try:
+												# 避免在“仅用于判定缓存有效性”的阶段被 solver 30s 超时拖住
+												await asyncio.wait_for(
+													solve_captcha(
+														page,
+														captcha_type="cloudflare",
+														challenge_type="interstitial",
+													),
+													timeout=8.0,
+												)
+											except Exception:
+												pass
+									except Exception:
+										pass
+									await page.wait_for_timeout(600)
+							except Exception:
+								return False
+							return False
+
 						if response and response.url.startswith(self.provider_config.origin):
 							is_logged_in = True
+						else:
+							is_logged_in = await _wait_cache_oauth_ready()
+
+						if is_logged_in:
 							print(
-								f"✅ {self.account_name}: Already logged in via cache, "
-								f"proceeding to authorization"
+								f"✅ {self.account_name}: Already logged in via cache, proceeding to authorization"
 							)
 						else:
-							allow_btn = await page.query_selector('a[href^="/oauth2/approve"]')
-							if allow_btn:
-								is_logged_in = True
-								print(
-									f"✅ {self.account_name}: Already logged in via cache, "
-									f"proceeding to authorization"
-								)
-							else:
-								print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
+							print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
 					except Exception as e:
 						print(f"⚠️ {self.account_name}: Failed to check login status: {e}")
 
@@ -1260,7 +1298,7 @@ class LinuxDoSignIn:
 						await self._take_screenshot(page, "auth_page_navigation_failed_bypass")
 						return False, {"error": "Linux.do authorization page navigation failed"}
 
-				# 统一处理授权逻辑（无论是否通过缓存登录）
+					# 统一处理授权逻辑（无论是否通过缓存登录）
 				try:
 					oauth_redirect_url: str | None = None
 					observed_oauth_urls: list[str] = []
@@ -1297,48 +1335,72 @@ class LinuxDoSignIn:
 					except Exception:
 						pass
 
-					print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
-					await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
-					allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
+					# 快路径：如果已经落在 provider 回调 URL（已带 code），无需再等待/点击授权按钮
+					try:
+						cur0 = page.url or ""
+						if cur0.startswith(self.provider_config.origin) and "code=" in cur0 and "linuxdo" in cur0:
+							oauth_redirect_url = cur0
+							print(
+								f"ℹ️ {self.account_name}: OAuth already redirected (code detected): "
+								f"{redact_url_for_log(oauth_redirect_url)}"
+							)
+					except Exception:
+						pass
 
-					if not allow_btn_ele:
+					# 如果还在 linux.do 的 SSO 中转页，给它一点时间跳回 connect.linux.do
+					if not oauth_redirect_url:
+						try:
+							cur = page.url or ""
+							if "/session/sso_provider" in cur:
+								await page.wait_for_url("**connect.linux.do/**", timeout=15000)
+						except Exception:
+							pass
+
+					allow_btn_ele = None
+					if not oauth_redirect_url:
+						print(f"ℹ️ {self.account_name}: Waiting for authorization button...")
+						await page.wait_for_selector('a[href^="/oauth2/approve"]', timeout=30000)
+						allow_btn_ele = await page.query_selector('a[href^="/oauth2/approve"]')
+
+					if not oauth_redirect_url and not allow_btn_ele:
 						print(f"❌ {self.account_name}: Approve button not found")
 						await self._take_screenshot(page, "approve_button_not_found_bypass")
 						return False, {"error": "Linux.do allow button not found"}
 
-					print(f"ℹ️ {self.account_name}: Clicking authorization button...")
-					try:
-						# 避免 click 自带的“等待导航/网络空闲”导致超时（linux.do 有时会被挑战页/风控卡住）
-						await allow_btn_ele.click(no_wait_after=True, timeout=30000)
-					except Exception:
-						# 兜底：走 JS click，不等待任何后续事件
+					if not oauth_redirect_url:
+						print(f"ℹ️ {self.account_name}: Clicking authorization button...")
 						try:
-							await page.evaluate("(el) => el && el.click && el.click()", allow_btn_ele)
+							# 避免 click 自带的“等待导航/网络空闲”导致超时（linux.do 有时会被挑战页/风控卡住）
+							await allow_btn_ele.click(no_wait_after=True, timeout=30000)
 						except Exception:
-							raise
-					# 等待跳转到 provider 的 OAuth 回调页面，并保存第一次匹配到的 OAuth URL，
-					# 便于后续在站点发生二次重定向（例如跳转到 /app 或 /login）后依然能够解析到
-					# 原始的 code/state 参数。
-					try:
-						await page.wait_for_url(
-							f"**{self.provider_config.origin}/**",
-							timeout=30000,
-						)
-						# 优先使用“带 code 的最早一次跳转”，否则回退到当前 URL
-						oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
-						print(
-							f"ℹ️ {self.account_name}: Captured OAuth redirect URL: "
-							f"{redact_url_for_log(oauth_redirect_url)}"
-						)
-					except Exception as nav_err:
-						print(
-							f"⚠️ {self.account_name}: Wait for OAuth redirect URL failed or timed out: {nav_err}"
-						)
-						# 尝试等待页面加载完成，避免直接视为失败
+							# 兜底：走 JS click，不等待任何后续事件
+							try:
+								await page.evaluate("(el) => el && el.click && el.click()", allow_btn_ele)
+							except Exception:
+								raise
+						# 等待跳转到 provider 的 OAuth 回调页面，并保存第一次匹配到的 OAuth URL，
+						# 便于后续在站点发生二次重定向（例如跳转到 /app 或 /login）后依然能够解析到
+						# 原始的 code/state 参数。
 						try:
-							await page.wait_for_load_state("load", timeout=5000)
-						except Exception:
-							await page.wait_for_timeout(5000)
+							await page.wait_for_url(
+								f"**{self.provider_config.origin}/**",
+								timeout=30000,
+							)
+							# 优先使用“带 code 的最早一次跳转”，否则回退到当前 URL
+							oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
+							print(
+								f"ℹ️ {self.account_name}: Captured OAuth redirect URL: "
+								f"{redact_url_for_log(oauth_redirect_url)}"
+							)
+						except Exception as nav_err:
+							print(
+								f"⚠️ {self.account_name}: Wait for OAuth redirect URL failed or timed out: {nav_err}"
+							)
+							# 尝试等待页面加载完成，避免直接视为失败
+							try:
+								await page.wait_for_load_state("load", timeout=5000)
+							except Exception:
+								await page.wait_for_timeout(5000)
 
 					# 从 localStorage 获取 user 对象并提取 id
 					api_user = None
