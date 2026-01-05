@@ -23,27 +23,9 @@ from utils.redact import redact_url_for_log, redact_value_for_log
 
 # 首选依赖：playwright-captcha，用于更智能地处理 Cloudflare Turnstile / Interstitial
 try:
-	import importlib.metadata
-
-	import playwright_captcha as _playwright_captcha
 	from playwright_captcha import ClickSolver, CaptchaType, FrameworkType  # type: ignore[assignment]
-
-	_required = ("CLOUDFLARE_TURNSTILE", "CLOUDFLARE_INTERSTITIAL")
-	if not all(hasattr(CaptchaType, k) for k in _required):
-		raise RuntimeError(f"playwright_captcha.CaptchaType 缺少成员: {_required}")
-	if not hasattr(FrameworkType, "CAMOUFOX"):
-		raise RuntimeError("playwright_captcha.FrameworkType 缺少 CAMOUFOX")
-
-	try:
-		_ver = importlib.metadata.version("playwright-captcha")
-	except Exception:
-		_ver = "unknown"
-
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = True
-	print(
-		f"ℹ️ LinuxDoSignIn: playwright-captcha imported successfully "
-		f"(version={_ver}, file={getattr(_playwright_captcha, '__file__', 'unknown')})"
-	)
+	print("ℹ️ LinuxDoSignIn: playwright-captcha imported successfully")
 except Exception as e1:  # pragma: no cover - 可选依赖
 	ClickSolver = None  # type: ignore[assignment]
 	CaptchaType = None  # type: ignore[assignment]
@@ -93,12 +75,7 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
 					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
 					const title = (document.title || '').toLowerCase();
-					const titleLooks =
-						title.includes('just a moment') ||
-						title.includes('attention required') ||
-						title.includes('please wait') ||
-						title.includes('请稍候') ||
-						title.includes('请稍等');
+					const titleLooks = title.includes('just a moment') || title.includes('attention required');
 					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
 				} catch (e) {
 					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
@@ -489,15 +466,15 @@ class LinuxDoSignIn:
 		while time.time() - start_time < max_wait_seconds:
 			# 检测是否存在 Cloudflare 挑战
 			try:
-					cf_detected = await page.evaluate("""() => {
-						try {
-							const title = (document.title || '').toLowerCase();
-							const bodyText = document.body ? (document.body.innerText || '') : '';
+				cf_detected = await page.evaluate("""() => {
+					try {
+						const title = (document.title || '').toLowerCase();
+						const bodyText = document.body ? (document.body.innerText || '') : '';
 
-							// 检测 "Just a moment" 页面
-							if (title.includes('just a moment') || title.includes('attention required') || title.includes('please wait') || title.includes('请稍候') || title.includes('请稍等')) {
-								return { detected: true, type: 'interstitial' };
-							}
+						// 检测 "Just a moment" 页面
+						if (title.includes('just a moment') || title.includes('attention required')) {
+							return { detected: true, type: 'interstitial' };
+						}
 
 						// 检测 Cloudflare 挑战 iframe
 						const cfIframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
