@@ -506,16 +506,24 @@ class LinuxDoSignIn:
 			print(f"ℹ️ {self.account_name}: Cloudflare challenge detected (type: {cf_type}), attempting to solve...")
 
 			# 尝试使用 playwright-captcha 解决
+			solver_attempted = False
+			solver_succeeded = False
 			try:
 				# 先尝试 interstitial
-				await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+				solver_attempted = True
+				solver_succeeded = bool(
+					await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+				) or solver_succeeded
 			except Exception as e:
 				print(f"⚠️ {self.account_name}: CF interstitial solve error: {e}")
 
 			# 再尝试 turnstile
 			if _should_try_turnstile_solver():
 				try:
-					await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+					solver_attempted = True
+					solver_succeeded = bool(
+						await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+					) or solver_succeeded
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: CF turnstile solve error: {e}")
 
@@ -550,7 +558,15 @@ class LinuxDoSignIn:
 					}
 				}""")
 				if not bool((check2 or {}).get("detected")):
-					print(f"✅ {self.account_name}: Cloudflare challenge solved successfully")
+					# 注意：solver 可能抛错/返回 False，但页面也可能因自动跳转/刷新而“自己过了挑战”。
+					if solver_succeeded:
+						print(f"✅ {self.account_name}: Cloudflare challenge cleared (solver)")
+					elif solver_attempted:
+						print(
+							f"✅ {self.account_name}: Cloudflare challenge cleared (page changed without solver success)"
+						)
+					else:
+						print(f"✅ {self.account_name}: Cloudflare challenge cleared")
 					return True
 			except Exception:
 				pass
