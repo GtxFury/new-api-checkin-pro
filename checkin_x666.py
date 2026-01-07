@@ -1183,12 +1183,9 @@ class X666CheckIn:
 			'display': f'Current balance: {quota:.2f}, Used: {used_quota:.2f}, Bonus: {bonus_quota:.2f}',
 		}
 
-	# x666.me 的 LinuxDO OAuth 参数
-	X666_LINUXDO_CLIENT_ID = 'p4V7ALyYtjreFlru3Mp5V5enzhpMYxcy'
-
 	async def _x666_login_and_get_balance(self, page, context, username: str, password: str) -> dict:
 		"""登录 x666.me 并获取余额（参考 fovt 的 OAuth 流程）"""
-		from urllib.parse import quote
+		from urllib.parse import quote, urlparse, parse_qs
 
 		# 1) 先检查是否已登录
 		await page.goto(f'{self.X666_ORIGIN}/console', wait_until='domcontentloaded')
@@ -1196,12 +1193,11 @@ class X666CheckIn:
 
 		cur_url = page.url or ''
 		if '/login' not in cur_url:
-			# 可能已登录，尝试获取余额
 			balance = await self._x666_get_balance(page)
 			if balance.get('success'):
 				return balance
 
-		# 2) 未登录，获取 OAuth state
+		# 2) 未登录，获取 OAuth state 并构造 URL
 		await page.goto(f'{self.X666_ORIGIN}/login', wait_until='domcontentloaded')
 		await page.wait_for_timeout(1000)
 
@@ -1221,21 +1217,69 @@ class X666CheckIn:
 		except Exception as e:
 			return {'success': False, 'error': f'OAuth state 错误: {e}'}
 
-		# 3) 构造 OAuth URL 并导航（linux.do 已登录，直接授权）
-		redirect_uri = f'{self.X666_ORIGIN}/api/oauth/linuxdo'
-		oauth_url = (
-			'https://connect.linux.do/oauth2/authorize?'
-			f'response_type=code&client_id={self.X666_LINUXDO_CLIENT_ID}&state={auth_state}'
-			f'&redirect_uri={quote(redirect_uri, safe="")}'
-		)
-		print(f'ℹ️ {self.account_name}: 导航到 OAuth 授权页')
-		await page.goto(oauth_url, wait_until='domcontentloaded')
-		await page.wait_for_timeout(1000)
+		# 3) 监听回调 URL 捕获 code
+		captured_urls: list[str] = []
+		def _capture(u: str) -> None:
+			if u and 'x666.me' in u and 'code=' in u:
+				if u not in captured_urls:
+					captured_urls.append(u)
+		try:
+			page.on('request', lambda req: _capture(req.url))
+			page.on('framenavigated', lambda frame: _capture(frame.url))
+		except Exception:
+			pass
 
-		# 4) 如果需要登录 linux.do
+		# 4) 用 x666.me 自己的 OAuth 参数（从站点获取）
+		redirect_uri = f'{self.X666_ORIGIN}/api/oauth/linuxdo'
+		# 尝试从站点获取 client_id
+		try:
+			config = await page.evaluate(
+				"""async () => {
+					try {
+						const resp = await fetch('/api/status');
+						const data = await resp.json();
+						return data.data || data;
+					} catch (e) { return {}; }
+				}"""
+			)
+			client_id = (config or {}).get('linuxdo_client_id', '')
+		except Exception:
+			client_id = ''
+
+		if not client_id:
+			# 兜底：尝试从页面 JS 获取
+			try:
+				client_id = await page.evaluate(
+					"""() => {
+						try {
+							// 尝试从全局变量或 window 获取
+							return window.LINUXDO_CLIENT_ID || window.__LINUXDO_CLIENT_ID__ || '';
+						} catch (e) { return ''; }
+					}"""
+				)
+			except Exception:
+				client_id = ''
+
+		if not client_id:
+			print(f'⚠️ {self.account_name}: 未找到 x666 client_id，尝试用页面按钮触发 OAuth')
+			# 用页面按钮触发
+			clicked = await self._click_newapi_linuxdo_continue(page)
+			if not clicked:
+				return {'success': False, 'error': '未找到 LinuxDO 登录按钮'}
+		else:
+			print(f'ℹ️ {self.account_name}: x666 client_id: {client_id[:8]}...')
+			oauth_url = (
+				'https://connect.linux.do/oauth2/authorize?'
+				f'response_type=code&client_id={client_id}&state={auth_state}'
+				f'&redirect_uri={quote(redirect_uri, safe="")}'
+			)
+			await page.goto(oauth_url, wait_until='domcontentloaded')
+			await page.wait_for_timeout(1000)
+
+		# 5) 如果需要登录 linux.do
 		await self._linuxdo_login_if_needed(page, username, password)
 
-		# 5) 点击授权按钮
+		# 6) 点击授权按钮
 		approved = await self._click_first(
 			page,
 			['a[href^="/oauth2/approve"]', 'button:has-text("允许")', 'button:has-text("授权")'],
@@ -1243,31 +1287,48 @@ class X666CheckIn:
 		)
 		print(f'ℹ️ {self.account_name}: x666 OAuth approve clicked: {"yes" if approved else "no"}')
 
-		if approved:
-			# 等待回调完成
-			try:
-				await page.wait_for_url(f'**{self.X666_ORIGIN}/**', timeout=30000)
-				print(f'ℹ️ {self.account_name}: x666 回调完成，当前 URL: {page.url}')
-			except Exception as e:
-				print(f'⚠️ {self.account_name}: x666 回调等待超时: {e}')
+		# 7) 等待回调并捕获 code
+		await page.wait_for_timeout(3000)
+		callback_url = captured_urls[0] if captured_urls else (page.url or '')
+		print(f'ℹ️ {self.account_name}: x666 回调 URL: {callback_url[:80]}...')
 
-		# 6) 等待 localStorage 中出现 user 数据
+		parsed = urlparse(callback_url)
+		qs = parse_qs(parsed.query)
+		code = (qs.get('code') or [''])[0]
+
+		if code:
+			# 手动调用回调 API
+			print(f'ℹ️ {self.account_name}: 调用 x666 回调 API')
+			try:
+				result = await page.evaluate(
+					"""async ({ code, state }) => {
+						try {
+							const url = '/api/oauth/linuxdo?code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state);
+							const resp = await fetch(url, { credentials: 'include' });
+							const text = await resp.text();
+							return { status: resp.status, text: text.slice(0, 500) };
+						} catch (e) { return { status: 0, error: e.message }; }
+					}""",
+					{'code': code, 'state': auth_state},
+				)
+				print(f'ℹ️ {self.account_name}: x666 回调响应: status={result.get("status")}')
+			except Exception as e:
+				print(f'⚠️ {self.account_name}: x666 回调失败: {e}')
+
+		# 8) 等待 localStorage user
 		await page.wait_for_timeout(2000)
 		try:
 			await page.wait_for_function(
-				"""() => {
-					try { return !!localStorage.getItem('user'); } catch (e) { return false; }
-				}""",
-				timeout=15000,
+				"""() => { try { return !!localStorage.getItem('user'); } catch (e) { return false; } }""",
+				timeout=10000,
 			)
 			print(f'ℹ️ {self.account_name}: x666 localStorage user 已就绪')
 		except Exception:
 			print(f'⚠️ {self.account_name}: x666 localStorage user 未出现，尝试导航到 console')
-			# 尝试导航到 console 触发 SPA
 			await page.goto(f'{self.X666_ORIGIN}/console', wait_until='domcontentloaded')
 			await page.wait_for_timeout(2000)
 
-		# 7) 获取余额
+		# 9) 获取余额
 		print(f'ℹ️ {self.account_name}: 开始获取 x666 余额')
 		return await self._x666_get_balance(page)
 
