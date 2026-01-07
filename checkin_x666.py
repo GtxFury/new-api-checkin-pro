@@ -296,19 +296,16 @@ class X666CheckIn:
 		await self._take_screenshot(page, 'linuxdo_login_page')
 		await self._save_page_html(page, 'linuxdo_login_page')
 
-		# 尝试复用通用的 CF/Turnstile 处理（可选依赖）
+		# 尝试复用通用的 CF Interstitial 处理（可选依赖）。
+		# 说明：Turnstile click solver 在部分环境（如 Actions 出口 IP）容易反复超时刷屏，
+		# 这里默认不强依赖“点验证码”，而是优先等待页面自己放行/渲染出登录表单。
 		try:
-			from sign_in_with_linuxdo import solve_captcha, _should_try_turnstile_solver  # type: ignore
+			from sign_in_with_linuxdo import solve_captcha  # type: ignore
 
 			try:
 				await solve_captcha(page, captcha_type='cloudflare', challenge_type='interstitial')
 			except Exception:
 				pass
-			if _should_try_turnstile_solver():
-				try:
-					await solve_captcha(page, captcha_type='cloudflare', challenge_type='turnstile')
-				except Exception:
-					pass
 		except Exception:
 			pass
 
@@ -317,14 +314,19 @@ class X666CheckIn:
 			await page.wait_for_function(
 				"""() => {
 					try {
+						// linux.do 登录页近期 UI/属性可能变化：兼容 id/name/autocomplete/aria-label/type=text
 						const u =
-							document.querySelector('#login-account-name, #signin_username, input[name=\"login\"], input[name=\"username\"], input[autocomplete=\"username\"], input[type=\"email\"]');
+							document.querySelector(
+								'#login-account-name, #signin_username, input[name=\"login\"], input[name=\"username\"], input[autocomplete=\"username\"], input[type=\"email\"], input[type=\"text\"], input[aria-label*=\"邮件\"], input[aria-label*=\"用户名\"]'
+							);
 						const p =
-							document.querySelector('#login-account-password, #signin_password, input[name=\"password\"], input[autocomplete=\"current-password\"], input[type=\"password\"]');
+							document.querySelector(
+								'#login-account-password, #signin_password, input[name=\"password\"], input[autocomplete=\"current-password\"], input[type=\"password\"], input[aria-label*=\"密码\"]'
+							);
 						return !!(u && p);
 					} catch (e) { return false; }
 				}""",
-				timeout=45000,
+				timeout=90000,
 			)
 		except Exception:
 			await self._take_screenshot(page, 'linuxdo_login_inputs_wait_timeout')
@@ -362,7 +364,10 @@ class X666CheckIn:
 				'input[name="login"]',
 				'input[name="username"]',
 				'input[type="email"]',
+				'input[type="text"]',
 				'input[autocomplete="username"]',
+				'input[aria-label*="邮件"]',
+				'input[aria-label*="用户名"]',
 			],
 			username,
 		)
@@ -373,6 +378,7 @@ class X666CheckIn:
 				'input[name="password"]',
 				'input[type="password"]',
 				'input[autocomplete="current-password"]',
+				'input[aria-label*="密码"]',
 			],
 			password,
 		)
@@ -461,6 +467,26 @@ class X666CheckIn:
 			print(f'ℹ️ {self.account_name}: OAuth/UI login at {origin}, current url: {page.url}')
 		except Exception:
 			pass
+
+		# 记录页面基础信息，便于排查“没点到按钮/按钮被遮挡/页面没渲染”
+		try:
+			meta = await page.evaluate(
+				"""() => {
+					try {
+						const title = document.title || '';
+						const loginBtn =
+							!!document.querySelector('button') &&
+							!!Array.from(document.querySelectorAll('button,a')).find(el => (el.innerText || '').includes('登录') || (el.innerText || '').includes('登陆'));
+						const hasLogout =
+							!!Array.from(document.querySelectorAll('button,a')).find(el => (el.innerText || '').includes('退出'));
+						return { title, loginBtn, hasLogout, url: location.href };
+					} catch (e) { return { error: String(e), url: location.href }; }
+				}"""
+			)
+			print(f'ℹ️ {self.account_name}: {origin} page meta: {meta}')
+		except Exception:
+			pass
+
 		login_clicked = await self._click_first(
 			page,
 			[
@@ -475,11 +501,29 @@ class X666CheckIn:
 			],
 			timeout_ms=2500,
 		)
+		print(f'ℹ️ {self.account_name}: {origin} login button clicked: {"yes" if login_clicked else "no"}')
 		if login_clicked:
 			await page.wait_for_timeout(800)
+			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）
+			try:
+				await page.wait_for_function(
+					"""(origin) => {
+						try {
+							const u = location.href || '';
+							if (u.startsWith(origin)) return false;
+							return u.includes('connect.linux.do') || u.includes('linux.do') || u.includes('/oauth2/');
+						} catch (e) { return false; }
+					}""",
+					origin,
+					timeout=15000,
+				)
+			except Exception:
+				await self._take_screenshot(page, 'oauth_login_no_navigation')
+				await self._save_page_html(page, 'oauth_login_no_navigation')
+				raise RuntimeError('点击登录后未能跳转到 linux.do 授权页（可能被遮挡/风控/页面未响应）')
 
 		# 若出现 provider 选择页/弹窗，点 linux.do
-		_ = await self._click_first(
+		provider_clicked = await self._click_first(
 			page,
 			[
 				'button:has-text("linux.do")',
@@ -493,6 +537,8 @@ class X666CheckIn:
 			],
 			timeout_ms=2500,
 		)
+		if provider_clicked:
+			print(f'ℹ️ {self.account_name}: {origin} provider option clicked: linux.do')
 		await page.wait_for_timeout(500)
 
 		# 进入 linux.do / connect.linux.do 登录/授权流程
@@ -594,9 +640,30 @@ class X666CheckIn:
 			await self._save_page_html(page, 'qd_checkin_button_not_found')
 			return False, '未找到签到按钮'
 
-		# 等待状态变化或 toast；若接口可用，优先等 can_spin 变为 false
+		# 等待状态变化或 toast；若接口可用，优先等 can_spin 变为 false。
+		# 进一步：等待抽奖接口返回（比 UI 文案更可靠）。
 		try:
 			if can_spin is True:
+				# 点击“开始转动”后，页面会请求 /api/lottery/spin；以其响应为准
+				try:
+					resp = await page.wait_for_response(
+						lambda r: '/api/lottery/spin' in (r.url or ''),
+						timeout=30000,
+					)
+					try:
+						if resp and resp.status in (200, 400):
+							j = await resp.json()
+							if isinstance(j, dict):
+								if j.get('success'):
+									return True, '签到成功'
+								msg = j.get('message', j.get('msg', '')) or ''
+								if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
+									return True, '今日已签到'
+					except Exception:
+						pass
+				except Exception:
+					pass
+
 				await page.wait_for_function(
 					"""async () => {
 						try {
