@@ -752,6 +752,23 @@ class X666CheckIn:
 		# 进入 linux.do / connect.linux.do 登录/授权流程
 		await self._linuxdo_login_if_needed(page, username, password)
 
+		# 监听回调 URL 捕获 code 参数（参考 fovt 实现）
+		captured_callback_urls: list[str] = []
+
+		def _capture_callback(u: str) -> None:
+			try:
+				if u and 'up.x666.me' in u and 'code=' in u:
+					if u not in captured_callback_urls:
+						captured_callback_urls.append(u)
+			except Exception:
+				pass
+
+		try:
+			page.on('request', lambda req: _capture_callback(req.url))
+			page.on('framenavigated', lambda frame: _capture_callback(frame.url))
+		except Exception:
+			pass
+
 		# 授权按钮
 		try:
 			print(f'ℹ️ {self.account_name}: OAuth before approve, url={page.url}')
@@ -795,7 +812,7 @@ class X666CheckIn:
 						timeout=60000,
 					)
 
-					# 处理“OAuth 打开新标签页”的情况：优先切到 up.x666.me 那个页
+					# 处理"OAuth 打开新标签页"的情况：优先切到 up.x666.me 那个页
 					try:
 						alt = await self._switch_to_context_page_by_host(page, ('up.x666.me',), timeout_ms=8000)
 						if alt is not None:
@@ -803,6 +820,57 @@ class X666CheckIn:
 							print(f'ℹ️ {self.account_name}: Switched to up.x666.me page after approve, url={getattr(page, "url", None) or ""}')
 					except Exception:
 						pass
+
+					# 捕获当前 URL 中的 code（参考 fovt）
+					callback_url = captured_callback_urls[0] if captured_callback_urls else (page.url or '')
+					print(f'ℹ️ {self.account_name}: OAuth callback URL: {callback_url[:100]}...')
+
+					# 从 URL 提取 code 参数，手动调用回调 API（参考 fovt 的 _call_oauth_callback）
+					from urllib.parse import urlparse, parse_qs
+					parsed = urlparse(callback_url)
+					qs = parse_qs(parsed.query)
+					code = (qs.get('code') or [''])[0]
+
+					if code:
+						print(f'ℹ️ {self.account_name}: Got OAuth code: {code[:20]}..., calling callback API')
+						# 手动调用回调 API 建立 session
+						try:
+							result = await page.evaluate(
+								"""async (code) => {
+									try {
+										const url = 'https://up.x666.me/api/auth/callback?code=' + encodeURIComponent(code);
+										const resp = await fetch(url, {
+											credentials: 'include',
+											headers: { 'Accept': 'application/json, text/plain, */*' }
+										});
+										const text = await resp.text();
+										return { status: resp.status, text: text.slice(0, 500) };
+									} catch (e) {
+										return { status: 0, error: e.message };
+									}
+								}""",
+								code,
+							)
+							print(f'ℹ️ {self.account_name}: Callback API response: status={result.get("status")}, body={str(result.get("text", ""))[:100]}')
+
+							# 解析响应，提取 token 并写入 localStorage
+							if result.get('status') == 200:
+								try:
+									import json as _json
+									data = _json.loads(result.get('text', '{}'))
+									token = None
+									if isinstance(data, dict):
+										token = data.get('token') or data.get('access_token') or (data.get('data', {}) or {}).get('token')
+									if token:
+										await page.evaluate(
+											"""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""",
+											token,
+										)
+										print(f'ℹ️ {self.account_name}: Token extracted and saved to localStorage')
+								except Exception as e:
+									print(f'⚠️ {self.account_name}: Failed to parse callback response: {e}')
+						except Exception as e:
+							print(f'⚠️ {self.account_name}: Callback API call failed: {e}')
 
 					# 再等 up.x666.me 写入 token（SPA/回调可能需要时间）
 					try:
@@ -812,7 +880,7 @@ class X666CheckIn:
 									return !!localStorage.getItem('token');
 								} catch (e) { return false; }
 							}""",
-							timeout=45000,
+							timeout=15000,
 						)
 					except Exception:
 						# 如果不在 up 域，导航到 up 再等（如果 token 已写入，会直接存在）
@@ -824,7 +892,7 @@ class X666CheckIn:
 								"""() => {
 									try { return !!localStorage.getItem('token'); } catch (e) { return false; }
 								}""",
-								timeout=45000,
+								timeout=15000,
 							)
 						except Exception:
 							await self._take_screenshot(page, 'qd_oauth_callback_token_missing')
@@ -832,7 +900,7 @@ class X666CheckIn:
 				else:
 					await page.wait_for_url(f'**{origin}/**', timeout=30000)
 			except Exception:
-				# 不直接失败，后续由“登录态校验”兜底判定
+				# 不直接失败，后续由"登录态校验"兜底判定
 				pass
 
 		# 如果仍停留在 linux.do/connect.linux.do，兜底回站点域名（部分站点授权后会自动跳回其它同系域名，如 up.x666.me）
