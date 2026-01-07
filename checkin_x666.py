@@ -237,6 +237,17 @@ class X666CheckIn:
 		os.makedirs(logs_dir, exist_ok=True)
 		return logs_dir
 
+	async def _save_page_html(self, page, name: str) -> None:
+		try:
+			ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+			filename = f'{self.safe_account_name}_{ts}_{name}.html'
+			path = os.path.join(self._logs_dir(), filename)
+			html = await page.content()
+			with open(path, 'w', encoding='utf-8') as f:
+				f.write(html)
+		except Exception:
+			pass
+
 	async def _take_screenshot(self, page, name: str) -> None:
 		try:
 			ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -281,6 +292,9 @@ class X666CheckIn:
 			await page.goto('https://linux.do/login', wait_until='domcontentloaded')
 		except Exception:
 			return
+		await page.wait_for_timeout(800)
+		await self._take_screenshot(page, 'linuxdo_login_page')
+		await self._save_page_html(page, 'linuxdo_login_page')
 
 		# 尝试复用通用的 CF/Turnstile 处理（可选依赖）
 		try:
@@ -297,6 +311,24 @@ class X666CheckIn:
 					pass
 		except Exception:
 			pass
+
+		# 等待登录输入框出现（如果停留在 CF/风控页面，这里能更快暴露原因并产出日志）
+		try:
+			await page.wait_for_function(
+				"""() => {
+					try {
+						const u =
+							document.querySelector('#login-account-name, #signin_username, input[name=\"login\"], input[name=\"username\"], input[autocomplete=\"username\"], input[type=\"email\"]');
+						const p =
+							document.querySelector('#login-account-password, #signin_password, input[name=\"password\"], input[autocomplete=\"current-password\"], input[type=\"password\"]');
+						return !!(u && p);
+					} catch (e) { return false; }
+				}""",
+				timeout=45000,
+			)
+		except Exception:
+			await self._take_screenshot(page, 'linuxdo_login_inputs_wait_timeout')
+			await self._save_page_html(page, 'linuxdo_login_inputs_wait_timeout')
 
 		async def _set_value(selectors: list[str], value: str) -> bool:
 			for sel in selectors:
@@ -345,7 +377,22 @@ class X666CheckIn:
 			password,
 		)
 		if not user_ok or not pwd_ok:
+			try:
+				meta = await page.evaluate(
+					"""() => {
+						try {
+							const title = document.title || '';
+							const hasCfIframe = !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');
+							const body = document.body ? (document.body.innerText || '').slice(0, 400) : '';
+							return { title, hasCfIframe, body };
+						} catch (e) { return { error: String(e) }; }
+					}"""
+				)
+				print(f'⚠️ {self.account_name}: linux.do 登录页输入框检测失败，页面信息: {meta}')
+			except Exception:
+				pass
 			await self._take_screenshot(page, 'linuxdo_login_inputs_not_found')
+			await self._save_page_html(page, 'linuxdo_login_inputs_not_found')
 			raise RuntimeError('linux.do 登录页未找到可输入的账号/密码框')
 
 		clicked = False
@@ -383,6 +430,7 @@ class X666CheckIn:
 			)
 		except Exception:
 			await self._take_screenshot(page, 'linuxdo_login_timeout')
+			await self._save_page_html(page, 'linuxdo_login_timeout')
 			raise RuntimeError('linux.do 登录提交超时（可能被 Cloudflare/风控拦截）')
 
 	async def _click_first(self, page, selectors: list[str], *, timeout_ms: int = 6000) -> bool:
@@ -409,6 +457,10 @@ class X666CheckIn:
 		await page.wait_for_timeout(800)
 
 		# 若已登录，通常不会出现明显的“登录/登陆”入口；这里尽量只在能找到入口时点击
+		try:
+			print(f'ℹ️ {self.account_name}: OAuth/UI login at {origin}, current url: {page.url}')
+		except Exception:
+			pass
 		login_clicked = await self._click_first(
 			page,
 			[
@@ -417,6 +469,7 @@ class X666CheckIn:
 				'button:has-text("登陆")',
 				'a:has-text("登陆")',
 				'a[href*="/login"]',
+				'a[href="/login"]',
 				'button:has-text("Login")',
 				'a:has-text("Login")',
 			],
@@ -435,6 +488,8 @@ class X666CheckIn:
 				'a:has-text("Linux.do")',
 				'button:has-text("Linux")',
 				'a:has-text("Linux")',
+				'button:has-text("LinuxDO")',
+				'a:has-text("LinuxDO")',
 			],
 			timeout_ms=2500,
 		)
@@ -536,6 +591,7 @@ class X666CheckIn:
 		)
 		if not clicked:
 			await self._take_screenshot(page, 'qd_checkin_button_not_found')
+			await self._save_page_html(page, 'qd_checkin_button_not_found')
 			return False, '未找到签到按钮'
 
 		# 等待状态变化或 toast；若接口可用，优先等 can_spin 变为 false
@@ -578,6 +634,7 @@ class X666CheckIn:
 			except Exception:
 				pass
 			await self._take_screenshot(page, 'qd_checkin_timeout')
+			await self._save_page_html(page, 'qd_checkin_timeout')
 			return False, '签到状态未确认（可能需要人工处理验证码/风控）'
 
 		return True, '签到成功'
@@ -800,6 +857,7 @@ class X666CheckIn:
 				balance = await self._x666_get_balance(page)
 				if not balance.get('success'):
 					await self._take_screenshot(page, 'x666_balance_failed')
+					await self._save_page_html(page, 'x666_balance_failed')
 					return False, {'checkin': True, 'error': balance.get('error', '获取余额失败')}
 
 				return True, {
@@ -812,6 +870,7 @@ class X666CheckIn:
 				}
 			except Exception as e:
 				await self._take_screenshot(page, 'x666_flow_exception')
+				await self._save_page_html(page, 'x666_flow_exception')
 				return False, {'checkin': False, 'error': f'x666 新签到流程异常: {e}'}
 			finally:
 				try:
