@@ -1248,8 +1248,9 @@ class X666CheckIn:
 			# 等待回调完成
 			try:
 				await page.wait_for_url(f'**{self.X666_ORIGIN}/**', timeout=30000)
-			except Exception:
-				pass
+				print(f'ℹ️ {self.account_name}: x666 回调完成，当前 URL: {page.url}')
+			except Exception as e:
+				print(f'⚠️ {self.account_name}: x666 回调等待超时: {e}')
 
 		# 6) 等待 localStorage 中出现 user 数据
 		await page.wait_for_timeout(2000)
@@ -1260,12 +1261,15 @@ class X666CheckIn:
 				}""",
 				timeout=15000,
 			)
+			print(f'ℹ️ {self.account_name}: x666 localStorage user 已就绪')
 		except Exception:
+			print(f'⚠️ {self.account_name}: x666 localStorage user 未出现，尝试导航到 console')
 			# 尝试导航到 console 触发 SPA
 			await page.goto(f'{self.X666_ORIGIN}/console', wait_until='domcontentloaded')
 			await page.wait_for_timeout(2000)
 
 		# 7) 获取余额
+		print(f'ℹ️ {self.account_name}: 开始获取 x666 余额')
 		return await self._x666_get_balance(page)
 
 	async def execute(self, access_token: str, cookies: dict, api_user: str | int) -> tuple[bool, dict]:
