@@ -12,6 +12,7 @@ import hashlib
 import time
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -22,6 +23,9 @@ class X666CheckIn:
 	QD_ORIGIN = 'https://qd.x666.me'
 	UP_ORIGIN = 'https://up.x666.me'
 	X666_ORIGIN = 'https://x666.me'
+	# qd/up 侧 linux.do OAuth 固定参数（站点改动时可能需要更新）
+	QD_LINUXDO_CLIENT_ID = 'p4V7ALyYtjreFlru3Mp5V5enzhpMYxcy'
+	QD_LINUXDO_REDIRECT_URI = 'https://up.x666.me/api/auth/callback'
 
 	def __init__(self, account_name: str, *, proxy_config: dict | None = None):
 		self.account_name = account_name
@@ -510,7 +514,7 @@ class X666CheckIn:
 		await page.wait_for_timeout(1200)
 		return True
 
-	async def _x666_oauth_login_via_ui(self, page, origin: str, *, username: str, password: str) -> None:
+	async def _x666_oauth_login_via_ui(self, page, origin: str, *, username: str, password: str):
 		# x666.me 是 new-api 前端首页 iframe 较多；直接进入 /login 更稳
 		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/'):
 			try:
@@ -548,6 +552,19 @@ class X666CheckIn:
 
 			page.on('request', on_request)
 			page.on('framenavigated', on_frame_navigated)
+		except Exception:
+			pass
+
+		popup_page = None
+		try:
+			def on_popup(p) -> None:
+				nonlocal popup_page
+				try:
+					popup_page = p
+				except Exception:
+					pass
+
+			page.on('popup', on_popup)
 		except Exception:
 			pass
 
@@ -602,6 +619,18 @@ class X666CheckIn:
 			raise RuntimeError('x666.me 登录页未找到「使用 LinuxDO 继续」按钮')
 		if login_clicked:
 			await page.wait_for_timeout(800)
+			# 如果点击触发了新窗口（popup），切换到 popup 继续流程
+			try:
+				if popup_page is not None:
+					try:
+						await popup_page.wait_for_load_state('domcontentloaded', timeout=15000)
+					except Exception:
+						pass
+					page = popup_page
+					print(f'ℹ️ {self.account_name}: Switched to popup page for OAuth, url={getattr(page, "url", None) or ""}')
+			except Exception:
+				pass
+
 			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）。
 			# 部分环境 click 可能不触发导航，但仍能在 request 里捕获到 authorize URL；此时用 URL 兜底导航。
 			try:
@@ -622,6 +651,19 @@ class X666CheckIn:
 					if observed_oauth_urls:
 						fallback = observed_oauth_urls[0]
 						print(f'⚠️ {self.account_name}: click 后未跳转，使用捕获到的 OAuth URL 兜底导航: {fallback}')
+						await page.goto(fallback, wait_until='domcontentloaded')
+						await page.wait_for_timeout(800)
+					elif origin.rstrip('/') in {self.QD_ORIGIN.rstrip('/'), self.UP_ORIGIN.rstrip('/')}:
+						# qd/up：再兜底一层，直接构造 connect.linux.do authorize URL
+						state = str(time.time_ns())
+						fallback = (
+							'https://connect.linux.do/oauth2/authorize?'
+							f'client_id={self.QD_LINUXDO_CLIENT_ID}'
+							f'&redirect_uri={quote(self.QD_LINUXDO_REDIRECT_URI, safe="")}'
+							'&response_type=code&scope=read'
+							f'&state={state}'
+						)
+						print(f'⚠️ {self.account_name}: click 后未跳转且未捕获 URL，使用默认 OAuth URL 兜底导航: {fallback}')
 						await page.goto(fallback, wait_until='domcontentloaded')
 						await page.wait_for_timeout(800)
 					else:
@@ -695,17 +737,44 @@ class X666CheckIn:
 			# qd.x666.me 的 redirect_uri 实际会落到 up.x666.me；这里不能只等 origin 本身
 			try:
 				if origin.rstrip('/') == self.QD_ORIGIN.rstrip('/'):
+					# 先等跳出 linux.do/connect.linux.do，且落在 *.x666.me 域（通常是 up.x666.me）
 					await page.wait_for_function(
 						"""() => {
 							try {
+								const u = location.href || '';
 								const h = location.hostname || '';
 								if (!h.endsWith('x666.me')) return false;
-								const u = location.href || '';
 								return !u.includes('linux.do') && !u.includes('connect.linux.do');
 							} catch (e) { return false; }
 						}""",
-						timeout=30000,
+						timeout=60000,
 					)
+
+					# 再等 up.x666.me 写入 token（SPA/回调可能需要时间）
+					try:
+						await page.wait_for_function(
+							"""() => {
+								try {
+									return !!localStorage.getItem('token');
+								} catch (e) { return false; }
+							}""",
+							timeout=45000,
+						)
+					except Exception:
+						# 如果不在 up 域，导航到 up 再等（如果 token 已写入，会直接存在）
+						try:
+							if not (page.url or '').startswith('https://up.x666.me'):
+								await page.goto('https://up.x666.me/', wait_until='domcontentloaded')
+								await page.wait_for_timeout(1200)
+							await page.wait_for_function(
+								"""() => {
+									try { return !!localStorage.getItem('token'); } catch (e) { return false; }
+								}""",
+								timeout=45000,
+							)
+						except Exception:
+							await self._take_screenshot(page, 'qd_oauth_callback_token_missing')
+							await self._save_page_html(page, 'qd_oauth_callback_token_missing')
 				else:
 					await page.wait_for_url(f'**{origin}/**', timeout=30000)
 			except Exception:
@@ -720,6 +789,7 @@ class X666CheckIn:
 				await page.wait_for_timeout(800)
 		except Exception:
 			pass
+		return page
 
 	async def _qd_checkin(self, page) -> tuple[bool, str]:
 		# 不要无脑切回 qd.x666.me：OAuth 回调会把 token 写在 up.x666.me 的 localStorage，
@@ -1069,7 +1139,7 @@ class X666CheckIn:
 
 			try:
 				# 1) 登录 qd.x666.me 并签到
-				await self._x666_oauth_login_via_ui(page, self.QD_ORIGIN, username=username, password=password)
+				page = await self._x666_oauth_login_via_ui(page, self.QD_ORIGIN, username=username, password=password)
 				ok, msg = await self._qd_checkin(page)
 
 				# 保存/更新 linux.do 会话缓存（避免后续频繁触发 CF/风控）
@@ -1083,7 +1153,7 @@ class X666CheckIn:
 					return False, {'checkin': False, 'error': msg}
 
 				# 2) 登录 x666.me 并读取余额
-				await self._x666_oauth_login_via_ui(page, self.X666_ORIGIN, username=username, password=password)
+				page = await self._x666_oauth_login_via_ui(page, self.X666_ORIGIN, username=username, password=password)
 
 				# 尽量落到控制台/主页，确保 localStorage/API 就绪
 				for path in ['/console', '/app/me', '/app', '/']:
