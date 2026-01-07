@@ -462,6 +462,35 @@ class X666CheckIn:
 		await page.goto(origin, wait_until='domcontentloaded')
 		await page.wait_for_timeout(800)
 
+		observed_oauth_urls: list[str] = []
+		try:
+			def _record_oauth(u: str) -> None:
+				try:
+					if not u:
+						return
+					if 'connect.linux.do/oauth2/authorize' in u:
+						if u not in observed_oauth_urls:
+							observed_oauth_urls.append(u)
+				except Exception:
+					return
+
+			def on_request(req) -> None:
+				try:
+					_record_oauth(req.url)
+				except Exception:
+					return
+
+			def on_frame_navigated(frame) -> None:
+				try:
+					_record_oauth(frame.url)
+				except Exception:
+					return
+
+			page.on('request', on_request)
+			page.on('framenavigated', on_frame_navigated)
+		except Exception:
+			pass
+
 		# 若已登录，通常不会出现明显的“登录/登陆”入口；这里尽量只在能找到入口时点击
 		try:
 			print(f'ℹ️ {self.account_name}: OAuth/UI login at {origin}, current url: {page.url}')
@@ -504,7 +533,8 @@ class X666CheckIn:
 		print(f'ℹ️ {self.account_name}: {origin} login button clicked: {"yes" if login_clicked else "no"}')
 		if login_clicked:
 			await page.wait_for_timeout(800)
-			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）
+			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）。
+			# 部分环境 click 可能不触发导航，但仍能在 request 里捕获到 authorize URL；此时用 URL 兜底导航。
 			try:
 				await page.wait_for_function(
 					"""(origin) => {
@@ -518,9 +548,20 @@ class X666CheckIn:
 					timeout=15000,
 				)
 			except Exception:
-				await self._take_screenshot(page, 'oauth_login_no_navigation')
-				await self._save_page_html(page, 'oauth_login_no_navigation')
-				raise RuntimeError('点击登录后未能跳转到 linux.do 授权页（可能被遮挡/风控/页面未响应）')
+				# 如果捕获到了 oauth2/authorize 请求，用它兜底
+				try:
+					if observed_oauth_urls:
+						fallback = observed_oauth_urls[0]
+						print(f'⚠️ {self.account_name}: click 后未跳转，使用捕获到的 OAuth URL 兜底导航: {fallback}')
+						await page.goto(fallback, wait_until='domcontentloaded')
+						await page.wait_for_timeout(800)
+					else:
+						await self._take_screenshot(page, 'oauth_login_no_navigation')
+						await self._save_page_html(page, 'oauth_login_no_navigation')
+						raise RuntimeError('点击登录后未能跳转到 linux.do 授权页（可能被遮挡/风控/页面未响应）')
+				except Exception:
+					# 保持原有错误语义
+					raise
 
 		# 若出现 provider 选择页/弹窗，点 linux.do
 		provider_clicked = await self._click_first(
