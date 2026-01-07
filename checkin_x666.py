@@ -278,20 +278,10 @@ class X666CheckIn:
 		except Exception:
 			cur = ''
 
-		if '/login' not in cur and 'linux.do' not in cur and 'connect.linux.do' not in cur:
+		# 仅当确实处于 linux.do 的登录页时才填表；若已登录会被重定向到首页/授权页，此时不应误判失败。
+		if 'linux.do/login' not in cur:
 			return
 
-		# 若已在授权页且有 approve，则不需要进登录页
-		try:
-			if await page.query_selector('a[href^="/oauth2/approve"]'):
-				return
-		except Exception:
-			pass
-
-		try:
-			await page.goto('https://linux.do/login', wait_until='domcontentloaded')
-		except Exception:
-			return
 		await page.wait_for_timeout(800)
 		await self._take_screenshot(page, 'linuxdo_login_page')
 		await self._save_page_html(page, 'linuxdo_login_page')
@@ -458,9 +448,79 @@ class X666CheckIn:
 			return False
 		return False
 
+	async def _click_newapi_linuxdo_continue(self, page) -> bool:
+		"""点击 new-api 登录页的「使用 LinuxDO 继续」按钮（逻辑参考 checkin_fovt.py）。"""
+		try:
+			await page.wait_for_selector('button:has-text("使用 LinuxDO 继续")', timeout=10000)
+			print(f'ℹ️ {self.account_name}: LinuxDO continue button appeared')
+		except Exception:
+			print(f'⚠️ {self.account_name}: Timeout waiting for LinuxDO continue button')
+
+		login_btn = None
+		for sel in [
+			'button:has-text("使用 LinuxDO 继续")',
+			'button:has-text("使用 LinuxDO")',
+			'button:has-text("使用 Linux Do 登录")',
+			'button:has-text("Linux Do")',
+			'button:has-text("LinuxDO")',
+			'a:has-text("Linux Do")',
+			'a:has-text("使用 Linux Do 登录")',
+			'a[href*="linuxdo" i]',
+		]:
+			try:
+				ele = await page.query_selector(sel)
+				if ele:
+					login_btn = ele
+					print(f'ℹ️ {self.account_name}: Found LinuxDO login button: {sel}')
+					break
+			except Exception:
+				continue
+
+		if login_btn:
+			try:
+				await login_btn.click()
+				print(f'ℹ️ {self.account_name}: Clicked LinuxDO login button')
+			except Exception:
+				try:
+					await page.evaluate('(el) => el && el.click && el.click()', login_btn)
+					print(f'ℹ️ {self.account_name}: Clicked LinuxDO login button via JS')
+				except Exception:
+					return False
+		else:
+			print(f'ℹ️ {self.account_name}: LinuxDO button not found, trying JS fallback...')
+			try:
+				clicked = await page.evaluate(
+					"""() => {
+						const buttons = Array.from(document.querySelectorAll('button'));
+						const btn = buttons.find(x => {
+							const t = x.innerText || '';
+							return (t.includes('LinuxDO') || t.includes('Linux Do')) && (t.includes('继续') || t.includes('登录'));
+						});
+						if (btn) { btn.click(); return true; }
+						return false;
+					}"""
+				)
+				if clicked:
+					print(f'ℹ️ {self.account_name}: Clicked LinuxDO via JS fallback')
+				else:
+					return False
+			except Exception:
+				return False
+
+		await page.wait_for_timeout(1200)
+		return True
+
 	async def _x666_oauth_login_via_ui(self, page, origin: str, *, username: str, password: str) -> None:
-		await page.goto(origin, wait_until='domcontentloaded')
-		await page.wait_for_timeout(800)
+		# x666.me 是 new-api 前端首页 iframe 较多；直接进入 /login 更稳
+		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/'):
+			try:
+				await page.goto(f'{origin}/login', wait_until='domcontentloaded')
+			except Exception:
+				await page.goto(origin, wait_until='domcontentloaded')
+			await page.wait_for_timeout(800)
+		else:
+			await page.goto(origin, wait_until='domcontentloaded')
+			await page.wait_for_timeout(800)
 
 		observed_oauth_urls: list[str] = []
 		try:
@@ -516,21 +576,30 @@ class X666CheckIn:
 		except Exception:
 			pass
 
-		login_clicked = await self._click_first(
-			page,
-			[
-				'button:has-text("登录")',
-				'a:has-text("登录")',
-				'button:has-text("登陆")',
-				'a:has-text("登陆")',
-				'a[href*="/login"]',
-				'a[href="/login"]',
-				'button:has-text("Login")',
-				'a:has-text("Login")',
-			],
-			timeout_ms=2500,
-		)
+		# x666.me/new-api：使用专用「使用 LinuxDO 继续」按钮触发 OAuth
+		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/'):
+			login_clicked = await self._click_newapi_linuxdo_continue(page)
+		else:
+			login_clicked = await self._click_first(
+				page,
+				[
+					'button:has-text("登录")',
+					'a:has-text("登录")',
+					'button:has-text("登陆")',
+					'a:has-text("登陆")',
+					'a[href*="/login"]',
+					'a[href="/login"]',
+					'button:has-text("Login")',
+					'a:has-text("Login")',
+				],
+				timeout_ms=2500,
+			)
 		print(f'ℹ️ {self.account_name}: {origin} login button clicked: {"yes" if login_clicked else "no"}')
+		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/') and not login_clicked:
+			# new-api 登录页没找到 LinuxDO 按钮：不要继续“乱点 provider”，直接产出现场便于排查
+			await self._take_screenshot(page, 'x666_login_button_not_found')
+			await self._save_page_html(page, 'x666_login_button_not_found')
+			raise RuntimeError('x666.me 登录页未找到「使用 LinuxDO 继续」按钮')
 		if login_clicked:
 			await page.wait_for_timeout(800)
 			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）。
@@ -564,28 +633,43 @@ class X666CheckIn:
 					raise
 
 		# 若出现 provider 选择页/弹窗，点 linux.do
-		provider_clicked = await self._click_first(
-			page,
-			[
-				'button:has-text("linux.do")',
-				'a:has-text("linux.do")',
-				'button:has-text("Linux.do")',
-				'a:has-text("Linux.do")',
-				'button:has-text("Linux")',
-				'a:has-text("Linux")',
-				'button:has-text("LinuxDO")',
-				'a:has-text("LinuxDO")',
-			],
-			timeout_ms=2500,
-		)
+		# 注意：x666.me/new-api 的登录已由「使用 LinuxDO 继续」触发，这里不应再进入 provider 选择逻辑
+		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/'):
+			provider_clicked = False
+		else:
+			provider_clicked = await self._click_first(
+				page,
+				[
+					'button:has-text("linux.do")',
+					'a:has-text("linux.do")',
+					'button:has-text("Linux.do")',
+					'a:has-text("Linux.do")',
+					'button:has-text("Linux")',
+					'a:has-text("Linux")',
+					'button:has-text("LinuxDO")',
+					'a:has-text("LinuxDO")',
+				],
+				timeout_ms=2500,
+			)
 		if provider_clicked:
 			print(f'ℹ️ {self.account_name}: {origin} provider option clicked: linux.do')
+			# provider click 后也可能不导航：同样用捕获到的 OAuth URL 兜底
+			try:
+				if observed_oauth_urls and not ('connect.linux.do' in (page.url or '')):
+					await page.goto(observed_oauth_urls[0], wait_until='domcontentloaded')
+					await page.wait_for_timeout(800)
+			except Exception:
+				pass
 		await page.wait_for_timeout(500)
 
 		# 进入 linux.do / connect.linux.do 登录/授权流程
 		await self._linuxdo_login_if_needed(page, username, password)
 
 		# 授权按钮
+		try:
+			print(f'ℹ️ {self.account_name}: OAuth before approve, url={page.url}')
+		except Exception:
+			pass
 		approved = await self._click_first(
 			page,
 			[
@@ -597,10 +681,35 @@ class X666CheckIn:
 			],
 			timeout_ms=12000,
 		)
-		if approved:
+		print(f'ℹ️ {self.account_name}: OAuth approve clicked: {"yes" if approved else "no"}')
+		if not approved:
+			# 这里常见两种情况：1) 已登录且已自动授权并跳回站点；2) 被 CF/风控卡在中间页
 			try:
-				await page.wait_for_url(f'**{origin}/**', timeout=30000)
+				cur = page.url or ''
+				if ('linux.do' in cur) or ('connect.linux.do' in cur):
+					await self._take_screenshot(page, 'oauth_approve_not_found')
+					await self._save_page_html(page, 'oauth_approve_not_found')
 			except Exception:
+				pass
+		else:
+			# qd.x666.me 的 redirect_uri 实际会落到 up.x666.me；这里不能只等 origin 本身
+			try:
+				if origin.rstrip('/') == self.QD_ORIGIN.rstrip('/'):
+					await page.wait_for_function(
+						"""() => {
+							try {
+								const h = location.hostname || '';
+								if (!h.endsWith('x666.me')) return false;
+								const u = location.href || '';
+								return !u.includes('linux.do') && !u.includes('connect.linux.do');
+							} catch (e) { return false; }
+						}""",
+						timeout=30000,
+					)
+				else:
+					await page.wait_for_url(f'**{origin}/**', timeout=30000)
+			except Exception:
+				# 不直接失败，后续由“登录态校验”兜底判定
 				pass
 
 		# 如果仍停留在 linux.do/connect.linux.do，兜底回站点域名（部分站点授权后会自动跳回其它同系域名，如 up.x666.me）
@@ -635,24 +744,74 @@ class X666CheckIn:
 		except Exception:
 			pass
 
-		# 优先用接口判断状态（避免仅依赖 UI 文案/组件类型）
-		can_spin: bool | None = None
+		# 必须拿到 token（存放在 up.x666.me localStorage），否则后续接口调用无法鉴权。
 		try:
-			status_obj = await page.evaluate(
-				"""async () => {
-					try {
-						const r = await fetch('/api/checkin/status', { credentials: 'include' });
-						const j = await r.json();
-						return j;
-					} catch (e) { return null; }
-				}"""
-			)
-			if isinstance(status_obj, dict) and status_obj.get('success'):
-				can_spin = bool((status_obj.get('data', {}) or {}).get('can_spin'))
-				if can_spin is False:
-					return True, '今日已签到'
+			token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
 		except Exception:
-			pass
+			token = None
+
+		if not token:
+			await self._take_screenshot(page, 'qd_no_token')
+			await self._save_page_html(page, 'qd_no_token')
+			return False, '未获取到 token（OAuth 回调可能未完成/被风控拦截）'
+
+		print(f'ℹ️ {self.account_name}: qd token present (len={len(str(token))}) at {page.url}')
+
+		async def _auth_fetch_json(path: str, method: str = 'GET') -> dict:
+			resp = await page.evaluate(
+				"""async ({ path, method }) => {
+					try {
+						const token = localStorage.getItem('token');
+						if (!token) return { ok: false, status: 0, error: 'no_token' };
+						const t = String(token || '').trim();
+						const auth = t.toLowerCase().startsWith('bearer ') ? t : `Bearer ${t}`;
+						const headers = {
+							'accept': 'application/json, text/plain, */*',
+							'cache-control': 'no-store',
+							'pragma': 'no-cache',
+							'authorization': auth,
+						};
+						let opts = { method, headers, credentials: 'include' };
+						// qd/up 的接口一般是空 POST，不要强塞 JSON body，避免后端严格校验 content-length
+						const r = await fetch(path, opts);
+						const text = await r.text();
+						let json = null;
+						try { json = JSON.parse(text); } catch (e) {}
+						return { ok: r.ok, status: r.status, text: text.slice(0, 200), json };\n\
+					} catch (e) {\n\
+						return { ok: false, status: 0, error: String(e) };\n\
+					}\n\
+				}""",
+				{'path': path, 'method': method},
+			)
+			return resp if isinstance(resp, dict) else {'ok': False, 'status': 0, 'error': 'invalid_resp'}
+
+		# 1) 用鉴权接口判断状态（不要靠 UI/未鉴权 fetch，避免误判）
+		status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
+		status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
+		if not (isinstance(status_json, dict) and status_json.get('success')):
+			await self._take_screenshot(page, 'qd_status_failed')
+			await self._save_page_html(page, 'qd_status_failed')
+			return False, f'获取签到状态失败（/api/checkin/status，HTTP {status_resp.get("status")}）'
+
+		can_spin = bool((status_json.get('data', {}) or {}).get('can_spin'))
+		print(f'ℹ️ {self.account_name}: qd can_spin={can_spin}')
+		if not can_spin:
+			return True, '今日已签到'
+
+		# 2) 优先直接调用抽奖接口（比点按钮更稳定，避免按钮被遮挡/动画导致 click 丢失）
+		spin_resp = await _auth_fetch_json('/api/lottery/spin', 'POST')
+		spin_json = spin_resp.get('json') if isinstance(spin_resp, dict) else None
+		if isinstance(spin_json, dict):
+			if spin_json.get('success'):
+				return True, '签到成功'
+			msg = spin_json.get('message', spin_json.get('msg', '')) or ''
+			if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
+				return True, '今日已签到'
+			# 如果接口返回了明确错误，保留现场便于排查
+			await self._take_screenshot(page, 'qd_spin_failed')
+			await self._save_page_html(page, 'qd_spin_failed')
+			return False, f'签到失败（/api/lottery/spin，HTTP {spin_resp.get("status")}）'
 
 		# 有些 UI 会显示 “已签到/今日已签到”
 		try:
@@ -681,57 +840,30 @@ class X666CheckIn:
 			await self._save_page_html(page, 'qd_checkin_button_not_found')
 			return False, '未找到签到按钮'
 
-		# 等待状态变化或 toast；若接口可用，优先等 can_spin 变为 false。
-		# 进一步：等待抽奖接口返回（比 UI 文案更可靠）。
+		# 等待抽奖接口返回（比 UI 文案更可靠）。
 		try:
-			if can_spin is True:
-				# 点击“开始转动”后，页面会请求 /api/lottery/spin；以其响应为准
-				try:
-					resp = await page.wait_for_response(
-						lambda r: '/api/lottery/spin' in (r.url or ''),
-						timeout=30000,
-					)
-					try:
-						if resp and resp.status in (200, 400):
-							j = await resp.json()
-							if isinstance(j, dict):
-								if j.get('success'):
-									return True, '签到成功'
-								msg = j.get('message', j.get('msg', '')) or ''
-								if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
-									return True, '今日已签到'
-					except Exception:
-						pass
-				except Exception:
-					pass
+			resp = await page.wait_for_response(
+				lambda r: '/api/lottery/spin' in (r.url or ''),
+				timeout=30000,
+			)
+			try:
+				if resp and resp.status in (200, 400):
+					j = await resp.json()
+					if isinstance(j, dict):
+						if j.get('success'):
+							return True, '签到成功'
+						msg = j.get('message', j.get('msg', '')) or ''
+						if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
+							return True, '今日已签到'
+			except Exception:
+				pass
 
-				await page.wait_for_function(
-					"""async () => {
-						try {
-							const r = await fetch('/api/checkin/status', { credentials: 'include' });
-							const j = await r.json();
-							if (!j || !j.success) return false;
-							const data = j.data || {};
-							return data.can_spin === false;
-						} catch (e) { return false; }
-					}""",
-					timeout=30000,
-				)
-			else:
-				await page.wait_for_function(
-					"""() => {
-						const t = document.body ? (document.body.innerText || '') : '';
-						return (
-							t.includes('签到成功') ||
-							t.includes('已签到') ||
-							t.includes('今日已签到') ||
-							t.includes('已经签到') ||
-							t.includes('恭喜') ||
-							t.includes('获得')
-						);
-					}""",
-					timeout=30000,
-				)
+			# 兜底：再查一次状态
+			status2 = await _auth_fetch_json('/api/checkin/status', 'GET')
+			j2 = status2.get('json') if isinstance(status2, dict) else None
+			if isinstance(j2, dict) and j2.get('success'):
+				if bool((j2.get('data', {}) or {}).get('can_spin')) is False:
+					return True, '签到成功'
 		except Exception:
 			# 可能 UI 不提示；退化为“按钮状态变化”判断
 			try:
@@ -743,7 +875,7 @@ class X666CheckIn:
 				pass
 			await self._take_screenshot(page, 'qd_checkin_timeout')
 			await self._save_page_html(page, 'qd_checkin_timeout')
-			return False, '签到状态未确认（可能需要人工处理验证码/风控）'
+			return False, '签到状态未确认（可能被风控/接口无响应）'
 
 		return True, '签到成功'
 
