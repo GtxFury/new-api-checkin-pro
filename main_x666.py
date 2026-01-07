@@ -18,6 +18,7 @@ from utils.notify import notify
 load_dotenv(override=True)
 
 BALANCE_HASH_FILE = 'balance_hash_x666.txt'
+CACHE_DIR = os.path.join('storage-states', 'x666')
 
 
 def _load_accounts() -> list[dict] | None:
@@ -45,15 +46,19 @@ def _load_accounts() -> list[dict] | None:
 		if not isinstance(account, dict):
 			print(f'❌ Account {i + 1} is not a valid object')
 			continue
-		if not account.get('access_token'):
-			print(f'❌ Account {i + 1} missing access_token')
+
+		linuxdo = account.get('linux.do') or {}
+		has_linuxdo = isinstance(linuxdo, dict) and linuxdo.get('username') and linuxdo.get('password')
+
+		# 兼容旧配置：access_token + cookies + api_user
+		has_legacy = bool(account.get('access_token') and account.get('cookies') and account.get('api_user'))
+
+		if not has_linuxdo and not has_legacy:
+			print(
+				f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码，或旧版 access_token/cookies/api_user'
+			)
 			continue
-		if not account.get('cookies'):
-			print(f'❌ Account {i + 1} missing cookies')
-			continue
-		if not account.get('api_user'):
-			print(f'❌ Account {i + 1} missing api_user')
-			continue
+
 		valid.append(account)
 
 	if not valid:
@@ -88,7 +93,11 @@ def _generate_balance_hash(checkin_results: dict) -> str:
 	all_quotas = {}
 	for account_key, info in checkin_results.items():
 		if info:
-			all_quotas[account_key] = str(info.get('total_quota', 0))
+			# 新流程优先用站点余额 quota；旧流程沿用 total_quota
+			if 'quota' in info:
+				all_quotas[account_key] = str(info.get('quota', 0))
+			else:
+				all_quotas[account_key] = str(info.get('total_quota', 0))
 	quotas_json = json.dumps(all_quotas, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(quotas_json.encode('utf-8')).hexdigest()[:16]
 
@@ -106,6 +115,7 @@ def _load_global_proxy() -> dict | None:
 async def main() -> int:
 	print('🚀 x666 自动签到脚本启动')
 	print(f'🕒 执行时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+	os.makedirs(CACHE_DIR, exist_ok=True)
 
 	accounts = _load_accounts()
 	if not accounts:
@@ -126,9 +136,9 @@ async def main() -> int:
 
 	for i, account in enumerate(accounts):
 		account_name = account.get('name') or f'account_{i + 1}'
-		access_token = account['access_token']
-		cookies = account['cookies']
-		api_user = account['api_user']
+		access_token = account.get('access_token')
+		cookies = account.get('cookies')
+		api_user = account.get('api_user')
 		account_proxy = account.get('proxy') or global_proxy
 
 		if notification_lines:
@@ -137,25 +147,39 @@ async def main() -> int:
 		try:
 			print(f'🌀 处理账号: {account_name}')
 			checkin = X666CheckIn(account_name, proxy_config=account_proxy)
-			ok, result = await checkin.execute(access_token, cookies, api_user)
+			linuxdo = account.get('linux.do') or {}
+			if isinstance(linuxdo, dict) and linuxdo.get('username') and linuxdo.get('password'):
+				ok, result = await checkin.execute_with_linuxdo(str(linuxdo.get('username')), str(linuxdo.get('password')))
+			else:
+				ok, result = await checkin.execute(str(access_token), cookies or {}, api_user)
 			current_checkin_info[account_name] = result if isinstance(result, dict) else {}
 
-			spin_ok = '✓' if (result or {}).get('spin') else '✗'
-			topup_ok = '✓' if (result or {}).get('topup') else '✗'
-			quota = (result or {}).get('quota_amount', 0)
-			total_quota = (result or {}).get('total_quota', 0)
+			# 新流程：checkin + quota；旧流程：spin/topup + total_quota
+			if (result or {}).get('checkin') is not None:
+				checkin_ok = '✓' if (result or {}).get('checkin') else '✗'
+				quota = (result or {}).get('quota', 0)
+				used = (result or {}).get('used_quota', 0)
+				bonus = (result or {}).get('bonus_quota', 0)
+				status_line = f'✅ {account_name}: 🧾 Check-in: {checkin_ok} | 💳 Balance: {quota} | Used: {used} | Bonus: {bonus}'
+				fail_line = f'❌ {account_name}: 🧾 Check-in: {checkin_ok} | 💳 Balance: {quota} | 🔺 {str((result or {}).get("error",""))[:120]}'
+			else:
+				spin_ok = '✓' if (result or {}).get('spin') else '✗'
+				topup_ok = '✓' if (result or {}).get('topup') else '✗'
+				quota = (result or {}).get('quota_amount', 0)
+				total_quota = (result or {}).get('total_quota', 0)
+				status_line = (
+					f'✅ {account_name}: 🎰 Spin: {spin_ok} | 💰 Topup: {topup_ok} | 📊 Quota: {quota} | Total: {total_quota}'
+				)
+				fail_line = (
+					f'❌ {account_name}: 🎰 Spin: {spin_ok} | 💰 Topup: {topup_ok} | 📊 Quota: {quota} | Total: {total_quota} | 🔺 {str((result or {}).get("error",""))[:120]}'
+				)
 
 			if ok:
 				success_count += 1
-				notification_lines.append(
-					f'✅ {account_name}: 🎰 Spin: {spin_ok} | 💰 Topup: {topup_ok} | 📊 Quota: {quota} | Total: {total_quota}'
-				)
+				notification_lines.append(status_line)
 			else:
 				any_failed = True
-				err = (result or {}).get('error', 'Unknown error')
-				notification_lines.append(
-					f'❌ {account_name}: 🎰 Spin: {spin_ok} | 💰 Topup: {topup_ok} | 📊 Quota: {quota} | Total: {total_quota} | 🔺 {str(err)[:120]}'
-				)
+				notification_lines.append(fail_line)
 		except Exception as e:
 			any_failed = True
 			notification_lines.append(f'❌ {account_name}: Exception: {str(e)[:160]}')
@@ -220,4 +244,3 @@ def run_main():
 
 if __name__ == '__main__':
 	run_main()
-
