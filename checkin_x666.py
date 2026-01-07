@@ -514,6 +514,41 @@ class X666CheckIn:
 		await page.wait_for_timeout(1200)
 		return True
 
+	async def _switch_to_context_page_by_host(
+		self,
+		page,
+		hosts: tuple[str, ...],
+		*,
+		timeout_ms: int = 15000,
+	) -> object | None:
+		"""在同一 browser context 中寻找某个 host 的页面并切换（用于处理 OAuth 打开新标签页）。"""
+		try:
+			ctx = page.context
+		except Exception:
+			return None
+		deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+		while time.time() < deadline:
+			try:
+				pages = list(getattr(ctx, 'pages', []) or [])
+			except Exception:
+				pages = []
+			for p in pages:
+				try:
+					u = getattr(p, 'url', '') or ''
+					# 避免切到已关闭页
+					if not u:
+						continue
+					for h in hosts:
+						if h in u:
+							return p
+				except Exception:
+					continue
+			try:
+				await page.wait_for_timeout(500)
+			except Exception:
+				break
+		return None
+
 	async def _x666_oauth_login_via_ui(self, page, origin: str, *, username: str, password: str):
 		# x666.me 是 new-api 前端首页 iframe 较多；直接进入 /login 更稳
 		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/'):
@@ -651,8 +686,13 @@ class X666CheckIn:
 					if observed_oauth_urls:
 						fallback = observed_oauth_urls[0]
 						print(f'⚠️ {self.account_name}: click 后未跳转，使用捕获到的 OAuth URL 兜底导航: {fallback}')
-						await page.goto(fallback, wait_until='domcontentloaded')
-						await page.wait_for_timeout(800)
+						try:
+							await page.goto(fallback, wait_until='domcontentloaded')
+							await page.wait_for_timeout(800)
+						except Exception as e:
+							await self._take_screenshot(page, 'oauth_authorize_goto_failed')
+							await self._save_page_html(page, 'oauth_authorize_goto_failed')
+							raise RuntimeError(f'OAuth authorize 跳转失败: {e}')
 					elif origin.rstrip('/') in {self.QD_ORIGIN.rstrip('/'), self.UP_ORIGIN.rstrip('/')}:
 						# qd/up：再兜底一层，直接构造 connect.linux.do authorize URL
 						state = str(time.time_ns())
@@ -664,8 +704,13 @@ class X666CheckIn:
 							f'&state={state}'
 						)
 						print(f'⚠️ {self.account_name}: click 后未跳转且未捕获 URL，使用默认 OAuth URL 兜底导航: {fallback}')
-						await page.goto(fallback, wait_until='domcontentloaded')
-						await page.wait_for_timeout(800)
+						try:
+							await page.goto(fallback, wait_until='domcontentloaded')
+							await page.wait_for_timeout(800)
+						except Exception as e:
+							await self._take_screenshot(page, 'oauth_authorize_goto_failed')
+							await self._save_page_html(page, 'oauth_authorize_goto_failed')
+							raise RuntimeError(f'OAuth authorize 跳转失败: {e}')
 					else:
 						await self._take_screenshot(page, 'oauth_login_no_navigation')
 						await self._save_page_html(page, 'oauth_login_no_navigation')
@@ -750,6 +795,15 @@ class X666CheckIn:
 						timeout=60000,
 					)
 
+					# 处理“OAuth 打开新标签页”的情况：优先切到 up.x666.me 那个页
+					try:
+						alt = await self._switch_to_context_page_by_host(page, ('up.x666.me',), timeout_ms=8000)
+						if alt is not None:
+							page = alt
+							print(f'ℹ️ {self.account_name}: Switched to up.x666.me page after approve, url={getattr(page, "url", None) or ""}')
+					except Exception:
+						pass
+
 					# 再等 up.x666.me 写入 token（SPA/回调可能需要时间）
 					try:
 						await page.wait_for_function(
@@ -819,6 +873,21 @@ class X666CheckIn:
 			token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
 		except Exception:
 			token = None
+
+		if not token:
+			# 允许给回调一点时间：切到 up.x666.me 再等一次（SPA 写 localStorage 可能延后）
+			try:
+				await page.goto(f'{self.UP_ORIGIN}/', wait_until='domcontentloaded')
+				await page.wait_for_timeout(1200)
+				await page.wait_for_function(
+					"""() => {
+						try { return !!localStorage.getItem('token'); } catch (e) { return false; }
+					}""",
+					timeout=45000,
+				)
+				token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
+			except Exception:
+				token = None
 
 		if not token:
 			await self._take_screenshot(page, 'qd_no_token')
