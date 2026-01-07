@@ -1181,6 +1181,90 @@ class X666CheckIn:
 			'display': f'Current balance: {quota:.2f}, Used: {used_quota:.2f}, Bonus: {bonus_quota:.2f}',
 		}
 
+	# x666.me 的 LinuxDO OAuth 参数
+	X666_LINUXDO_CLIENT_ID = 'p4V7ALyYtjreFlru3Mp5V5enzhpMYxcy'
+
+	async def _x666_login_and_get_balance(self, page, context, username: str, password: str) -> dict:
+		"""登录 x666.me 并获取余额（参考 fovt 的 OAuth 流程）"""
+		from urllib.parse import quote
+
+		# 1) 先检查是否已登录
+		await page.goto(f'{self.X666_ORIGIN}/console', wait_until='domcontentloaded')
+		await page.wait_for_timeout(1500)
+
+		cur_url = page.url or ''
+		if '/login' not in cur_url:
+			# 可能已登录，尝试获取余额
+			balance = await self._x666_get_balance(page)
+			if balance.get('success'):
+				return balance
+
+		# 2) 未登录，获取 OAuth state
+		await page.goto(f'{self.X666_ORIGIN}/login', wait_until='domcontentloaded')
+		await page.wait_for_timeout(1000)
+
+		try:
+			state_result = await page.evaluate(
+				"""async () => {
+					try {
+						const resp = await fetch('/api/oauth/state?provider=linuxdo');
+						return await resp.json();
+					} catch (e) { return { success: false, error: e.message }; }
+				}"""
+			)
+			auth_state = (state_result or {}).get('data', '')
+			if not auth_state:
+				return {'success': False, 'error': '获取 OAuth state 失败'}
+			print(f'ℹ️ {self.account_name}: x666 OAuth state: {auth_state}')
+		except Exception as e:
+			return {'success': False, 'error': f'OAuth state 错误: {e}'}
+
+		# 3) 构造 OAuth URL 并导航（linux.do 已登录，直接授权）
+		redirect_uri = f'{self.X666_ORIGIN}/api/oauth/linuxdo'
+		oauth_url = (
+			'https://connect.linux.do/oauth2/authorize?'
+			f'response_type=code&client_id={self.X666_LINUXDO_CLIENT_ID}&state={auth_state}'
+			f'&redirect_uri={quote(redirect_uri, safe="")}'
+		)
+		print(f'ℹ️ {self.account_name}: 导航到 OAuth 授权页')
+		await page.goto(oauth_url, wait_until='domcontentloaded')
+		await page.wait_for_timeout(1000)
+
+		# 4) 如果需要登录 linux.do
+		await self._linuxdo_login_if_needed(page, username, password)
+
+		# 5) 点击授权按钮
+		approved = await self._click_first(
+			page,
+			['a[href^="/oauth2/approve"]', 'button:has-text("允许")', 'button:has-text("授权")'],
+			timeout_ms=10000,
+		)
+		print(f'ℹ️ {self.account_name}: x666 OAuth approve clicked: {"yes" if approved else "no"}')
+
+		if approved:
+			# 等待回调完成
+			try:
+				await page.wait_for_url(f'**{self.X666_ORIGIN}/**', timeout=30000)
+			except Exception:
+				pass
+
+		# 6) 等待 localStorage 中出现 user 数据
+		await page.wait_for_timeout(2000)
+		try:
+			await page.wait_for_function(
+				"""() => {
+					try { return !!localStorage.getItem('user'); } catch (e) { return false; }
+				}""",
+				timeout=15000,
+			)
+		except Exception:
+			# 尝试导航到 console 触发 SPA
+			await page.goto(f'{self.X666_ORIGIN}/console', wait_until='domcontentloaded')
+			await page.wait_for_timeout(2000)
+
+		# 7) 获取余额
+		return await self._x666_get_balance(page)
+
 	async def execute(self, access_token: str, cookies: dict, api_user: str | int) -> tuple[bool, dict]:
 		print(f'\n\n⏳ 开始处理 {self.account_name}')
 		print(f'ℹ️ {self.account_name}: 执行 x666 签到 (using proxy: {"true" if self.http_proxy_config else "false"})')
@@ -1277,8 +1361,9 @@ class X666CheckIn:
 				# 1) 登录 qd.x666.me 并签到
 				page = await self._x666_oauth_login_via_ui(page, self.QD_ORIGIN, username=username, password=password)
 				ok, msg = await self._qd_checkin(page)
+				print(f'{"✅" if ok else "❌"} {self.account_name}: qd 签到结果: {msg}')
 
-				# 保存/更新 linux.do 会话缓存（避免后续频繁触发 CF/风控）
+				# 保存/更新 linux.do 会话缓存
 				try:
 					if '/login' not in (page.url or ''):
 						await context.storage_state(path=cache_file)
@@ -1288,24 +1373,15 @@ class X666CheckIn:
 				if not ok:
 					return False, {'checkin': False, 'error': msg}
 
-				# 2) 登录 x666.me 并读取余额
-				page = await self._x666_oauth_login_via_ui(page, self.X666_ORIGIN, username=username, password=password)
-
-				# 尽量落到控制台/主页，确保 localStorage/API 就绪
-				for path in ['/console', '/app/me', '/app', '/']:
-					try:
-						await page.goto(f'{self.X666_ORIGIN}{path}', wait_until='domcontentloaded')
-						await page.wait_for_timeout(800)
-						break
-					except Exception:
-						continue
-
-				balance = await self._x666_get_balance(page)
+				# 2) 登录 x666.me 并读取余额（参考 fovt 的 OAuth 流程）
+				print(f'ℹ️ {self.account_name}: 开始登录 x666.me 查询余额')
+				balance = await self._x666_login_and_get_balance(page, context, username, password)
 				if not balance.get('success'):
 					await self._take_screenshot(page, 'x666_balance_failed')
 					await self._save_page_html(page, 'x666_balance_failed')
 					return False, {'checkin': True, 'error': balance.get('error', '获取余额失败')}
 
+				print(f'✅ {self.account_name}: 余额查询成功: {balance.get("display", "")}')
 				return True, {
 					'checkin': True,
 					'checkin_msg': msg,
