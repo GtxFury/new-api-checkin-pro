@@ -46,6 +46,45 @@ jobs:
         uv sync
         echo "✅ 环境初始化完成"
 
+    - name: 安装 Playwright 浏览器依赖
+      run: |
+        echo "安装 Playwright 浏览器依赖..."
+        # Python 依赖由 pyproject.toml + uv sync 负责，这里只安装浏览器二进制
+        uv run python -m playwright install
+        echo "✅ Playwright 浏览器依赖安装完成"
+
+    - name: 获取 Camoufox 版本
+      id: camoufox-version
+      run: |
+        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('camoufox'))"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Camoufox version: $version"
+
+    - name: 缓存 Camoufox 浏览器
+      uses: actions/cache@v4
+      id: camoufox-cache
+      with:
+        path: ~\AppData\Local\camoufox
+        key: ${{ runner.os }}-camoufox-${{ steps.camoufox-version.outputs.version }}
+        restore-keys: |
+          ${{ runner.os }}-camoufox-
+
+    - name: 安装 Camoufox 浏览器
+      if: steps.camoufox-cache.outputs.cache-hit != 'true'
+      run: |
+        echo "缓存未命中，开始下载 Camoufox 浏览器..."
+        uv run camoufox fetch
+        echo "✅ Camoufox 浏览器安装完成"
+
+    - name: 恢复登录状态缓存
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          storage-states
+        key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
+        restore-keys: |
+          storage-state-
+
     - name: 恢复余额历史缓存
       uses: actions/cache/restore@v4
       with:
@@ -72,6 +111,14 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         uv run python -u main_x666.py
+
+    - name: 保存登录状态缓存
+      if: hashFiles('storage-states/**/*.json') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          storage-states
+        key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_x666.txt') != ''

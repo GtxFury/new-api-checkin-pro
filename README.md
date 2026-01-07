@@ -212,12 +212,17 @@
 [
   {
     "name": "x666 账号1",
-    "access_token": "qd.x666.me 的 Bearer token",
-    "cookies": { "session": "x666.me 的 session/cookies" },
-    "api_user": "x666.me 的 new-api-user"
+    "linux.do": {
+      "username": "linux.do 用户名",
+      "password": "linux.do 密码"
+    }
   }
 ]
 ```
+
+说明：
+- 目前 x666 签到已改为：访问 `https://qd.x666.me/` -> 右上角用 `linux.do` 登录 -> 点击“签到” -> 再登录 `https://x666.me/` 获取余额。
+- 旧版 `access_token/cookies/api_user` 仍保留兼容，但站点改版后可能无法使用。
 
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
