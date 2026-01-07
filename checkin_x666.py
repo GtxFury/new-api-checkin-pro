@@ -817,62 +817,61 @@ class X666CheckIn:
 						alt = await self._switch_to_context_page_by_host(page, ('up.x666.me',), timeout_ms=8000)
 						if alt is not None:
 							page = alt
-							print(f'ℹ️ {self.account_name}: Switched to up.x666.me page after approve, url={getattr(page, "url", None) or ""}')
+							# 立即从 URL 提取 token（SPA 会很快清掉 URL 参数）
+							from urllib.parse import urlparse, parse_qs
+							cur_url = page.url or ''
+							print(f'ℹ️ {self.account_name}: Switched to up.x666.me, url={cur_url[:80]}')
+							parsed = urlparse(cur_url)
+							qs = parse_qs(parsed.query)
+							url_token = (qs.get('token') or [''])[0]
+							if url_token:
+								await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", url_token)
+								print(f'ℹ️ {self.account_name}: Token from URL saved to localStorage')
 					except Exception:
 						pass
 
-					# 先检查 localStorage 是否已有 token（回调可能已被浏览器自动处理）
+					# 检查 localStorage 是否已有 token
 					existing_token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
 					if existing_token:
-						print(f'ℹ️ {self.account_name}: Token already in localStorage (len={len(str(existing_token))})')
+						print(f'ℹ️ {self.account_name}: Token in localStorage (len={len(str(existing_token))})')
 					else:
-						# 检查 URL 是否包含 token
+						# 尝试从捕获的回调 URL 提取 code 并调用回调 API
 						from urllib.parse import urlparse, parse_qs
-						cur_url = page.url or ''
-						parsed_cur = urlparse(cur_url)
-						qs_cur = parse_qs(parsed_cur.query)
-						url_token = (qs_cur.get('token') or [''])[0]
+						callback_url = captured_callback_urls[0] if captured_callback_urls else (page.url or '')
+						print(f'ℹ️ {self.account_name}: No token, trying callback: {callback_url[:80]}...')
+						parsed = urlparse(callback_url)
+						qs = parse_qs(parsed.query)
+						code = (qs.get('code') or [''])[0]
 
-						if url_token:
-							print(f'ℹ️ {self.account_name}: Token found in URL, saving to localStorage')
-							await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", url_token)
-						else:
-							# URL 没有 token，尝试从回调 URL 提取 code 并调用回调 API
-							callback_url = captured_callback_urls[0] if captured_callback_urls else cur_url
-							print(f'ℹ️ {self.account_name}: No token yet, trying callback: {callback_url[:80]}...')
-							parsed = urlparse(callback_url)
-							qs = parse_qs(parsed.query)
-							code = (qs.get('code') or [''])[0]
-
-							if code:
-								print(f'ℹ️ {self.account_name}: Got OAuth code, calling callback API')
-								try:
-									result = await page.evaluate(
-										"""async (code) => {
-											try {
-												const url = 'https://up.x666.me/api/auth/callback?code=' + encodeURIComponent(code);
-												const resp = await fetch(url, { credentials: 'include' });
-												const text = await resp.text();
-												return { status: resp.status, text: text.slice(0, 500) };
-											} catch (e) { return { status: 0, error: e.message }; }
-										}""",
-										code,
-									)
-									print(f'ℹ️ {self.account_name}: Callback response: status={result.get("status")}')
-									if result.get('status') == 200:
-										try:
-											import json as _json
-											data = _json.loads(result.get('text', '{}'))
-											token = None
-											if isinstance(data, dict):
-												token = data.get('token') or data.get('access_token') or (data.get('data', {}) or {}).get('token')
-											if token:
-												await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", token)
-												print(f'ℹ️ {self.account_name}: Token from callback saved')
-										except Exception:
-											pass
-								except Exception as e:
-									print(f'⚠️ {self.account_name}: Callback API error: {e}')
+						if code:
+							print(f'ℹ️ {self.account_name}: Calling callback API with code')
+							try:
+								result = await page.evaluate(
+									"""async (code) => {
+										try {
+											const url = 'https://up.x666.me/api/auth/callback?code=' + encodeURIComponent(code);
+											const resp = await fetch(url, { credentials: 'include' });
+											const text = await resp.text();
+											return { status: resp.status, text: text.slice(0, 500) };
+										} catch (e) { return { status: 0, error: e.message }; }
+									}""",
+									code,
+								)
+								print(f'ℹ️ {self.account_name}: Callback response: status={result.get("status")}')
+								if result.get('status') == 200:
+									try:
+										import json as _json
+										data = _json.loads(result.get('text', '{}'))
+										token = None
+										if isinstance(data, dict):
+											token = data.get('token') or data.get('access_token') or (data.get('data', {}) or {}).get('token')
+										if token:
+											await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", token)
+											print(f'ℹ️ {self.account_name}: Token from callback saved')
+									except Exception:
+										pass
+							except Exception as e:
+								print(f'⚠️ {self.account_name}: Callback API error: {e}')
 
 					# 再等 up.x666.me 写入 token（SPA/回调可能需要时间）
 					try:
