@@ -342,6 +342,7 @@ class CredentialsSignIn:
             async with AsyncCamoufox(
                 headless=True,
                 proxy=proxy_config,
+                locale="zh-CN",
             ) as browser:
                 page = await browser.new_page()
 
