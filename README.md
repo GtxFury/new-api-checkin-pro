@@ -276,6 +276,28 @@
 
 配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_DAIJU`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "daiju"`（未填写时 `main_daiju.py` 会自动补全）。
 
+## gemai（哈基米API站）（独立签到）
+
+本仓库额外提供了 `gemai`（哈基米API站）的独立签到入口与独立 Action：
+- 入口脚本：`main_gemai.py`
+- Workflow：`.github/workflows/gemai.yml`
+
+**注意**：该站点仅支持账号密码登录，不支持 linux.do/GitHub OAuth。
+
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_GEMAI`，格式如下：
+
+```json
+[
+  {
+    "name": "gemai 账号1",
+    "credentials": {
+      "username": "你的用户名或邮箱",
+      "password": "你的密码"
+    }
+  }
+]
+```
+
 ## 开启通知
 
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `newapi.ai`。
