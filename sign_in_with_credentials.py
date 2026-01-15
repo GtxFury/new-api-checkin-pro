@@ -8,6 +8,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -322,6 +323,104 @@ class CredentialsSignIn:
         await self._take_screenshot(page, "checkin_button_not_found")
         return False
 
+    async def _get_balance(self, page) -> dict | None:
+        """从页面获取余额信息"""
+        origin = self.provider_config.origin
+
+        def _parse_amount(text: str) -> float | None:
+            if not text:
+                return None
+            t = text.replace("￥", "").replace("$", "").replace("¥", "").replace(",", "").strip()
+            t = re.sub(r"[^0-9.\-]", "", t)
+            try:
+                return float(t)
+            except Exception:
+                return None
+
+        # 尝试从 /console 或 /console/personal 页面获取余额
+        for path in ("/console/personal", "/console"):
+            try:
+                current_url = page.url or ""
+                if path not in current_url:
+                    await page.goto(f"{origin}{path}", wait_until="networkidle")
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                continue
+
+            # 等待余额数据加载（避免 NaN）
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const t = document.body ? (document.body.innerText || '') : '';
+                        if (t.includes('NaN')) return false;
+                        if (t.includes('当前余额') && /¥[\\d.]+/.test(t)) return true;
+                        return false;
+                    }""",
+                    timeout=10000,
+                )
+            except Exception:
+                pass
+
+            # 从页面提取余额信息
+            try:
+                extracted = await page.evaluate(
+                    """() => {
+                        const bodyText = document.body ? (document.body.innerText || '') : '';
+
+                        function pickByLabel(label) {
+                            const nodes = Array.from(document.querySelectorAll('*'));
+                            const exact = nodes.find(n => ((n.innerText || '').trim() === label));
+                            if (exact && exact.parentElement) {
+                                const t = (exact.parentElement.innerText || '').trim();
+                                if (t.includes('¥') || t.includes('$') || t.includes('￥')) return t;
+                            }
+                          const candidates = nodes
+                                .map(n => (n.innerText || '').trim())
+                                .filter(t => t && t.includes(label) && (t.includes('¥') || t.includes('$') || t.includes('￥')))
+                                .sort((a, b) => a.length - b.length);
+                            return candidates[0] || null;
+                        }
+
+                        return {
+                            balanceBlock: pickByLabel('当前余额'),
+                            usedBlock: pickByLabel('历史消耗'),
+                        };
+                    }"""
+                )
+
+                if not extracted:
+                    continue
+
+                balance_block = extracted.get("balanceBlock") or ""
+                used_block = extracted.get("usedBlock") or ""
+
+                quota = None
+                used_quota = None
+
+                # 解析当前余额
+                if balance_block:
+                    match = re.search(r"[¥￥$]\s*([\d.]+)", balance_block)
+                    if match:
+                        quota = _parse_amount(match.group(1))
+
+                # 解析历史消耗
+                if used_block:
+                    match = re.search(r"[¥￥$]\s*([\d.]+)", used_block)
+                    if match:
+                        used_quota = _parse_amount(match.group(1))
+
+                if quota is not None:
+                    return {
+                        "quota": round(quota, 2),
+                        "used_quota": round(used_quota, 2) if used_quota is not None else 0,
+                    }
+
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed to extract balance: {e}")
+                continue
+
+        return None
+
     async def sign_in_and_check_in(
         self,
         proxy_config: dict | None = None,
@@ -359,6 +458,14 @@ class CredentialsSignIn:
                 # 执行签到
                 checkin_success = await self._do_checkin(page)
 
+                # 获取余额
+                balance_info = await self._get_balance(page)
+                quota = balance_info.get("quota", 0) if balance_info else 0
+                used_quota = balance_info.get("used_quota", 0) if balance_info else 0
+
+                if balance_info:
+                    print(f"ℹ️ {self.account_name}: Balance: ¥{quota}, Used: ¥{used_quota}")
+
                 # 获取 cookies
                 cookies = await page.context.cookies()
                 origin = self.provider_config.origin
@@ -366,16 +473,24 @@ class CredentialsSignIn:
 
                 if checkin_success:
                     return True, {
+                        "success": True,
                         "cookies": user_cookies,
                         "api_user": api_user,
                         "checkin": True,
+                        "quota": quota,
+                        "used_quota": used_quota,
+                        "display": f"¥{quota:.2f} | Used ¥{used_quota:.2f}",
                     }
                 else:
                     # 登录成功但签到失败
                     return True, {
+                        "success": True,
                         "cookies": user_cookies,
                         "api_user": api_user,
                         "checkin": False,
+                        "quota": quota,
+                        "used_quota": used_quota,
+                        "display": f"¥{quota:.2f} | Used ¥{used_quota:.2f}",
                         "warning": "Login successful but check-in failed",
                     }
 
