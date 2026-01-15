@@ -106,7 +106,7 @@ def _generate_balance_hash(balances: dict) -> str:
         for account_name, info in balances.items():
             if not isinstance(info, dict):
                 continue
-            simple[account_name] = [info.get("checkin", False)]
+            simple[account_name] = [info.get("quota", 0)]
     payload = json.dumps(simple, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
@@ -215,11 +215,21 @@ async def main() -> int:
             if ok and isinstance(info, dict) and info.get("success"):
                 success_count += 1
                 checkin_ok = info.get("checkin", False)
+                quota = info.get("quota", 0)
+                used_quota = info.get("used_quota", 0)
+                display = info.get("display", "")
+
                 if checkin_ok:
-                    notification_lines.append(f"✅ {account_name}: 签到成功")
+                    if display:
+                        notification_lines.append(f"✅ {account_name}: 签到成功 | {display}")
+                    else:
+                        notification_lines.append(f"✅ {account_name}: 签到成功")
                 else:
-                    notification_lines.append(f"⚠️ {account_name}: 登录成功，签到失败")
-                balances[account_name] = {"checkin": checkin_ok}
+                    if display:
+                        notification_lines.append(f"⚠️ {account_name}: 已签到 | {display}")
+                    else:
+                        notification_lines.append(f"⚠️ {account_name}: 登录成功，签到失败")
+                balances[account_name] = {"quota": quota, "used_quota": used_quota}
             else:
                 any_failed = True
                 err = str(info.get("error", ""))[:160] if isinstance(info, dict) else ""
