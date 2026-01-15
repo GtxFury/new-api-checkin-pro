@@ -458,6 +458,27 @@ class AppConfig:
                 checkin_page_path="/console/personal",
                 checkin_mode="newapi_console_personal",
             ),
+            "gemai": ProviderConfig(
+                name="gemai",
+                origin="https://api.gemai.cc",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                # 该站点不支持 OAuth，仅支持账号密码登录
+                linuxdo_client_id=None,
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                check_in_status_path="/api/user/check_in_status",
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
+            ),
         }
 
         # 尝试从环境变量加载自定义 providers
@@ -501,6 +522,7 @@ class AccountConfig:
     name: str | None = None
     linux_do: dict | None = None
     github: dict | None = None
+    credentials: dict | None = None  # 账号密码登录: {"username": "xxx", "password": "xxx"}
     proxy: dict | None = None
 
     @classmethod
@@ -513,6 +535,7 @@ class AccountConfig:
         cookies = data.get("cookies", "")
         linux_do = data.get("linux.do")
         github = data.get("github")
+        credentials = data.get("credentials")
         proxy = data.get("proxy")
 
         return cls(
@@ -522,6 +545,7 @@ class AccountConfig:
             api_user=data.get("api_user", ""),
             linux_do=linux_do,
             github=github,
+            credentials=credentials,
             proxy=proxy,
         )
 
