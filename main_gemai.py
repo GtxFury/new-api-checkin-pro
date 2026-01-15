@@ -157,12 +157,7 @@ async def _process_account(
         success, result = await sign_in.sign_in_and_check_in(proxy_config=proxy_config)
 
         if success:
-            checkin_ok = result.get("checkin", False)
-            return account_name, True, {
-                "success": True,
-                "checkin": checkin_ok,
-                "api_user": result.get("api_user"),
-            }
+            return account_name, True, result
         else:
             return account_name, False, {"error": result.get("error", "Unknown error")}
 
