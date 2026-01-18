@@ -13,6 +13,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
+from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
 
 from utils.browser_utils import filter_cookies
 from utils.config import ProviderConfig
@@ -57,6 +58,51 @@ class CredentialsSignIn:
             print(f"📸 {self.account_name}: Screenshot saved to {filepath}")
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to take screenshot: {e}")
+
+    async def _detect_turnstile(self, page) -> bool:
+        """检测页面是否存在 Turnstile 验证码"""
+        try:
+            # 检测 Turnstile iframe 或容器
+            turnstile_selectors = [
+                'iframe[src*="challenges.cloudflare.com"]',
+                'iframe[src*="turnstile"]',
+                '[class*="cf-turnstile"]',
+                '#cf-turnstile',
+                'div[data-sitekey]',
+            ]
+            for selector in turnstile_selectors:
+                element = await page.query_selector(selector)
+                if element:
+                    print(f"ℹ️ {self.account_name}: Detected Turnstile captcha ({selector})")
+                    return True
+            return False
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Error detecting Turnstile: {e}")
+            return False
+
+    async def _solve_turnstile(self, page) -> bool:
+        """使用 playwright-captcha 解决 Turnstile 验证码"""
+        try:
+            print(f"ℹ️ {self.account_name}: Attempting to solve Turnstile captcha...")
+
+            # 使用 ClickSolver 配合 Camoufox 框架
+            async with ClickSolver(
+                framework=FrameworkType.CAMOUFOX,
+                page=page,
+                max_attempts=5,
+                attempt_delay=3,
+            ) as solver:
+                await solver.solve_captcha(
+                    captcha_container=page,
+                    captcha_type=CaptchaType.CLOUDFLARE_TURNSTILE,
+                )
+
+            print(f"✅ {self.account_name}: Turnstile captcha solved successfully")
+            return True
+        except Exception as e:
+            print(f"❌ {self.account_name}: Failed to solve Turnstile captcha: {e}")
+            await self._take_screenshot(page, "turnstile_solve_failed")
+            return False
 
     async def _extract_api_user_from_localstorage(self, page) -> str | None:
         """从 localStorage 中读取 user id"""
@@ -182,6 +228,14 @@ class CredentialsSignIn:
                     continue
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to check agreement (may not exist): {e}")
+
+        # 检测并解决 Turnstile 验证码（如果存在）
+        if await self._detect_turnstile(page):
+            turnstile_solved = await self._solve_turnstile(page)
+            if not turnstile_solved:
+                print(f"⚠️ {self.account_name}: Turnstile captcha not solved, attempting to continue...")
+            # 等待验证码处理完成后页面稳定
+            await page.wait_for_timeout(1000)
 
         # 等待一下让按钮变为可点击状态
         await page.wait_for_timeout(500)
