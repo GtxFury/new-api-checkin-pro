@@ -474,7 +474,8 @@ class AppConfig:
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
-                turnstile_check=False,
+                # 登录页面启用 Cloudflare Turnstile 验证码
+                turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
                 checkin_mode="newapi_console_personal",
