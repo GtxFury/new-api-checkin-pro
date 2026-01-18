@@ -202,30 +202,43 @@ class CredentialsSignIn:
 
         # 勾选用户协议（如果存在）
         try:
-            agreement_selectors = [
-                'text=我已阅读并同意',
-                'input[type="checkbox"]',
-                '.semi-checkbox',
-            ]
-            for selector in agreement_selectors:
-                try:
-                    checkbox = await page.query_selector(selector)
-                    if checkbox:
-                        # 检查是否已经勾选
-                        is_checked = await page.evaluate(
-                            """(el) => {
-                                if (el.type === 'checkbox') return el.checked;
-                                const cb = el.querySelector('input[type="checkbox"]');
-                                return cb ? cb.checked : false;
-                            }""",
-                            checkbox,
-                        )
-                        if not is_checked:
-                            await checkbox.click()
-                            print(f"ℹ️ {self.account_name}: Checked user agreement")
-                        break
-                except Exception:
-                    continue
+            # 先检查是否已经勾选
+            is_checked = await page.evaluate(
+                """() => {
+                    const cb = document.querySelector('input[type="checkbox"]');
+                    return cb ? cb.checked : true;
+                }"""
+            )
+
+            if not is_checked:
+                # Semi Design 复选框被样式元素遮挡，需要点击父容器或使用 force
+                agreement_clicked = False
+                agreement_selectors = [
+                    # 优先点击包含复选框文本的父容器（Semi Design 推荐方式）
+                    'label:has(input[type="checkbox"])',
+                    '.semi-checkbox',
+                    'text=我已阅读并同意',
+                ]
+                for selector in agreement_selectors:
+                    try:
+                        checkbox_container = await page.query_selector(selector)
+                        if checkbox_container:
+                            await checkbox_container.click()
+                            agreement_clicked = True
+                            print(f"ℹ️ {self.account_name}: Checked user agreement (via container)")
+                            break
+                    except Exception:
+                        continue
+
+                # 如果上述方法都失败，尝试强制点击 checkbox
+                if not agreement_clicked:
+                    try:
+                        checkbox = await page.query_selector('input[type="checkbox"]')
+                        if checkbox:
+                            await checkbox.click(force=True)
+                            print(f"ℹ️ {self.account_name}: Checked user agreement (force click)")
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to check agreement: {e}")
         except Exception as e:
             print(f"⚠️ {self.account_name}: Failed to check agreement (may not exist): {e}")
 
