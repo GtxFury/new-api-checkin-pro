@@ -1344,24 +1344,65 @@ class LinuxDoAutoReadLike:
 		return stats
 
 
-def _load_accounts_from_env() -> list[AccountConfig]:
+def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
+	"""从环境变量加载 Linux.do 账号配置
+
+	优先使用 LINUXDO_ACCOUNTS 变量（专用），如果不存在则回退到 ACCOUNTS 变量（兼容旧配置）
+
+	LINUXDO_ACCOUNTS 格式（推荐）:
+	[
+		{"name": "账号1", "username": "user1", "password": "pass1"},
+		{"username": "user2", "password": "pass2"}
+	]
+
+	ACCOUNTS 格式（兼容）:
+	[
+		{"name": "账号1", "linux.do": {"username": "user1", "password": "pass1"}, ...},
+		...
+	]
+
+	Returns:
+		list[tuple[str, str, str]]: [(账号名, 用户名, 密码), ...]
+	"""
+	targets: list[tuple[str, str, str]] = []
+
+	# 优先使用 LINUXDO_ACCOUNTS
+	linuxdo_accounts_str = os.getenv("LINUXDO_ACCOUNTS")
+	if linuxdo_accounts_str:
+		try:
+			data = json.loads(linuxdo_accounts_str)
+		except Exception as e:
+			raise RuntimeError(f"LINUXDO_ACCOUNTS 不是合法 JSON: {e}")
+		if not isinstance(data, list):
+			raise RuntimeError("LINUXDO_ACCOUNTS 必须是 JSON 数组")
+
+		for i, item in enumerate(data):
+			if not isinstance(item, dict):
+				continue
+			username = str(item.get("username") or "").strip()
+			password = str(item.get("password") or "").strip()
+			if not username or not password:
+				continue
+			name = str(item.get("name") or f"LinuxDo账号{i + 1}").strip()
+			targets.append((name, username, password))
+
+		if targets:
+			print(f"ℹ️ 从 LINUXDO_ACCOUNTS 加载了 {len(targets)} 个账号")
+			return targets
+
+	# 回退到 ACCOUNTS（兼容旧配置）
 	accounts_str = os.getenv("ACCOUNTS")
 	if not accounts_str:
-		raise RuntimeError("缺少环境变量 ACCOUNTS")
+		raise RuntimeError("缺少环境变量 LINUXDO_ACCOUNTS 或 ACCOUNTS")
 	try:
 		data = json.loads(accounts_str)
 	except Exception as e:
 		raise RuntimeError(f"ACCOUNTS 不是合法 JSON: {e}")
 	if not isinstance(data, list):
 		raise RuntimeError("ACCOUNTS 必须是 JSON 数组")
-	return [AccountConfig.from_dict(item, i) for i, item in enumerate(data) if isinstance(item, dict)]
 
+	accounts = [AccountConfig.from_dict(item, i) for i, item in enumerate(data) if isinstance(item, dict)]
 
-async def _run_all() -> None:
-	settings = LinuxDoSettings.from_env()
-	accounts = _load_accounts_from_env()
-
-	targets: list[tuple[str, str, str]] = []
 	for i, ac in enumerate(accounts):
 		name = ac.get_display_name(i)
 		ld = ac.linux_do or {}
@@ -1373,28 +1414,53 @@ async def _run_all() -> None:
 			continue
 		targets.append((name, u, p))
 
+	if targets:
+		print(f"ℹ️ 从 ACCOUNTS 加载了 {len(targets)} 个 Linux.do 账号（兼容模式）")
+
+	return targets
+
+
+async def _run_all() -> None:
+	settings = LinuxDoSettings.from_env()
+	targets = _load_linuxdo_accounts_from_env()
+
 	if not targets:
 		print("⚠️ 未找到包含 linux.do 用户名密码的账号配置，任务结束")
 		return
 
+	# 阅读轮数配置（默认 1 轮）
+	read_rounds = _clamp(_env_int("LINUXDO_READ_ROUNDS", 1), 1, 100)
 	# 账号间延迟配置（秒），避免多账号连续请求触发 429 限流
 	account_delay = _clamp(_env_int("LINUXDO_ACCOUNT_DELAY", 30), 0, 300)
-	print(f"ℹ️ 共找到 {len(targets)} 个账号，账号间延迟={account_delay}秒")
+	# 轮次间延迟配置（秒）
+	round_delay = _clamp(_env_int("LINUXDO_ROUND_DELAY", 60), 0, 600)
+
+	print(f"ℹ️ 共找到 {len(targets)} 个账号，阅读轮数={read_rounds}，账号间延迟={account_delay}秒，轮次间延迟={round_delay}秒")
 
 	all_stats: list[RunStats] = []
-	for idx, (name, u, p) in enumerate(targets):
-		print(f"\n===== linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
-		try:
-			stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
-			all_stats.append(stats)
-			print(f"✅ {name}: 完成")
-		except Exception as e:
-			print(f"❌ {name}: 失败: {e}")
+	for round_idx in range(read_rounds):
+		if read_rounds > 1:
+			print(f"\n{'='*20} 第 {round_idx + 1}/{read_rounds} 轮 {'='*20}")
 
-		# 账号之间添加延迟，避免触发 429 限流
-		if idx < len(targets) - 1 and account_delay > 0:
-			print(f"ℹ️ 等待 {account_delay} 秒后处理下一个账号...")
-			await asyncio.sleep(account_delay)
+		for idx, (name, u, p) in enumerate(targets):
+			round_info = f"[轮次{round_idx + 1}] " if read_rounds > 1 else ""
+			print(f"\n===== {round_info}linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
+			try:
+				stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
+				all_stats.append(stats)
+				print(f"✅ {name}: 完成")
+			except Exception as e:
+				print(f"❌ {name}: 失败: {e}")
+
+			# 账号之间添加延迟，避免触发 429 限流
+			if idx < len(targets) - 1 and account_delay > 0:
+				print(f"ℹ️ 等待 {account_delay} 秒后处理下一个账号...")
+				await asyncio.sleep(account_delay)
+
+		# 轮次之间添加延迟
+		if round_idx < read_rounds - 1 and round_delay > 0:
+			print(f"\nℹ️ 第 {round_idx + 1} 轮完成，等待 {round_delay} 秒后开始下一轮...")
+			await asyncio.sleep(round_delay)
 
 	# 发送通知（若配置了任意通知渠道）
 	has_any_channel = any(
