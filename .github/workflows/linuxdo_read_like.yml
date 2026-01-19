@@ -24,6 +24,10 @@ jobs:
       LINUXDO_TRY_TURNSTILE_SOLVER: '0'
       # 多账号之间的延迟（秒），避免触发 429 限流
       LINUXDO_ACCOUNT_DELAY: '30'
+      # 阅读轮数（每个账号执行几轮阅读，默认 1 轮）
+      LINUXDO_READ_ROUNDS: '3'
+      # 轮次之间的延迟（秒）
+      LINUXDO_ROUND_DELAY: '60'
     steps:
       - name: set beijing timezone
         uses: szenius/set-timezone@v2.0
@@ -98,6 +102,9 @@ jobs:
 
       - name: 执行自动阅读点赞
         env:
+          # Linux.do 专用账号配置（推荐，格式：[{"name": "账号1", "username": "user1", "password": "pass1"}, ...]）
+          LINUXDO_ACCOUNTS: ${{ secrets.LINUXDO_ACCOUNTS }}
+          # 兼容旧配置：如果 LINUXDO_ACCOUNTS 未设置，会回退到 ACCOUNTS 中的 linux.do 配置
           ACCOUNTS: ${{ secrets.ACCOUNTS }}
           DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
