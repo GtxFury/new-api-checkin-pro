@@ -813,7 +813,6 @@ class X666CheckIn:
 					)
 
 					# 处理"OAuth 打开新标签页"的情况：优先切到 up.x666.me 那个页
-					url_token = ''
 					try:
 						alt = await self._switch_to_context_page_by_host(page, ('up.x666.me',), timeout_ms=8000)
 						if alt is not None:
@@ -832,12 +831,6 @@ class X666CheckIn:
 						pass
 
 					# 检查 localStorage 是否已有 token
-					# 若未从 URL 提取到新 token，先清除 storage state 缓存的旧 token，避免读到过期值
-					if not url_token:
-						try:
-							await page.evaluate("() => { try { localStorage.removeItem('userToken'); } catch(e){} }")
-						except Exception:
-							pass
 					existing_token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 					if existing_token:
 						print(f'ℹ️ {self.account_name}: Token in localStorage (len={len(str(existing_token))})')
@@ -1005,6 +998,35 @@ class X666CheckIn:
 		# 1) 用鉴权接口判断状态（不要靠 UI/未鉴权 fetch，避免误判）
 		status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
 		status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
+
+		# 如果 token 过期（storage state 缓存的旧 token），刷新页面让 SPA 用 OAuth session 重新获取
+		if not (isinstance(status_json, dict) and status_json.get('success')):
+			resp_json = status_resp.get('json') if isinstance(status_resp, dict) else {}
+			expired_msg = (resp_json or {}).get('message', '') if isinstance(resp_json, dict) else ''
+			if status_resp.get('status') == 401 and '过期' in str(expired_msg):
+				print(f'⚠️ {self.account_name}: token 已过期，刷新页面等待 SPA 重新获取...')
+				# 导航到 up.x666.me 触发 SPA 重新初始化
+				try:
+					await page.goto(f'{self.UP_ORIGIN}/', wait_until='domcontentloaded')
+					# 等待 SPA 完成初始化（按钮从"加载中"变为可用状态）
+					await page.wait_for_function(
+						"""() => {
+							try {
+								const btn = document.querySelector('button');
+								if (!btn) return false;
+								const t = btn.innerText || '';
+								return t.includes('开始转动') || t.includes('已签到') || t.includes('今日已');
+							} catch (e) { return false; }
+						}""",
+						timeout=30000,
+					)
+					print(f'ℹ️ {self.account_name}: SPA 初始化完成，重试 API 调用')
+					# 重新读取 SPA 写入的新 token
+					status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
+					status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
+				except Exception as retry_err:
+					print(f'⚠️ {self.account_name}: SPA 重新初始化失败: {retry_err}')
+
 		if not (isinstance(status_json, dict) and status_json.get('success')):
 			print(f'⚠️ {self.account_name}: /api/checkin/status 失败详情: {status_resp}')
 			await self._take_screenshot(page, 'qd_status_failed')
