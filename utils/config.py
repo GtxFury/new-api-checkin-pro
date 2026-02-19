@@ -476,6 +476,7 @@ class AppConfig:
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
                 checkin_mode="newapi_console_personal",
+                linuxdo_callback_mode="spa",
             ),
             "gemai": ProviderConfig(
                 name="gemai",
