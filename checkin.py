@@ -5050,8 +5050,8 @@ class CheckIn:
 
                 # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
                 if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
-                    # anthorpic: OAuth 流程中已在同一浏览器完成签到，直接使用结果
-                    if self.provider_config.name == "anthorpic" and "user_info" in result_data:
+                    # turnstile 站点在 OAuth 流程中已在同一浏览器完成签到，直接使用结果
+                    if "user_info" in result_data:
                         return True, result_data["user_info"]
                     ok, info = await self._newapi_check_in_via_console_personal(
                         auth_cookies=user_cookies,
