@@ -1572,93 +1572,21 @@ class LinuxDoSignIn:
 								state_fast_vals = q_fast.get("state")
 								state_fast = state_fast_vals[0] if state_fast_vals else auth_state
 
-								if self.provider_config.name == "anthorpic":
-									# anthorpic: 等 SPA 写入 localStorage 后从中获取 user ID，
-									# 再在同一浏览器中完成签到（避免新浏览器指纹不匹配导致 session 失效）
-									try:
-										print(f"ℹ️ {self.account_name}: anthorpic: current page url = {page.url}")
-
-										# 等待 SPA 完成 OAuth 回调并写入 localStorage
-										try:
-											await page.wait_for_function(
-												"""() => {
-													try {
-														const u = localStorage.getItem('user');
-														if (!u) return false;
-														const d = JSON.parse(u);
-														return !!(d && d.id);
-													} catch (e) { return false; }
-												}""",
-												timeout=20000,
-											)
-											print(f"✅ {self.account_name}: anthorpic localStorage user detected")
-										except Exception:
-											print(f"⚠️ {self.account_name}: anthorpic localStorage user not found, trying /console navigation")
-											try:
-												await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-												await page.wait_for_timeout(3000)
-											except Exception:
-												await page.wait_for_timeout(3000)
-
-										# 从 localStorage 获取 api_user
-										api_user_spa = None
-										try:
-											api_user_spa = await page.evaluate("""
-												() => {
-													try {
-														const u = localStorage.getItem('user');
-														if (!u) return null;
-														const d = JSON.parse(u);
-														return d && d.id ? String(d.id) : null;
-													} catch (e) { return null; }
-												}
-											""")
-										except Exception as e:
-											print(f"⚠️ {self.account_name}: anthorpic localStorage read error: {e}")
-
-										console_url = page.url or ""
-										print(f"ℹ️ {self.account_name}: anthorpic: page url = {console_url}, api_user = {api_user_spa}")
-
-										if "/login" in console_url:
-											print(f"⚠️ {self.account_name}: anthorpic SPA session not established (redirected to login)")
-											return False, {"error": "session_verify_failed_need_retry", "retry": True}
-
-										if not api_user_spa:
-											return False, {"error": "anthorpic: failed to get api_user from localStorage", "retry": True}
-
-										# 确保在 /console/personal 页面进行签到
-										try:
-											if "/console/personal" not in console_url:
-												await page.goto(f"{self.provider_config.origin}/console/personal", wait_until="networkidle")
-												await page.wait_for_timeout(2000)
-										except Exception:
-											await page.wait_for_timeout(3000)
-
-										# 在同一浏览器中完成签到
-										print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in (api_user={api_user_spa})")
-										checkin_done = await self._browser_check_in_with_turnstile(page)
-										user_info_spa = await self._extract_balance_from_profile(page)
-										if checkin_done and not user_info_spa:
-											user_info_spa = {
-												"success": True,
-												"quota": 0.0,
-												"used_quota": 0.0,
-												"display": "今日已签到（余额解析失败）",
-											}
-
-										restore_cookies = await page.context.cookies()
-										user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
-										result_spa: dict = {"cookies": user_cookies, "api_user": api_user_spa}
-										if user_info_spa:
-											result_spa["user_info"] = user_info_spa
-										return True, result_spa
-									except Exception as anthorpic_err:
-										print(f"❌ {self.account_name}: anthorpic SPA flow error: {anthorpic_err}")
-										import traceback
-										traceback.print_exc()
-										return False, {"error": f"anthorpic SPA flow error: {anthorpic_err}", "retry": True}
-
-								return await self._complete_oauth_via_spa(page, code_fast, state_fast)
+								ok_spa, result_spa = await self._complete_oauth_via_spa(page, code_fast, state_fast)
+								if ok_spa and result_spa.get("api_user") and getattr(self.provider_config, "turnstile_check", False):
+									# turnstile 站点需要在同一浏览器中完成签到（避免新浏览器指纹不匹配导致 session 失效）
+									checkin_done_spa = await self._browser_check_in_with_turnstile(page)
+									user_info_spa = await self._extract_balance_from_profile(page)
+									if checkin_done_spa and not user_info_spa:
+										user_info_spa = {
+											"success": True,
+											"quota": 0.0,
+											"used_quota": 0.0,
+											"display": "今日已签到（余额解析失败）",
+										}
+									if user_info_spa:
+										result_spa["user_info"] = user_info_spa
+								return ok_spa, result_spa
 
 							mode = self._linuxdo_callback_mode()
 							if code_fast and mode != "spa" and self.provider_config.name != "elysiver":
@@ -1726,38 +1654,6 @@ class LinuxDoSignIn:
 											checkin_done_fast = await self._browser_check_in_with_turnstile(page)
 											user_info_fast = await self._extract_balance_from_profile(page)
 											if checkin_done_fast and not user_info_fast and self.provider_config.name == "elysiver":
-												user_info_fast = {
-													"success": True,
-													"quota": 0.0,
-													"used_quota": 0.0,
-													"display": "今日已签到（余额解析失败）",
-												}
-									elif self.provider_config.name == "anthorpic":
-										# anthorpic: fast_fetch 已建立 session cookie，在同一浏览器中完成签到，
-										# 避免新开浏览器导致指纹/TLS 不一致、session 失效
-										print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in after OAuth callback")
-										try:
-											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-											await page.wait_for_timeout(2000)
-										except Exception:
-											await page.wait_for_timeout(3000)
-
-										console_url = page.url or ""
-										if "/login" in console_url:
-											expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-											print(f"⚠️ {self.account_name}: anthorpic session {expired_msg}, clearing cache for retry...")
-											if cache_file_path and os.path.exists(cache_file_path):
-												try:
-													os.remove(cache_file_path)
-													print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
-												except Exception as del_err:
-													print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
-											await self._take_screenshot(page, "anthorpic_session_expired_need_retry")
-											return False, {"error": "session_verify_failed_need_retry", "retry": True}
-										else:
-											checkin_done_fast = await self._browser_check_in_with_turnstile(page)
-											user_info_fast = await self._extract_balance_from_profile(page)
-											if checkin_done_fast and not user_info_fast:
 												user_info_fast = {
 													"success": True,
 													"quota": 0.0,
@@ -1837,37 +1733,6 @@ class LinuxDoSignIn:
 												checkin_done_nav = await self._browser_check_in_with_turnstile(page)
 												user_info_nav = await self._extract_balance_from_profile(page)
 												if checkin_done_nav and not user_info_nav and self.provider_config.name == "elysiver":
-													user_info_nav = {
-														"success": True,
-														"quota": 0.0,
-														"used_quota": 0.0,
-														"display": "今日已签到（余额解析失败）",
-													}
-										elif self.provider_config.name == "anthorpic":
-											# anthorpic: navigation callback 已建立 session cookie，在同一浏览器中完成签到
-											print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in after navigation callback")
-											try:
-												await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-												await page.wait_for_timeout(2000)
-											except Exception:
-												await page.wait_for_timeout(3000)
-
-											console_url = page.url or ""
-											if "/login" in console_url:
-												expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
-												print(f"⚠️ {self.account_name}: anthorpic session {expired_msg}, clearing cache for retry...")
-												if cache_file_path and os.path.exists(cache_file_path):
-													try:
-														os.remove(cache_file_path)
-														print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
-													except Exception as del_err:
-														print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
-												await self._take_screenshot(page, "anthorpic_session_expired_need_retry")
-												return False, {"error": "session_verify_failed_need_retry", "retry": True}
-											else:
-												checkin_done_nav = await self._browser_check_in_with_turnstile(page)
-												user_info_nav = await self._extract_balance_from_profile(page)
-												if checkin_done_nav and not user_info_nav:
 													user_info_nav = {
 														"success": True,
 														"quota": 0.0,
@@ -1956,56 +1821,6 @@ class LinuxDoSignIn:
 					except Exception as e:
 						print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
 
-					# anthorpic: SPA 会消耗 OAuth code 并建立 session cookie，但不写 localStorage。
-					# 此时浏览器已有有效 session，通过 /api/user/self 获取 api_user。
-					if not api_user and self.provider_config.name == "anthorpic":
-						try:
-							# 等待 SPA 完成 OAuth 回调（跳转到 /console 或 /dashboard）
-							try:
-								await page.wait_for_url(
-									f"**{self.provider_config.origin}/**",
-									timeout=10000,
-								)
-							except Exception:
-								pass
-							await page.wait_for_timeout(2000)
-
-							# 导航到 /console 验证 session
-							try:
-								await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-								await page.wait_for_timeout(2000)
-							except Exception:
-								pass
-
-							console_url = page.url or ""
-							if "/login" not in console_url:
-								# session 有效，通过 API 获取 api_user
-								api_resp = await page.evaluate("""
-									async () => {
-										try {
-											const r = await fetch('/api/user/self', {
-												credentials: 'include',
-												headers: {
-													'Accept': 'application/json',
-													'new-api-user': '-1',
-													'New-Api-User': '-1',
-												},
-											});
-											if (!r.ok) return null;
-											const j = await r.json();
-											const d = j.data || j;
-											return d.id || d.user_id || d.userId || null;
-										} catch (e) { return null; }
-									}
-								""")
-								if api_resp:
-									api_user = str(api_resp)
-									print(f"✅ {self.account_name}: Got api user from /api/user/self: {api_user}")
-							else:
-								print(f"⚠️ {self.account_name}: anthorpic SPA session not established (redirected to login)")
-						except Exception as e:
-							print(f"⚠️ {self.account_name}: anthorpic API user extraction failed: {e}")
-
 					if api_user:
 						print(f"✅ {self.account_name}: OAuth authorization successful")
 
@@ -2082,11 +1897,11 @@ class LinuxDoSignIn:
 						user_info = None
 						# newapi 通用签到入口在控制台 `/console/personal`（右侧“立即签到”）。
 						# 此处仅负责完成登录与 cookies 提取，不在登录流程里强依赖旧的 /app/me DOM 解析。
-						if (getattr(self.provider_config, "turnstile_check", False) or self.provider_config.name == "anthorpic") and self.provider_config.name != "runanytime":
+						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
 							checkin_done = await self._browser_check_in_with_turnstile(page)
 							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求
 							user_info = await self._extract_balance_from_profile(page)
-							if checkin_done and not user_info and self.provider_config.name in ("elysiver", "anthorpic"):
+							if checkin_done and not user_info:
 								user_info = {
 									"success": True,
 									"quota": 0.0,
