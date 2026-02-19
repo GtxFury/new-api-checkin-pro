@@ -185,8 +185,18 @@ class HybgzsCheckIn:
 	async def _do_oauth_login(self, page, username: str, password: str) -> bool:
 		"""完成 cdk.hybgzs.com 的 Linux.do OAuth 登录"""
 		# 导航到站点
-		await page.goto(f'{self.ORIGIN}/dashboard', wait_until='domcontentloaded')
+		try:
+			await page.goto(f'{self.ORIGIN}/dashboard', wait_until='domcontentloaded')
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: 导航到 dashboard 失败: {e}')
+			try:
+				await page.goto(self.ORIGIN, wait_until='domcontentloaded')
+			except Exception as e2:
+				print(f'❌ {self.account_name}: 导航到站点失败: {e2}')
+				await self._take_screenshot(page, 'navigate_failed')
+				return False
 		await page.wait_for_timeout(2000)
+		print(f'ℹ️ {self.account_name}: 当前 URL: {page.url}')
 
 		# 检查是否已登录（session API）
 		session = await self._browser_fetch_json(page, '/api/auth/session')
@@ -196,43 +206,77 @@ class HybgzsCheckIn:
 			print(f'✅ {self.account_name}: 已登录 - {user.get("name", "Unknown")}')
 			return True
 
-		print(f'ℹ️ {self.account_name}: 未登录，开始 OAuth 流程')
+		print(f'ℹ️ {self.account_name}: 未登录 (session: {str(session_json)[:200]})，开始 OAuth 流程')
 
 		# 导航到登录页
-		await page.goto(f'{self.ORIGIN}/login', wait_until='domcontentloaded')
+		try:
+			await page.goto(f'{self.ORIGIN}/login', wait_until='domcontentloaded')
+		except Exception as e:
+			print(f'❌ {self.account_name}: 导航到登录页失败: {e}')
+			await self._take_screenshot(page, 'login_page_failed')
+			return False
 		await page.wait_for_timeout(2000)
+		print(f'ℹ️ {self.account_name}: 登录页 URL: {page.url}')
+
+		# 检查页面上有哪些按钮
+		try:
+			page_meta = await page.evaluate(
+				"""() => {
+					const btns = Array.from(document.querySelectorAll('button'));
+					return {
+						title: document.title,
+						url: location.href,
+						buttons: btns.map(b => ({ text: (b.textContent || '').trim().slice(0, 50), disabled: b.disabled })),
+						bodySnippet: (document.body?.innerText || '').slice(0, 300),
+					};
+				}"""
+			)
+			print(f'ℹ️ {self.account_name}: 登录页信息: buttons={page_meta.get("buttons")}, title={page_meta.get("title")}')
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: 获取页面信息失败: {e}')
 
 		# 等待 "LinuxDo 登录" 按钮变为可用（初始为 disabled）
+		print(f'ℹ️ {self.account_name}: 等待 LinuxDo 登录按钮启用...')
 		try:
 			await page.wait_for_function(
 				"""() => {
 					const btns = Array.from(document.querySelectorAll('button'));
-					const btn = btns.find(b => (b.textContent || '').includes('LinuxDo'));
+					const btn = btns.find(b => (b.textContent || '').includes('LinuxDo') || (b.textContent || '').includes('Linux Do'));
 					return btn && !btn.disabled;
 				}""",
 				timeout=15000,
 			)
-		except Exception:
+			print(f'ℹ️ {self.account_name}: LinuxDo 按钮已启用')
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: 等待 LinuxDo 按钮超时: {e}')
 			await self._take_screenshot(page, 'linuxdo_button_not_ready')
+			await self._save_page_html(page, 'linuxdo_button_not_ready')
 
 		# 点击 "LinuxDo 登录" 按钮
 		clicked = False
 		for sel in ['button:has-text("LinuxDo 登录")', 'button:has-text("LinuxDo")', 'button:has-text("Linux Do")']:
 			try:
 				btn = await page.query_selector(sel)
-				if btn and await btn.is_enabled():
-					await btn.click()
-					clicked = True
-					print(f'ℹ️ {self.account_name}: 点击了 LinuxDo 登录按钮')
-					break
-			except Exception:
+				if btn:
+					is_enabled = await btn.is_enabled()
+					print(f'ℹ️ {self.account_name}: 找到按钮 [{sel}], enabled={is_enabled}')
+					if is_enabled:
+						await btn.click()
+						clicked = True
+						print(f'ℹ️ {self.account_name}: 点击了 LinuxDo 登录按钮')
+						break
+			except Exception as e:
+				print(f'⚠️ {self.account_name}: 点击按钮 [{sel}] 失败: {e}')
 				continue
 
 		if not clicked:
+			print(f'❌ {self.account_name}: 未找到可点击的 LinuxDo 登录按钮')
 			await self._take_screenshot(page, 'linuxdo_button_not_found')
+			await self._save_page_html(page, 'linuxdo_button_not_found')
 			return False
 
 		# 等待跳转到 connect.linux.do 授权页
+		print(f'ℹ️ {self.account_name}: 等待跳转到 linux.do 授权页...')
 		try:
 			await page.wait_for_function(
 				"""() => {
@@ -241,26 +285,48 @@ class HybgzsCheckIn:
 				}""",
 				timeout=15000,
 			)
-		except Exception:
+			print(f'ℹ️ {self.account_name}: 已跳转到: {page.url}')
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: 等待 OAuth 跳转超时 (当前 URL: {page.url}): {e}')
 			await self._take_screenshot(page, 'oauth_redirect_timeout')
+			await self._save_page_html(page, 'oauth_redirect_timeout')
 
 		await page.wait_for_timeout(1500)
 
 		# 可能需要在 linux.do 登录
+		cur_url = page.url or ''
+		print(f'ℹ️ {self.account_name}: OAuth 页面 URL: {cur_url}')
+		if 'linux.do/login' in cur_url:
+			print(f'ℹ️ {self.account_name}: 检测到 linux.do 登录页，开始填写凭据...')
 		await self._linuxdo_login_if_needed(page, username, password)
 
+		await page.wait_for_timeout(1000)
+		print(f'ℹ️ {self.account_name}: 登录/授权后 URL: {page.url}')
+
 		# 点击授权按钮（如果出现）
-		for sel in ['a[href*="/oauth2/approve"]', 'link:has-text("允许")', 'button:has-text("允许")', 'button:has-text("授权")', 'button:has-text("Authorize")']:
+		approve_clicked = False
+		for sel in ['a[href*="/oauth2/approve"]', 'button:has-text("允许")', 'button:has-text("授权")', 'button:has-text("Authorize")']:
 			try:
 				btn = await page.query_selector(sel)
 				if btn:
 					await btn.click()
-					print(f'ℹ️ {self.account_name}: 点击了授权按钮')
+					approve_clicked = True
+					print(f'ℹ️ {self.account_name}: 点击了授权按钮 [{sel}]')
 					break
 			except Exception:
 				continue
 
+		if not approve_clicked:
+			cur = page.url or ''
+			if 'connect.linux.do' in cur or 'linux.do' in cur:
+				print(f'⚠️ {self.account_name}: 未找到授权按钮，仍在 linux.do (URL: {cur})')
+				await self._take_screenshot(page, 'oauth_approve_not_found')
+				await self._save_page_html(page, 'oauth_approve_not_found')
+			else:
+				print(f'ℹ️ {self.account_name}: 无需点击授权（可能已自动授权），当前 URL: {cur}')
+
 		# 等待回调完成，回到站点
+		print(f'ℹ️ {self.account_name}: 等待回调完成...')
 		try:
 			await page.wait_for_function(
 				f"""() => {{
@@ -269,8 +335,11 @@ class HybgzsCheckIn:
 				}}""",
 				timeout=30000,
 			)
-		except Exception:
-			pass
+			print(f'ℹ️ {self.account_name}: 回调完成，URL: {page.url}')
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: 等待回调超时 (当前 URL: {page.url}): {e}')
+			await self._take_screenshot(page, 'oauth_callback_timeout')
+			await self._save_page_html(page, 'oauth_callback_timeout')
 
 		await page.wait_for_timeout(2000)
 
@@ -282,7 +351,9 @@ class HybgzsCheckIn:
 			print(f'✅ {self.account_name}: OAuth 登录成功 - {user.get("name", "Unknown")}')
 			return True
 
+		print(f'❌ {self.account_name}: OAuth 登录失败 (session: {str(session_json)[:200]}, URL: {page.url})')
 		await self._take_screenshot(page, 'oauth_login_failed')
+		await self._save_page_html(page, 'oauth_login_failed')
 		return False
 
 	# ── 每日签到 ──────────────────────────────────────────────
