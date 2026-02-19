@@ -1631,6 +1631,38 @@ class LinuxDoSignIn:
 													"used_quota": 0.0,
 													"display": "今日已签到（余额解析失败）",
 												}
+									elif self.provider_config.name == "anthorpic":
+										# anthorpic: fast_fetch 已建立 session cookie，在同一浏览器中完成签到，
+										# 避免新开浏览器导致指纹/TLS 不一致、session 失效
+										print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in after OAuth callback")
+										try:
+											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+											await page.wait_for_timeout(2000)
+										except Exception:
+											await page.wait_for_timeout(3000)
+
+										console_url = page.url or ""
+										if "/login" in console_url:
+											expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
+											print(f"⚠️ {self.account_name}: anthorpic session {expired_msg}, clearing cache for retry...")
+											if cache_file_path and os.path.exists(cache_file_path):
+												try:
+													os.remove(cache_file_path)
+													print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
+												except Exception as del_err:
+													print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
+											await self._take_screenshot(page, "anthorpic_session_expired_need_retry")
+											return False, {"error": "session_verify_failed_need_retry", "retry": True}
+										else:
+											checkin_done_fast = await self._browser_check_in_with_turnstile(page)
+											user_info_fast = await self._extract_balance_from_profile(page)
+											if checkin_done_fast and not user_info_fast:
+												user_info_fast = {
+													"success": True,
+													"quota": 0.0,
+													"used_quota": 0.0,
+													"display": "今日已签到（余额解析失败）",
+												}
 
 									restore_cookies = await page.context.cookies()
 									user_cookies = filter_cookies(
@@ -1704,6 +1736,37 @@ class LinuxDoSignIn:
 												checkin_done_nav = await self._browser_check_in_with_turnstile(page)
 												user_info_nav = await self._extract_balance_from_profile(page)
 												if checkin_done_nav and not user_info_nav and self.provider_config.name == "elysiver":
+													user_info_nav = {
+														"success": True,
+														"quota": 0.0,
+														"used_quota": 0.0,
+														"display": "今日已签到（余额解析失败）",
+													}
+										elif self.provider_config.name == "anthorpic":
+											# anthorpic: navigation callback 已建立 session cookie，在同一浏览器中完成签到
+											print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in after navigation callback")
+											try:
+												await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+												await page.wait_for_timeout(2000)
+											except Exception:
+												await page.wait_for_timeout(3000)
+
+											console_url = page.url or ""
+											if "/login" in console_url:
+												expired_msg = "expired=true" if "expired=true" in console_url else "invalid"
+												print(f"⚠️ {self.account_name}: anthorpic session {expired_msg}, clearing cache for retry...")
+												if cache_file_path and os.path.exists(cache_file_path):
+													try:
+														os.remove(cache_file_path)
+														print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
+													except Exception as del_err:
+														print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
+												await self._take_screenshot(page, "anthorpic_session_expired_need_retry")
+												return False, {"error": "session_verify_failed_need_retry", "retry": True}
+											else:
+												checkin_done_nav = await self._browser_check_in_with_turnstile(page)
+												user_info_nav = await self._extract_balance_from_profile(page)
+												if checkin_done_nav and not user_info_nav:
 													user_info_nav = {
 														"success": True,
 														"quota": 0.0,
@@ -1868,11 +1931,11 @@ class LinuxDoSignIn:
 						user_info = None
 						# newapi 通用签到入口在控制台 `/console/personal`（右侧“立即签到”）。
 						# 此处仅负责完成登录与 cookies 提取，不在登录流程里强依赖旧的 /app/me DOM 解析。
-						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
+						if (getattr(self.provider_config, "turnstile_check", False) or self.provider_config.name == "anthorpic") and self.provider_config.name != "runanytime":
 							checkin_done = await self._browser_check_in_with_turnstile(page)
 							# 在同一页面上直接解析余额信息，避免额外的 HTTP 请求
 							user_info = await self._extract_balance_from_profile(page)
-							if checkin_done and not user_info and self.provider_config.name == "elysiver":
+							if checkin_done and not user_info and self.provider_config.name in ("elysiver", "anthorpic"):
 								user_info = {
 									"success": True,
 									"quota": 0.0,
