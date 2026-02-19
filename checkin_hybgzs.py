@@ -198,15 +198,59 @@ class HybgzsCheckIn:
 
 		print(f'ℹ️ {self.account_name}: 未登录，开始 OAuth 流程')
 
-		# 触发 Linux.do OAuth 登录 - NextAuth.js 的 signIn 端点
-		await page.goto(f'{self.ORIGIN}/api/auth/signin/linuxdo', wait_until='domcontentloaded')
+		# 导航到登录页
+		await page.goto(f'{self.ORIGIN}/login', wait_until='domcontentloaded')
 		await page.wait_for_timeout(2000)
+
+		# 等待 "LinuxDo 登录" 按钮变为可用（初始为 disabled）
+		try:
+			await page.wait_for_function(
+				"""() => {
+					const btns = Array.from(document.querySelectorAll('button'));
+					const btn = btns.find(b => (b.textContent || '').includes('LinuxDo'));
+					return btn && !btn.disabled;
+				}""",
+				timeout=15000,
+			)
+		except Exception:
+			await self._take_screenshot(page, 'linuxdo_button_not_ready')
+
+		# 点击 "LinuxDo 登录" 按钮
+		clicked = False
+		for sel in ['button:has-text("LinuxDo 登录")', 'button:has-text("LinuxDo")', 'button:has-text("Linux Do")']:
+			try:
+				btn = await page.query_selector(sel)
+				if btn and await btn.is_enabled():
+					await btn.click()
+					clicked = True
+					print(f'ℹ️ {self.account_name}: 点击了 LinuxDo 登录按钮')
+					break
+			except Exception:
+				continue
+
+		if not clicked:
+			await self._take_screenshot(page, 'linuxdo_button_not_found')
+			return False
+
+		# 等待跳转到 connect.linux.do 授权页
+		try:
+			await page.wait_for_function(
+				"""() => {
+					const u = location.href || '';
+					return u.includes('connect.linux.do') || u.includes('linux.do/login');
+				}""",
+				timeout=15000,
+			)
+		except Exception:
+			await self._take_screenshot(page, 'oauth_redirect_timeout')
+
+		await page.wait_for_timeout(1500)
 
 		# 可能需要在 linux.do 登录
 		await self._linuxdo_login_if_needed(page, username, password)
 
-		# 点击授权按钮
-		for sel in ['a[href^="/oauth2/approve"]', 'button:has-text("允许")', 'button:has-text("授权")', 'button:has-text("Authorize")']:
+		# 点击授权按钮（如果出现）
+		for sel in ['a[href*="/oauth2/approve"]', 'link:has-text("允许")', 'button:has-text("允许")', 'button:has-text("授权")', 'button:has-text("Authorize")']:
 			try:
 				btn = await page.query_selector(sel)
 				if btn:
@@ -216,12 +260,12 @@ class HybgzsCheckIn:
 			except Exception:
 				continue
 
-		# 等待回调完成
+		# 等待回调完成，回到站点
 		try:
 			await page.wait_for_function(
 				f"""() => {{
 					const u = location.href || '';
-					return u.startsWith('{self.ORIGIN}') && !u.includes('/api/auth/');
+					return u.startsWith('{self.ORIGIN}') && !u.includes('/login');
 				}}""",
 				timeout=30000,
 			)
