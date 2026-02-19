@@ -813,6 +813,7 @@ class X666CheckIn:
 					)
 
 					# 处理"OAuth 打开新标签页"的情况：优先切到 up.x666.me 那个页
+					url_token = ''
 					try:
 						alt = await self._switch_to_context_page_by_host(page, ('up.x666.me',), timeout_ms=8000)
 						if alt is not None:
@@ -831,6 +832,12 @@ class X666CheckIn:
 						pass
 
 					# 检查 localStorage 是否已有 token
+					# 若未从 URL 提取到新 token，先清除 storage state 缓存的旧 token，避免读到过期值
+					if not url_token:
+						try:
+							await page.evaluate("() => { try { localStorage.removeItem('userToken'); } catch(e){} }")
+						except Exception:
+							pass
 					existing_token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 					if existing_token:
 						print(f'ℹ️ {self.account_name}: Token in localStorage (len={len(str(existing_token))})')
