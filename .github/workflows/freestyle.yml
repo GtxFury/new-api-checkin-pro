@@ -1,11 +1,11 @@
-name: icat 自动签到
+name: 佬友 自动签到
 on:
   schedule:
     - cron: '0 */8 * * *'
   workflow_dispatch:
 
 jobs:
-  icat:
+  freestyle:
     permissions:
       contents: read
     runs-on: windows-2025
@@ -77,23 +77,23 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/icat
-        key: icat-storage-states-${{ hashFiles('storage-states/icat/*.json') }}
+          storage-states/freestyle
+        key: freestyle-storage-states-${{ hashFiles('storage-states/freestyle/*.json') }}
         restore-keys: |
-          icat-storage-states-
+          freestyle-storage-states-
 
     - name: 恢复余额历史缓存
       uses: actions/cache/restore@v4
       with:
         path: |
-          balance_hash_icat.txt
-        key: balance-hash-icat-${{ hashFiles('balance_hash_icat.txt') }}
+          balance_hash_freestyle.txt
+        key: balance-hash-freestyle-${{ hashFiles('balance_hash_freestyle.txt') }}
         restore-keys: |
-          balance-hash-icat-
+          balance-hash-freestyle-
 
-    - name: 执行 icat 签到
+    - name: 执行 freestyle 签到
       env:
-        ACCOUNTS_ICAT: ${{ secrets.ACCOUNTS_ICAT }}
+        ACCOUNTS_FREESTYLE: ${{ secrets.ACCOUNTS_FREESTYLE }}
         PROXY: ${{ secrets.PROXY }}
         LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -108,29 +108,29 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        uv run python -u main_icat.py
+        uv run python -u main_freestyle.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/icat/*.json') != ''
+      if: hashFiles('storage-states/freestyle/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/icat
-        key: icat-storage-states-${{ hashFiles('storage-states/icat/*.json') }}
+          storage-states/freestyle
+        key: freestyle-storage-states-${{ hashFiles('storage-states/freestyle/*.json') }}
 
     - name: 保存余额历史缓存
-      if: hashFiles('balance_hash_icat.txt') != ''
+      if: hashFiles('balance_hash_freestyle.txt') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          balance_hash_icat.txt
-        key: balance-hash-icat-${{ hashFiles('balance_hash_icat.txt') }}
+          balance_hash_freestyle.txt
+        key: balance-hash-freestyle-${{ hashFiles('balance_hash_freestyle.txt') }}
 
     - name: 保存日志和截图
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: icat-artifacts-${{ github.run_number }}
+        name: freestyle-artifacts-${{ github.run_number }}
         path: |
           logs/
           screenshots/
@@ -140,5 +140,5 @@ jobs:
     - name: 执行结果
       if: always()
       run: |
-        echo "icat 签到任务执行完成"
+        echo "freestyle 签到任务执行完成"
         echo "时间: $(Get-Date)"
