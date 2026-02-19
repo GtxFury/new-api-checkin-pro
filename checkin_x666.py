@@ -966,6 +966,7 @@ class X666CheckIn:
 		print(f'ℹ️ {self.account_name}: qd token present (len={len(str(token))}) at {page.url}')
 
 		async def _auth_fetch_json(path: str, method: str = 'GET') -> dict:
+			print(f'ℹ️ {self.account_name}: _auth_fetch_json {method} {path} from {page.url}')
 			resp = await page.evaluate(
 				"""async ({ path, method }) => {
 					try {
@@ -998,6 +999,7 @@ class X666CheckIn:
 		status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
 		status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
 		if not (isinstance(status_json, dict) and status_json.get('success')):
+			print(f'⚠️ {self.account_name}: /api/checkin/status 失败详情: {status_resp}')
 			await self._take_screenshot(page, 'qd_status_failed')
 			await self._save_page_html(page, 'qd_status_failed')
 			return False, f'获取签到状态失败（/api/checkin/status，HTTP {status_resp.get("status")}）'
