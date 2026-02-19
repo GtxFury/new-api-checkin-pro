@@ -1010,45 +1010,42 @@ class X666CheckIn:
 			)
 			return resp if isinstance(resp, dict) else {'ok': False, 'status': 0, 'error': 'invalid_resp'}
 
-		# 1) 用鉴权接口判断状态（不要靠 UI/未鉴权 fetch，避免误判）
-		status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
-		status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
-
-		# token 过期（storage state 缓存的旧 token）→ 抛异常触发上层清缓存重试
-		if status_resp.get('status') == 401:
+		# 1) 先用 /api/user/info 验证 token 有效性（前端也是这么做的）
+		info_resp = await _auth_fetch_json('/api/user/info', 'GET')
+		if info_resp.get('status') == 401:
 			raise _TokenExpiredError('token已过期')
+		info_json = info_resp.get('json') if isinstance(info_resp, dict) else None
+		if isinstance(info_json, dict) and info_json.get('success'):
+			print(f'ℹ️ {self.account_name}: 用户验证通过: {info_json.get(“username”, “?”)}')
+		else:
+			print(f'⚠️ {self.account_name}: /api/user/info 响应: {info_resp}')
 
-		if not (isinstance(status_json, dict) and status_json.get('success')):
-			print(f'⚠️ {self.account_name}: /api/checkin/status 失败详情: {status_resp}')
-			await self._take_screenshot(page, 'qd_status_failed')
-			await self._save_page_html(page, 'qd_status_failed')
-			return False, f'获取签到状态失败（/api/checkin/status，HTTP {status_resp.get("status")}）'
-
-		can_spin = bool((status_json.get('data', {}) or {}).get('can_spin'))
-		print(f'ℹ️ {self.account_name}: qd can_spin={can_spin}')
-		if not can_spin:
-			return True, '今日已签到'
-
-		# 2) 优先直接调用抽奖接口（比点按钮更稳定，避免按钮被遮挡/动画导致 click 丢失）
+		# 2) 直接调用签到接口（跟前端 spin() 一样，不先检查 can_spin）
 		spin_resp = await _auth_fetch_json('/api/checkin/spin', 'POST')
 		spin_json = spin_resp.get('json') if isinstance(spin_resp, dict) else None
+		if spin_resp.get('status') == 401:
+			raise _TokenExpiredError('token已过期')
+
 		if isinstance(spin_json, dict):
 			if spin_json.get('success'):
-				return True, '签到成功'
+				label = spin_json.get('label', '')
+				quota = spin_json.get('quota', 0)
+				print(f'ℹ️ {self.account_name}: spin 成功: {label}, quota={quota}')
+				return True, f'签到成功（{label}）'
 			msg = spin_json.get('message', spin_json.get('msg', '')) or ''
-			if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
+			if isinstance(msg, str) and ('already' in msg.lower() or '已签到' in msg or '已经' in msg):
 				return True, '今日已签到'
-			# 如果接口返回了明确错误，保留现场便于排查
-			await self._take_screenshot(page, 'qd_spin_failed')
-			await self._save_page_html(page, 'qd_spin_failed')
-			return False, f'签到失败（/api/checkin/spin，HTTP {spin_resp.get("status")}）'
+			# API 返回了其他错误 → 不直接失败，回退到 UI 点按钮
+			print(f'⚠️ {self.account_name}: /api/checkin/spin 返回: {spin_json}，回退到 UI')
+		else:
+			print(f'⚠️ {self.account_name}: /api/checkin/spin 无有效响应(HTTP {spin_resp.get(“status”)})，回退到 UI')
 
-		# 有些 UI 会显示 “已签到/今日已签到”
+		# 3) API 未能完成签到，回退到页面 UI 点击按钮
 		try:
-			if await page.query_selector('button:has-text("已签到")') or await page.query_selector(
-				'button:has-text("今日已签到")'
-			):
-				return True, '今日已签到'
+			cur = page.url or ''
+			if not cur.startswith(self.QD_ORIGIN):
+				await page.goto(f'{self.QD_ORIGIN}/', wait_until='domcontentloaded')
+				await page.wait_for_timeout(1500)
 		except Exception:
 			pass
 
@@ -1081,18 +1078,19 @@ class X666CheckIn:
 					j = await resp.json()
 					if isinstance(j, dict):
 						if j.get('success'):
-							return True, '签到成功'
+							label = j.get('label', '')
+							return True, f'签到成功（{label}）'
 						msg = j.get('message', j.get('msg', '')) or ''
-						if isinstance(msg, str) and ('already' in msg.lower() or '已' in msg or '已经' in msg):
+						if isinstance(msg, str) and ('already' in msg.lower() or '已签到' in msg or '已经' in msg):
 							return True, '今日已签到'
 			except Exception:
 				pass
 
-			# 兜底：再查一次状态
+			# 兜底：再查一次状态（can_spin 在顶层，不在 data 下）
 			status2 = await _auth_fetch_json('/api/checkin/status', 'GET')
 			j2 = status2.get('json') if isinstance(status2, dict) else None
 			if isinstance(j2, dict) and j2.get('success'):
-				if bool((j2.get('data', {}) or {}).get('can_spin')) is False:
+				if j2.get('can_spin') is False:
 					return True, '签到成功'
 		except Exception:
 			# 可能 UI 不提示；退化为“按钮状态变化”判断
