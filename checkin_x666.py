@@ -3,7 +3,7 @@
 x666.me 自动签到
 
 - 旧流程（兼容保留）：qd.x666.me 抽奖拿 CDK，然后到 x666.me 充值
-- 新流程：qd.x666.me 使用 linux.do OAuth 登录并点击“签到”，再登录 x666.me 获取余额
+- 新流程：qd.x666.me 使用 linux.do OAuth 登录并点击"签到"，再登录 x666.me 获取余额
 """
 
 import json
@@ -307,7 +307,7 @@ class X666CheckIn:
 
 		# 尝试复用通用的 CF Interstitial 处理（可选依赖）。
 		# 说明：Turnstile click solver 在部分环境（如 Actions 出口 IP）容易反复超时刷屏，
-		# 这里默认不强依赖“点验证码”，而是优先等待页面自己放行/渲染出登录表单。
+		# 这里默认不强依赖"点验证码"，而是优先等待页面自己放行/渲染出登录表单。
 		try:
 			from sign_in_with_linuxdo import solve_captcha  # type: ignore
 
@@ -618,13 +618,13 @@ class X666CheckIn:
 		except Exception:
 			pass
 
-		# 若已登录，通常不会出现明显的“登录/登陆”入口；这里尽量只在能找到入口时点击
+		# 若已登录，通常不会出现明显的"登录/登陆"入口；这里尽量只在能找到入口时点击
 		try:
 			print(f'ℹ️ {self.account_name}: OAuth/UI login at {origin}, current url: {page.url}')
 		except Exception:
 			pass
 
-		# 记录页面基础信息，便于排查“没点到按钮/按钮被遮挡/页面没渲染”
+		# 记录页面基础信息，便于排查"没点到按钮/按钮被遮挡/页面没渲染"
 		try:
 			meta = await page.evaluate(
 				"""() => {
@@ -663,7 +663,7 @@ class X666CheckIn:
 			)
 		print(f'ℹ️ {self.account_name}: {origin} login button clicked: {"yes" if login_clicked else "no"}')
 		if origin.rstrip('/') == self.X666_ORIGIN.rstrip('/') and not login_clicked:
-			# new-api 登录页没找到 LinuxDO 按钮：不要继续“乱点 provider”，直接产出现场便于排查
+			# new-api 登录页没找到 LinuxDO 按钮：不要继续"乱点 provider"，直接产出现场便于排查
 			await self._take_screenshot(page, 'x666_login_button_not_found')
 			await self._save_page_html(page, 'x666_login_button_not_found')
 			raise RuntimeError('x666.me 登录页未找到「使用 LinuxDO 继续」按钮')
@@ -681,7 +681,7 @@ class X666CheckIn:
 			except Exception:
 				pass
 
-			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会“看似卡住”）。
+			# 等待跳转到 linux.do/connect.linux.do 授权页（否则后续流程会"看似卡住"）。
 			# 部分环境 click 可能不触发导航，但仍能在 request 里捕获到 authorize URL；此时用 URL 兜底导航。
 			try:
 				await page.wait_for_function(
@@ -1016,7 +1016,7 @@ class X666CheckIn:
 			raise _TokenExpiredError('token已过期')
 		info_json = info_resp.get('json') if isinstance(info_resp, dict) else None
 		if isinstance(info_json, dict) and info_json.get('success'):
-			print(f'ℹ️ {self.account_name}: 用户验证通过: {info_json.get(“username”, “?”)}')
+			print(f'ℹ️ {self.account_name}: 用户验证通过: {info_json.get("username", "?")}')
 		else:
 			print(f'⚠️ {self.account_name}: /api/user/info 响应: {info_resp}')
 
@@ -1038,7 +1038,7 @@ class X666CheckIn:
 			# API 返回了其他错误 → 不直接失败，回退到 UI 点按钮
 			print(f'⚠️ {self.account_name}: /api/checkin/spin 返回: {spin_json}，回退到 UI')
 		else:
-			print(f'⚠️ {self.account_name}: /api/checkin/spin 无有效响应(HTTP {spin_resp.get(“status”)})，回退到 UI')
+			print(f'⚠️ {self.account_name}: /api/checkin/spin 无有效响应(HTTP {spin_resp.get("status")})，回退到 UI')
 
 		# 3) API 未能完成签到，回退到页面 UI 点击按钮
 		try:
@@ -1093,7 +1093,7 @@ class X666CheckIn:
 				if j2.get('can_spin') is False:
 					return True, '签到成功'
 		except Exception:
-			# 可能 UI 不提示；退化为“按钮状态变化”判断
+			# 可能 UI 不提示；退化为"按钮状态变化"判断
 			try:
 				if await page.query_selector('button:has-text("已签到")') or await page.query_selector(
 					'button:has-text("今日已签到")'
