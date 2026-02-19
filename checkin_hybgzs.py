@@ -235,6 +235,46 @@ class HybgzsCheckIn:
 		except Exception as e:
 			print(f'⚠️ {self.account_name}: 获取页面信息失败: {e}')
 
+		# 关闭可能存在的公告弹窗（会遮挡登录按钮）
+		try:
+			dismiss_selectors = [
+				'button:has-text("我知道了")',
+				'button:has-text("关闭")',
+				'button:has-text("确定")',
+				'button:has-text("OK")',
+				'button:has-text("知道了")',
+				'button:has-text("好的")',
+				# X / 关闭图标按钮
+				'.fixed button[aria-label="Close"]',
+				'.fixed button[aria-label="关闭"]',
+				'.fixed button svg',
+			]
+			for sel in dismiss_selectors:
+				try:
+					dismiss_btn = await page.query_selector(sel)
+					if dismiss_btn and await dismiss_btn.is_visible():
+						await dismiss_btn.click()
+						print(f'ℹ️ {self.account_name}: 关闭了弹窗 [{sel}]')
+						await page.wait_for_timeout(500)
+						break
+				except Exception:
+					continue
+
+			# 如果弹窗仍然存在，用 JS 强制移除所有 fixed z-50 遮罩
+			removed = await page.evaluate(
+				"""() => {
+					const overlays = document.querySelectorAll('div.fixed.z-50, div[class*="fixed"][class*="inset-0"]');
+					let count = 0;
+					overlays.forEach(el => { el.remove(); count++; });
+					return count;
+				}"""
+			)
+			if removed:
+				print(f'ℹ️ {self.account_name}: JS 移除了 {removed} 个遮罩层')
+				await page.wait_for_timeout(500)
+		except Exception:
+			pass
+
 		# 等待 "LinuxDo 登录" 按钮变为可用（初始为 disabled）
 		print(f'ℹ️ {self.account_name}: 等待 LinuxDo 登录按钮启用...')
 		try:
@@ -261,7 +301,17 @@ class HybgzsCheckIn:
 					is_enabled = await btn.is_enabled()
 					print(f'ℹ️ {self.account_name}: 找到按钮 [{sel}], enabled={is_enabled}')
 					if is_enabled:
-						await btn.click()
+						try:
+							await btn.click(timeout=5000)
+						except Exception:
+							# 常规点击被遮挡，尝试 force 点击
+							print(f'⚠️ {self.account_name}: 常规点击被遮挡，尝试 force 点击')
+							try:
+								await btn.click(force=True, timeout=5000)
+							except Exception:
+								# force 也失败，用 JS 直接点击
+								print(f'⚠️ {self.account_name}: force 点击也失败，尝试 JS 点击')
+								await btn.evaluate('el => el.click()')
 						clicked = True
 						print(f'ℹ️ {self.account_name}: 点击了 LinuxDo 登录按钮')
 						break
