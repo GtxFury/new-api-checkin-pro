@@ -1855,6 +1855,56 @@ class LinuxDoSignIn:
 					except Exception as e:
 						print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
 
+					# anthorpic: SPA 会消耗 OAuth code 并建立 session cookie，但不写 localStorage。
+					# 此时浏览器已有有效 session，通过 /api/user/self 获取 api_user。
+					if not api_user and self.provider_config.name == "anthorpic":
+						try:
+							# 等待 SPA 完成 OAuth 回调（跳转到 /console 或 /dashboard）
+							try:
+								await page.wait_for_url(
+									f"**{self.provider_config.origin}/**",
+									timeout=10000,
+								)
+							except Exception:
+								pass
+							await page.wait_for_timeout(2000)
+
+							# 导航到 /console 验证 session
+							try:
+								await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+								await page.wait_for_timeout(2000)
+							except Exception:
+								pass
+
+							console_url = page.url or ""
+							if "/login" not in console_url:
+								# session 有效，通过 API 获取 api_user
+								api_resp = await page.evaluate("""
+									async () => {
+										try {
+											const r = await fetch('/api/user/self', {
+												credentials: 'include',
+												headers: {
+													'Accept': 'application/json',
+													'new-api-user': '-1',
+													'New-Api-User': '-1',
+												},
+											});
+											if (!r.ok) return null;
+											const j = await r.json();
+											const d = j.data || j;
+											return d.id || d.user_id || d.userId || null;
+										} catch (e) { return null; }
+									}
+								""")
+								if api_resp:
+									api_user = str(api_resp)
+									print(f"✅ {self.account_name}: Got api user from /api/user/self: {api_user}")
+							else:
+								print(f"⚠️ {self.account_name}: anthorpic SPA session not established (redirected to login)")
+						except Exception as e:
+							print(f"⚠️ {self.account_name}: anthorpic API user extraction failed: {e}")
+
 					if api_user:
 						print(f"✅ {self.account_name}: OAuth authorization successful")
 

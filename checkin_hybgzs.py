@@ -418,7 +418,34 @@ class HybgzsCheckIn:
 
 		# 导航到签到页面
 		await page.goto(f'{self.ORIGIN}/gas-station/checkin', wait_until='domcontentloaded')
-		await page.wait_for_timeout(3000)
+
+		# 等待页面加载完成（"加载中..." 消失，出现实际内容）
+		try:
+			await page.wait_for_function(
+				"""() => {
+					const body = document.body?.innerText || '';
+					return body.includes('今日已签到') || body.includes('立即签到');
+				}""",
+				timeout=15000,
+			)
+		except Exception:
+			await page.wait_for_timeout(5000)
+
+		# 先检查是否已签到（页面用 <h3>今日已签到</h3> 而非按钮显示已签到状态）
+		try:
+			already_checked = await page.evaluate(
+				"""() => {
+					const h3s = document.querySelectorAll('h3');
+					for (const h of h3s) {
+						if (h.textContent.includes('今日已签到')) return true;
+					}
+					return document.body?.innerText?.includes('今日已签到') || false;
+				}"""
+			)
+			if already_checked:
+				return True, '今日已签到'
+		except Exception:
+			pass
 
 		# 查找并点击签到按钮
 		checkin_btn = None
@@ -431,13 +458,6 @@ class HybgzsCheckIn:
 				continue
 
 		if not checkin_btn:
-			# 可能已签到
-			try:
-				already = await page.query_selector('button:has-text("已签到")')
-				if already:
-					return True, '今日已签到'
-			except Exception:
-				pass
 			await self._take_screenshot(page, 'checkin_button_not_found')
 			return False, '未找到签到按钮'
 
