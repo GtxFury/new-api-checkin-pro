@@ -320,7 +320,7 @@ class AppConfig:
             ),
             "dik3": ProviderConfig(
                 name="dik3",
-                origin="https://ai.dik3.cn",
+                origin="https://mb666.zeabur.app",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
