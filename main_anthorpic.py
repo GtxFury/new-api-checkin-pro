@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-icat 自动签到脚本（独立入口）
+Ciprohtna (anthorpic.us.ci) 自动签到脚本（独立入口）
 """
 
 import asyncio
@@ -18,21 +18,21 @@ from utils.notify import notify
 
 load_dotenv(override=True)
 
-BALANCE_HASH_FILE = "balance_hash_icat.txt"
-CACHE_DIR = os.path.join("storage-states", "icat")
+BALANCE_HASH_FILE = "balance_hash_anthorpic.txt"
+CACHE_DIR = os.path.join("storage-states", "anthorpic")
 
 
 def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
-    accounts_str = os.getenv("ACCOUNTS_ICAT")
+    accounts_str = os.getenv("ACCOUNTS_ANTHORPIC")
     if not accounts_str:
-        msg = "❌ ACCOUNTS_ICAT environment variable not found"
+        msg = "❌ ACCOUNTS_ANTHORPIC environment variable not found"
         print(msg)
         return None, msg
 
     try:
         data = json.loads(accounts_str)
     except json.JSONDecodeError as e:
-        msg = f"❌ Failed to parse ACCOUNTS_ICAT as JSON: {e}"
+        msg = f"❌ Failed to parse ACCOUNTS_ANTHORPIC as JSON: {e}"
         print(msg)
         return None, msg
 
@@ -41,7 +41,7 @@ def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
     elif isinstance(data, list):
         accounts_data = data
     else:
-        msg = "❌ ACCOUNTS_ICAT must be a JSON object or array"
+        msg = "❌ ACCOUNTS_ANTHORPIC must be a JSON object or array"
         print(msg)
         return None, msg
 
@@ -58,8 +58,8 @@ def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
             print(msg)
             return None, msg
 
-        # 默认强制 provider=icat（也允许用户显式填写）
-        account.setdefault("provider", "icat")
+        # 默认强制 provider=anthorpic（也允许用户显式填写）
+        account.setdefault("provider", "anthorpic")
 
         accounts.append(AccountConfig.from_dict(account, i))
 
@@ -123,20 +123,20 @@ def _notify_fatal(title: str, message: str) -> None:
 
 
 async def main() -> int:
-    print("🚀 icat 自动签到脚本启动")
+    print("🚀 anthorpic 自动签到脚本启动")
     print(f"🕒 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     app_config = AppConfig.load_from_env()
-    provider = app_config.get_provider("icat")
+    provider = app_config.get_provider("anthorpic")
     if not provider:
-        msg = "❌ Provider 'icat' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置"
+        msg = "❌ Provider 'anthorpic' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置"
         print(msg)
-        _notify_fatal("icat 签到告警", msg)
+        _notify_fatal("anthorpic 签到告警", msg)
         return 1
 
     accounts, accounts_err = _load_accounts()
     if not accounts:
-        _notify_fatal("icat 签到告警", accounts_err or "❌ ACCOUNTS_ICAT 未配置或格式不正确")
+        _notify_fatal("anthorpic 签到告警", accounts_err or "❌ ACCOUNTS_ANTHORPIC 未配置或格式不正确")
         return 1
 
     global_proxy = _load_global_proxy()
@@ -149,12 +149,12 @@ async def main() -> int:
     total_count = len(accounts)
     any_failed = False
     balances: dict[str, dict] = {}
-    notification_lines: list[str] = []
+    notifanthorpicion_lines: list[str] = []
 
     for i, account_config in enumerate(accounts):
         account_name = account_config.get_display_name(i)
-        if notification_lines:
-            notification_lines.append("-------------------------------")
+        if notifanthorpicion_lines:
+            notifanthorpicion_lines.append("-------------------------------")
 
         try:
             checkin = CheckIn(
@@ -180,19 +180,19 @@ async def main() -> int:
                 used = best_info.get("used_quota", 0) if best_info else 0
                 display = (best_info or {}).get("display", "")
                 if display:
-                    notification_lines.append(f"✅ {account_name}: {display}")
+                    notifanthorpicion_lines.append(f"✅ {account_name}: {display}")
                 else:
-                    notification_lines.append(f"✅ {account_name}: 🏃‍♂️{quota} | Used 🏃‍♂️{used}")
+                    notifanthorpicion_lines.append(f"✅ {account_name}: 🏃‍♂️{quota} | Used 🏃‍♂️{used}")
                 balances[account_name] = {"quota": quota, "used_quota": used}
             else:
                 any_failed = True
                 err = ""
                 if results and isinstance(results[0][2], dict):
                     err = str(results[0][2].get("error", ""))[:160]
-                notification_lines.append(f"❌ {account_name}: {err or '签到失败'}")
+                notifanthorpicion_lines.append(f"❌ {account_name}: {err or '签到失败'}")
         except Exception as e:
             any_failed = True
-            notification_lines.append(f"❌ {account_name}: Exception: {str(e)[:160]}")
+            notifanthorpicion_lines.append(f"❌ {account_name}: Exception: {str(e)[:160]}")
 
     current_hash = _generate_balance_hash(balances)
     print(f"ℹ️ 当前余额 hash: {current_hash}, 上次: {last_hash}")
@@ -207,21 +207,21 @@ async def main() -> int:
     elif any_failed:
         need_notify = True
 
-    if need_notify and notification_lines:
+    if need_notify and notifanthorpicion_lines:
         summary = [
             "-------------------------------",
-            "📢 icat 签到统计:",
+            "📢 anthorpic 签到统计:",
             f"🔵 Success: {success_count}/{total_count}",
             f"🔴 Failed: {total_count - success_count}/{total_count}",
         ]
         content = "\n\n".join(
             [
                 f"🕓 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "\n".join(notification_lines),
+                "\n".join(notifanthorpicion_lines),
                 "\n".join(summary),
             ]
         )
-        title = "icat 签到成功" if success_count == total_count else "icat 签到告警"
+        title = "anthorpic 签到成功" if success_count == total_count else "anthorpic 签到告警"
         print(content)
         notify.push_message(title, content, msg_type="text")
 

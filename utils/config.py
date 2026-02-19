@@ -437,9 +437,9 @@ class AppConfig:
                 # 该站点必须依赖 SPA 完成回调（避免回调接口触发 CF/WAF 或 session 未建立）
                 linuxdo_callback_mode="spa",
             ),
-            "icat": ProviderConfig(
-                name="icat",
-                origin="https://icat.pp.ua",
+            "freestyle": ProviderConfig(
+                name="freestyle",
+                origin="https://api.freestyle.cc.cd",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
@@ -448,8 +448,27 @@ class AppConfig:
                 api_user_key="new-api-user",
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
-                # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_client_id=None,
+                linuxdo_client_id=None,  # 从 /api/status 获取
+                linuxdo_auth_path="/api/oauth/linuxdo",
+                aliyun_captcha=False,
+                bypass_method=None,
+                turnstile_check=False,
+                check_in_status_path="/api/user/check_in_status",
+                checkin_page_path="/console/personal",
+                checkin_mode="newapi_console_personal",
+            ),
+            "anthorpic": ProviderConfig(
+                name="anthorpic",
+                origin="https://anthorpic.us.ci",
+                login_path="/login",
+                status_path="/api/status",
+                auth_state_path="/api/oauth/state",
+                sign_in_path=None,  # 签到在前端 /console/personal 完成
+                user_info_path="/api/user/self",
+                api_user_key="new-api-user",
+                github_client_id=None,
+                github_auth_path="/api/oauth/github",
+                linuxdo_client_id=None,  # 从 /api/status 获取
                 linuxdo_auth_path="/api/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
