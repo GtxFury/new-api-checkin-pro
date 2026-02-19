@@ -17,6 +17,10 @@ from urllib.parse import quote
 import httpx
 
 
+class _TokenExpiredError(Exception):
+	"""storage state 中的 token 已过期，需要清缓存重新登录"""
+
+
 class X666CheckIn:
 	"""x666 签到管理类"""
 
@@ -999,33 +1003,9 @@ class X666CheckIn:
 		status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
 		status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
 
-		# 如果 token 过期（storage state 缓存的旧 token），刷新页面让 SPA 用 OAuth session 重新获取
-		if not (isinstance(status_json, dict) and status_json.get('success')):
-			resp_json = status_resp.get('json') if isinstance(status_resp, dict) else {}
-			expired_msg = (resp_json or {}).get('message', '') if isinstance(resp_json, dict) else ''
-			if status_resp.get('status') == 401 and '过期' in str(expired_msg):
-				print(f'⚠️ {self.account_name}: token 已过期，刷新页面等待 SPA 重新获取...')
-				# 导航到 up.x666.me 触发 SPA 重新初始化
-				try:
-					await page.goto(f'{self.UP_ORIGIN}/', wait_until='domcontentloaded')
-					# 等待 SPA 完成初始化（按钮从"加载中"变为可用状态）
-					await page.wait_for_function(
-						"""() => {
-							try {
-								const btn = document.querySelector('button');
-								if (!btn) return false;
-								const t = btn.innerText || '';
-								return t.includes('开始转动') || t.includes('已签到') || t.includes('今日已');
-							} catch (e) { return false; }
-						}""",
-						timeout=30000,
-					)
-					print(f'ℹ️ {self.account_name}: SPA 初始化完成，重试 API 调用')
-					# 重新读取 SPA 写入的新 token
-					status_resp = await _auth_fetch_json('/api/checkin/status', 'GET')
-					status_json = status_resp.get('json') if isinstance(status_resp, dict) else None
-				except Exception as retry_err:
-					print(f'⚠️ {self.account_name}: SPA 重新初始化失败: {retry_err}')
+		# token 过期（storage state 缓存的旧 token）→ 抛异常触发上层清缓存重试
+		if status_resp.get('status') == 401:
+			raise _TokenExpiredError('token已过期')
 
 		if not (isinstance(status_json, dict) and status_json.get('success')):
 			print(f'⚠️ {self.account_name}: /api/checkin/status 失败详情: {status_resp}')
@@ -1451,49 +1431,64 @@ class X666CheckIn:
 			i_know_what_im_doing=True,
 			window=(1280, 720),
 		) as browser:
-			storage_state = cache_file if os.path.exists(cache_file) else None
-			context = await browser.new_context(storage_state=storage_state)
-			page = await context.new_page()
 
+			async def _run_flow(use_cache: bool) -> tuple[bool, dict]:
+				"""执行完整的 OAuth 登录 + 签到 + 余额查询流程"""
+				storage_state = cache_file if use_cache and os.path.exists(cache_file) else None
+				context = await browser.new_context(storage_state=storage_state)
+				page = await context.new_page()
+
+				try:
+					page = await self._x666_oauth_login_via_ui(page, self.QD_ORIGIN, username=username, password=password)
+					ok, msg = await self._qd_checkin(page)
+					print(f'{"✅" if ok else "❌"} {self.account_name}: qd 签到结果: {msg}')
+
+					# 保存/更新 linux.do 会话缓存
+					try:
+						if '/login' not in (page.url or ''):
+							await context.storage_state(path=cache_file)
+					except Exception:
+						pass
+
+					if not ok:
+						return False, {'checkin': False, 'error': msg}
+
+					print(f'ℹ️ {self.account_name}: 开始登录 x666.me 查询余额')
+					balance = await self._x666_login_and_get_balance(page, context, username, password)
+					if not balance.get('success'):
+						await self._take_screenshot(page, 'x666_balance_failed')
+						await self._save_page_html(page, 'x666_balance_failed')
+						return False, {'checkin': True, 'error': balance.get('error', '获取余额失败')}
+
+					print(f'✅ {self.account_name}: 余额查询成功: {balance.get("display", "")}')
+					return True, {
+						'checkin': True,
+						'checkin_msg': msg,
+						'quota': balance.get('quota', 0.0),
+						'used_quota': balance.get('used_quota', 0.0),
+						'bonus_quota': balance.get('bonus_quota', 0.0),
+						'display': balance.get('display', ''),
+					}
+				finally:
+					try:
+						await context.close()
+					except Exception:
+						pass
+
+			# 第一次尝试（使用缓存）
 			try:
-				# 1) 登录 qd.x666.me 并签到
-				page = await self._x666_oauth_login_via_ui(page, self.QD_ORIGIN, username=username, password=password)
-				ok, msg = await self._qd_checkin(page)
-				print(f'{"✅" if ok else "❌"} {self.account_name}: qd 签到结果: {msg}')
-
-				# 保存/更新 linux.do 会话缓存
+				return await _run_flow(use_cache=True)
+			except _TokenExpiredError:
+				print(f'⚠️ {self.account_name}: token 已过期，清除缓存并重新登录')
 				try:
-					if '/login' not in (page.url or ''):
-						await context.storage_state(path=cache_file)
-				except Exception:
-					pass
+					if os.path.exists(cache_file):
+						os.remove(cache_file)
+						print(f'ℹ️ {self.account_name}: 已删除缓存 {cache_file}')
+				except Exception as e:
+					print(f'⚠️ {self.account_name}: 删除缓存失败: {e}')
 
-				if not ok:
-					return False, {'checkin': False, 'error': msg}
-
-				# 2) 登录 x666.me 并读取余额（参考 fovt 的 OAuth 流程）
-				print(f'ℹ️ {self.account_name}: 开始登录 x666.me 查询余额')
-				balance = await self._x666_login_and_get_balance(page, context, username, password)
-				if not balance.get('success'):
-					await self._take_screenshot(page, 'x666_balance_failed')
-					await self._save_page_html(page, 'x666_balance_failed')
-					return False, {'checkin': True, 'error': balance.get('error', '获取余额失败')}
-
-				print(f'✅ {self.account_name}: 余额查询成功: {balance.get("display", "")}')
-				return True, {
-					'checkin': True,
-					'checkin_msg': msg,
-					'quota': balance.get('quota', 0.0),
-					'used_quota': balance.get('used_quota', 0.0),
-					'bonus_quota': balance.get('bonus_quota', 0.0),
-					'display': balance.get('display', ''),
-				}
+			# 第二次尝试（无缓存，走完整登录流程）
+			try:
+				return await _run_flow(use_cache=False)
 			except Exception as e:
-				await self._take_screenshot(page, 'x666_flow_exception')
-				await self._save_page_html(page, 'x666_flow_exception')
-				return False, {'checkin': False, 'error': f'x666 新签到流程异常: {e}'}
-			finally:
-				try:
-					await context.close()
-				except Exception:
-					pass
+				return False, {'checkin': False, 'error': f'x666 重新登录后仍失败: {e}'}
