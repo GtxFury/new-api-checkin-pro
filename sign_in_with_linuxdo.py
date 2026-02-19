@@ -1253,7 +1253,21 @@ class LinuxDoSignIn:
 					try:
 						print(f"ℹ️ {self.account_name}: Starting to sign in linux.do")
 
-						login_resp = await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+						try:
+							login_resp = await page.goto("https://linux.do/login", wait_until="domcontentloaded")
+						except Exception as nav_err:
+							# 导航超时通常是 CF 拦截页阻塞了 domcontentloaded
+							print(f"⚠️ {self.account_name}: linux.do/login navigation timeout, checking page state: {nav_err}")
+							login_resp = None
+							# 检查页面是否部分加载（CF challenge / 空白页）
+							try:
+								cur_url = page.url or ""
+								if "linux.do" not in cur_url:
+									raise RuntimeError(f"linux.do navigation failed completely (url={cur_url})")
+							except RuntimeError:
+								raise
+							except Exception:
+								pass
 						try:
 							if login_resp and getattr(login_resp, "status", None) == 429:
 								raise RuntimeError("linux.do 返回 429（IP 被临时限流/封禁），请稍后重试或更换出口 IP")
