@@ -1573,64 +1573,69 @@ class LinuxDoSignIn:
 								state_fast = state_fast_vals[0] if state_fast_vals else auth_state
 
 								if self.provider_config.name == "anthorpic":
-									# anthorpic: SPA 不写 localStorage，需要等 SPA 跳转到 /console 后
-									# 通过 /api/user/self 获取 api_user，并在同一浏览器中完成签到
+									# anthorpic: 等 SPA 写入 localStorage 后从中获取 user ID，
+									# 再在同一浏览器中完成签到（避免新浏览器指纹不匹配导致 session 失效）
 									try:
 										print(f"ℹ️ {self.account_name}: anthorpic: current page url = {page.url}")
-										try:
-											await page.wait_for_url(f"**{self.provider_config.origin}/**", timeout=15000)
-										except Exception:
-											pass
-										await page.wait_for_timeout(3000)
-										print(f"ℹ️ {self.account_name}: anthorpic: after wait, page url = {page.url}")
 
-										# 确保在 /console 页面
+										# 等待 SPA 完成 OAuth 回调并写入 localStorage
 										try:
-											cur_url = page.url or ""
-											if "/console" not in cur_url:
-												print(f"ℹ️ {self.account_name}: anthorpic: navigating to /console...")
+											await page.wait_for_function(
+												"""() => {
+													try {
+														const u = localStorage.getItem('user');
+														if (!u) return false;
+														const d = JSON.parse(u);
+														return !!(d && d.id);
+													} catch (e) { return false; }
+												}""",
+												timeout=20000,
+											)
+											print(f"✅ {self.account_name}: anthorpic localStorage user detected")
+										except Exception:
+											print(f"⚠️ {self.account_name}: anthorpic localStorage user not found, trying /console navigation")
+											try:
 												await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
-												await page.wait_for_timeout(2000)
-										except Exception as nav_err:
-											print(f"⚠️ {self.account_name}: anthorpic: /console navigation error: {nav_err}")
-											await page.wait_for_timeout(3000)
+												await page.wait_for_timeout(3000)
+											except Exception:
+												await page.wait_for_timeout(3000)
+
+										# 从 localStorage 获取 api_user
+										api_user_spa = None
+										try:
+											api_user_spa = await page.evaluate("""
+												() => {
+													try {
+														const u = localStorage.getItem('user');
+														if (!u) return null;
+														const d = JSON.parse(u);
+														return d && d.id ? String(d.id) : null;
+													} catch (e) { return null; }
+												}
+											""")
+										except Exception as e:
+											print(f"⚠️ {self.account_name}: anthorpic localStorage read error: {e}")
 
 										console_url = page.url or ""
-										print(f"ℹ️ {self.account_name}: anthorpic: console page url = {console_url}")
+										print(f"ℹ️ {self.account_name}: anthorpic: page url = {console_url}, api_user = {api_user_spa}")
+
 										if "/login" in console_url:
 											print(f"⚠️ {self.account_name}: anthorpic SPA session not established (redirected to login)")
 											return False, {"error": "session_verify_failed_need_retry", "retry": True}
 
-										# 通过 API 获取 api_user
-										api_user_spa = None
-										try:
-											api_resp = await page.evaluate("""
-												async () => {
-													try {
-														const r = await fetch('/api/user/self', {
-															credentials: 'include',
-															headers: { 'Accept': 'application/json', 'new-api-user': '-1', 'New-Api-User': '-1' },
-														});
-														if (!r.ok) return null;
-														const j = await r.json();
-														const d = j.data || j;
-														return d.id || d.user_id || d.userId || null;
-													} catch (e) { return null; }
-												}
-											""")
-											if api_resp:
-												api_user_spa = str(api_resp)
-												print(f"✅ {self.account_name}: anthorpic got api_user from /api/user/self: {api_user_spa}")
-											else:
-												print(f"⚠️ {self.account_name}: anthorpic /api/user/self returned empty")
-										except Exception as e:
-											print(f"⚠️ {self.account_name}: anthorpic /api/user/self failed: {e}")
-
 										if not api_user_spa:
-											return False, {"error": "anthorpic: failed to get api_user via SPA", "retry": True}
+											return False, {"error": "anthorpic: failed to get api_user from localStorage", "retry": True}
+
+										# 确保在 /console/personal 页面进行签到
+										try:
+											if "/console/personal" not in console_url:
+												await page.goto(f"{self.provider_config.origin}/console/personal", wait_until="networkidle")
+												await page.wait_for_timeout(2000)
+										except Exception:
+											await page.wait_for_timeout(3000)
 
 										# 在同一浏览器中完成签到
-										print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in")
+										print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in (api_user={api_user_spa})")
 										checkin_done = await self._browser_check_in_with_turnstile(page)
 										user_info_spa = await self._extract_balance_from_profile(page)
 										if checkin_done and not user_info_spa:
