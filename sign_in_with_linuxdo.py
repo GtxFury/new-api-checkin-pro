@@ -1571,6 +1571,75 @@ class LinuxDoSignIn:
 								)
 								state_fast_vals = q_fast.get("state")
 								state_fast = state_fast_vals[0] if state_fast_vals else auth_state
+
+								if self.provider_config.name == "anthorpic":
+									# anthorpic: SPA 不写 localStorage，需要等 SPA 跳转到 /console 后
+									# 通过 /api/user/self 获取 api_user，并在同一浏览器中完成签到
+									try:
+										await page.wait_for_url(f"**{self.provider_config.origin}/**", timeout=15000)
+									except Exception:
+										pass
+									await page.wait_for_timeout(3000)
+
+									# 确保在 /console 页面
+									try:
+										cur_url = page.url or ""
+										if "/console" not in cur_url:
+											await page.goto(f"{self.provider_config.origin}/console", wait_until="networkidle")
+											await page.wait_for_timeout(2000)
+									except Exception:
+										await page.wait_for_timeout(3000)
+
+									console_url = page.url or ""
+									if "/login" in console_url:
+										print(f"⚠️ {self.account_name}: anthorpic SPA session not established (redirected to login)")
+										return False, {"error": "session_verify_failed_need_retry", "retry": True}
+
+									# 通过 API 获取 api_user
+									api_user_spa = None
+									try:
+										api_resp = await page.evaluate("""
+											async () => {
+												try {
+													const r = await fetch('/api/user/self', {
+														credentials: 'include',
+														headers: { 'Accept': 'application/json', 'new-api-user': '-1', 'New-Api-User': '-1' },
+													});
+													if (!r.ok) return null;
+													const j = await r.json();
+													const d = j.data || j;
+													return d.id || d.user_id || d.userId || null;
+												} catch (e) { return null; }
+											}
+										""")
+										if api_resp:
+											api_user_spa = str(api_resp)
+											print(f"✅ {self.account_name}: anthorpic got api_user from /api/user/self: {api_user_spa}")
+									except Exception as e:
+										print(f"⚠️ {self.account_name}: anthorpic /api/user/self failed: {e}")
+
+									if not api_user_spa:
+										return False, {"error": "anthorpic: failed to get api_user via SPA", "retry": True}
+
+									# 在同一浏览器中完成签到
+									print(f"ℹ️ {self.account_name}: anthorpic performing in-browser check-in")
+									checkin_done = await self._browser_check_in_with_turnstile(page)
+									user_info_spa = await self._extract_balance_from_profile(page)
+									if checkin_done and not user_info_spa:
+										user_info_spa = {
+											"success": True,
+											"quota": 0.0,
+											"used_quota": 0.0,
+											"display": "今日已签到（余额解析失败）",
+										}
+
+									restore_cookies = await page.context.cookies()
+									user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+									result_spa: dict = {"cookies": user_cookies, "api_user": api_user_spa}
+									if user_info_spa:
+										result_spa["user_info"] = user_info_spa
+									return True, result_spa
+
 								return await self._complete_oauth_via_spa(page, code_fast, state_fast)
 
 							mode = self._linuxdo_callback_mode()
