@@ -150,7 +150,7 @@ class X666CheckIn:
 			}
 		)
 
-		resp = client.post('https://qd.x666.me/api/lottery/spin', headers=spin_headers, timeout=30)
+		resp = client.post('https://qd.x666.me/api/checkin/spin', headers=spin_headers, timeout=30)
 		print(f'📨 {self.account_name}: Spin response status code {resp.status_code}')
 
 		if resp.status_code not in (200, 400):
@@ -825,13 +825,13 @@ class X666CheckIn:
 							qs = parse_qs(parsed.query)
 							url_token = (qs.get('token') or [''])[0]
 							if url_token:
-								await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", url_token)
+								await page.evaluate("""(t) => { try { localStorage.setItem('userToken', t); } catch(e){} }""", url_token)
 								print(f'ℹ️ {self.account_name}: Token from URL saved to localStorage')
 					except Exception:
 						pass
 
 					# 检查 localStorage 是否已有 token
-					existing_token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
+					existing_token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 					if existing_token:
 						print(f'ℹ️ {self.account_name}: Token in localStorage (len={len(str(existing_token))})')
 					else:
@@ -866,7 +866,7 @@ class X666CheckIn:
 										if isinstance(data, dict):
 											token = data.get('token') or data.get('access_token') or (data.get('data', {}) or {}).get('token')
 										if token:
-											await page.evaluate("""(t) => { try { localStorage.setItem('token', t); } catch(e){} }""", token)
+											await page.evaluate("""(t) => { try { localStorage.setItem('userToken', t); } catch(e){} }""", token)
 											print(f'ℹ️ {self.account_name}: Token from callback saved')
 									except Exception:
 										pass
@@ -878,7 +878,7 @@ class X666CheckIn:
 						await page.wait_for_function(
 							"""() => {
 								try {
-									return !!localStorage.getItem('token');
+									return !!localStorage.getItem('userToken');
 								} catch (e) { return false; }
 							}""",
 							timeout=15000,
@@ -891,7 +891,7 @@ class X666CheckIn:
 								await page.wait_for_timeout(1200)
 							await page.wait_for_function(
 								"""() => {
-									try { return !!localStorage.getItem('token'); } catch (e) { return false; }
+									try { return !!localStorage.getItem('userToken'); } catch (e) { return false; }
 								}""",
 								timeout=15000,
 							)
@@ -930,7 +930,7 @@ class X666CheckIn:
 		try:
 			is_qd = (page.url or '').startswith(self.QD_ORIGIN)
 			if is_qd:
-				token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
+				token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 				if not token:
 					await page.goto(f'{self.UP_ORIGIN}/', wait_until='domcontentloaded')
 					await page.wait_for_timeout(1200)
@@ -939,7 +939,7 @@ class X666CheckIn:
 
 		# 必须拿到 token（存放在 up.x666.me localStorage），否则后续接口调用无法鉴权。
 		try:
-			token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
+			token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 		except Exception:
 			token = None
 
@@ -950,11 +950,11 @@ class X666CheckIn:
 				await page.wait_for_timeout(1200)
 				await page.wait_for_function(
 					"""() => {
-						try { return !!localStorage.getItem('token'); } catch (e) { return false; }
+						try { return !!localStorage.getItem('userToken'); } catch (e) { return false; }
 					}""",
 					timeout=45000,
 				)
-				token = await page.evaluate("() => { try { return localStorage.getItem('token'); } catch(e){ return null; } }")
+				token = await page.evaluate("() => { try { return localStorage.getItem('userToken'); } catch(e){ return null; } }")
 			except Exception:
 				token = None
 
@@ -969,7 +969,7 @@ class X666CheckIn:
 			resp = await page.evaluate(
 				"""async ({ path, method }) => {
 					try {
-						const token = localStorage.getItem('token');
+						const token = localStorage.getItem('userToken');
 						if (!token) return { ok: false, status: 0, error: 'no_token' };
 						const t = String(token || '').trim();
 						const auth = t.toLowerCase().startsWith('bearer ') ? t : `Bearer ${t}`;
@@ -1008,7 +1008,7 @@ class X666CheckIn:
 			return True, '今日已签到'
 
 		# 2) 优先直接调用抽奖接口（比点按钮更稳定，避免按钮被遮挡/动画导致 click 丢失）
-		spin_resp = await _auth_fetch_json('/api/lottery/spin', 'POST')
+		spin_resp = await _auth_fetch_json('/api/checkin/spin', 'POST')
 		spin_json = spin_resp.get('json') if isinstance(spin_resp, dict) else None
 		if isinstance(spin_json, dict):
 			if spin_json.get('success'):
@@ -1019,7 +1019,7 @@ class X666CheckIn:
 			# 如果接口返回了明确错误，保留现场便于排查
 			await self._take_screenshot(page, 'qd_spin_failed')
 			await self._save_page_html(page, 'qd_spin_failed')
-			return False, f'签到失败（/api/lottery/spin，HTTP {spin_resp.get("status")}）'
+			return False, f'签到失败（/api/checkin/spin，HTTP {spin_resp.get("status")}）'
 
 		# 有些 UI 会显示 “已签到/今日已签到”
 		try:
@@ -1051,7 +1051,7 @@ class X666CheckIn:
 		# 等待抽奖接口返回（比 UI 文案更可靠）。
 		try:
 			resp = await page.wait_for_response(
-				lambda r: '/api/lottery/spin' in (r.url or ''),
+				lambda r: '/api/checkin/spin' in (r.url or ''),
 				timeout=30000,
 			)
 			try:
