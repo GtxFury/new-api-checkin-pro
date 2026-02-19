@@ -286,6 +286,17 @@ class X666CheckIn:
 		except Exception:
 			cur = ''
 
+		# connect.linux.do 无 session 时会重定向到 linux.do/login，但重定向可能还没完成
+		if ('connect.linux.do' in cur or 'linux.do' in cur) and 'linux.do/login' not in cur:
+			try:
+				await page.wait_for_url('**/login*', timeout=15000)
+				cur = page.url or ''
+			except Exception:
+				try:
+					cur = page.url or ''
+				except Exception:
+					cur = ''
+
 		# 仅当确实处于 linux.do 的登录页时才填表；若已登录会被重定向到首页/授权页，此时不应误判失败。
 		if 'linux.do/login' not in cur:
 			return
@@ -1491,4 +1502,5 @@ class X666CheckIn:
 			try:
 				return await _run_flow(use_cache=False)
 			except Exception as e:
+				print(f'❌ {self.account_name}: x666 重新登录后仍失败: {e}')
 				return False, {'checkin': False, 'error': f'x666 重新登录后仍失败: {e}'}
