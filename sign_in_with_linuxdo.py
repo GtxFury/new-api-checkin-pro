@@ -736,9 +736,12 @@ class LinuxDoSignIn:
 						return False
 					continue
 
-				# 先尝试解决 Turnstile（如果存在）
-				# elysiver 签到页面没有 Turnstile，跳过检测避免不必要的错误日志
-				if self.provider_config.name != "elysiver":
+				# 快速检测页面是否存在 Turnstile iframe，存在才调用 solver
+				try:
+					turnstile_iframe = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+				except Exception:
+					turnstile_iframe = None
+				if turnstile_iframe:
 					solved = await self._solve_turnstile(page)
 					if not solved:
 						print(f"⚠️ {self.account_name}: Turnstile solving may have failed, continue to try check-in")
@@ -857,9 +860,9 @@ class LinuxDoSignIn:
 		当前针对 runanytime / elysiver 等 Veloera 系站点，这些站点在
 		个人中心页面的表格中以「当前余额 / 历史消耗」形式展示美元金额。
 		"""
-		# elysiver 使用 /console/personal 页面，余额在卡片组件中而非表格
-		if self.provider_config.name == "elysiver":
-			return await self._extract_balance_from_elysiver(page)
+		# newapi_console_personal 站点使用 /console/personal 页面，余额在卡片组件中而非表格
+		if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
+			return await self._extract_balance_from_newapi_card(page)
 
 		try:
 			async def _eval_summary() -> dict | None:
@@ -952,10 +955,10 @@ class LinuxDoSignIn:
 			print(f"⚠️ {self.account_name}: Error extracting balance from /app/me: {e}")
 			return None
 
-	async def _extract_balance_from_elysiver(self, page) -> dict | None:
-		"""从 elysiver 的 /console/personal 页面提取余额信息。
+	async def _extract_balance_from_newapi_card(self, page) -> dict | None:
+		"""从 New-API /console/personal 页面的卡片组件中提取余额信息。
 
-		elysiver 使用 New-API 新版 UI，余额显示在卡片组件中而非表格。
+		适用于 elysiver / anthorpic 等使用 New-API 新版 UI 的站点。
 		优先从页面 DOM 获取（更准确），回退到 localStorage。
 		"""
 		try:
@@ -975,18 +978,21 @@ class LinuxDoSignIn:
 						const bodyText = document.body?.innerText || '';
 						const result = {};
 
-						// 匹配 "E 146.60" 后跟 "当前余额" 的模式
-						const balanceMatch = bodyText.match(/E\\s*([\\d.,]+)\\s*当前余额/);
+						// 匹配 "当前余额" 前面的数值，兼容 "E 146.60" / "$ 5.00" / 纯数字
+						const balanceMatch = bodyText.match(/([E$￥])\s*([\d.,]+)\s*当前余额/);
 						if (balanceMatch) {
-							result.quota = balanceMatch[1];
+							result.symbol = balanceMatch[1];
+							result.quota = balanceMatch[2];
 						} else {
-							// 备用匹配：查找数值后跟"当前余额"
-							const altMatch = bodyText.match(/([\\d.,]+)\\s*当前余额/);
-							if (altMatch) result.quota = altMatch[1];
+							const altMatch = bodyText.match(/([\d.,]+)\s*当前余额/);
+							if (altMatch) {
+								result.symbol = '$';
+								result.quota = altMatch[1];
+							}
 						}
 
-						// 匹配 "历史消耗" 后跟 "E 0.00" 的模式
-						const usedMatch = bodyText.match(/历史消耗\\s*E\\s*([\\d.,]+)/);
+						// 匹配 "历史消耗" 后面的数值
+						const usedMatch = bodyText.match(/历史消耗\s*(?:[E$￥]\s*)?([\d.,]+)/);
 						if (usedMatch) {
 							result.used_quota = usedMatch[1];
 						}
@@ -1006,17 +1012,18 @@ class LinuxDoSignIn:
 					except Exception:
 						return 0.0
 
+				symbol = balance_info.get("symbol", "$")
 				quota = _parse_amount(balance_info.get("quota", "0"))
 				used_quota = _parse_amount(balance_info.get("used_quota", "0"))
 				print(
 					f"✅ {self.account_name}: Parsed balance from DOM - "
-					f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}"
+					f"Current balance: {symbol} {quota:.2f}, Used: {symbol} {used_quota:.2f}"
 				)
 				return {
 					"success": True,
 					"quota": round(quota, 2),
 					"used_quota": round(used_quota, 2),
-					"display": f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}",
+					"display": f"Current balance: {symbol} {quota:.2f}, Used: {symbol} {used_quota:.2f}",
 				}
 
 			# 方法2：从 localStorage 获取用户信息（回退方案）
@@ -1026,30 +1033,38 @@ class LinuxDoSignIn:
 					user_obj = json.loads(user_data)
 					if isinstance(user_obj, dict):
 						# quota 和 used_quota 在 localStorage 中是原始值，需要除以 quota_per_unit
-						quota_per_unit = 500000  # elysiver 的 quota_per_unit
+						# 从 /api/status 获取 quota_per_unit，默认 500000
+						quota_per_unit = 500000
+						try:
+							status_data = await page.evaluate(
+								"""() => fetch('/api/status').then(r => r.json()).catch(() => null)"""
+							)
+							if status_data and status_data.get("data", {}).get("quota_per_unit"):
+								quota_per_unit = status_data["data"]["quota_per_unit"]
+						except Exception:
+							pass
 						raw_quota = user_obj.get("quota", 0)
 						raw_used = user_obj.get("used_quota", 0)
-						# 只有当 quota > 0 时才使用 localStorage 的数据
 						if raw_quota and raw_quota > 0:
 							quota = raw_quota / quota_per_unit
 							used_quota = raw_used / quota_per_unit if raw_used else 0.0
 							print(
 								f"✅ {self.account_name}: Parsed balance from localStorage - "
-								f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}"
+								f"Current balance: ${quota:.2f}, Used: ${used_quota:.2f}"
 							)
 							return {
 								"success": True,
 								"quota": round(quota, 2),
 								"used_quota": round(used_quota, 2),
-								"display": f"Current balance: E {quota:.2f}, Used: E {used_quota:.2f}",
+								"display": f"Current balance: ${quota:.2f}, Used: ${used_quota:.2f}",
 							}
 				except Exception as parse_err:
 					print(f"⚠️ {self.account_name}: Failed to parse localStorage user data: {parse_err}")
 
-			print(f"⚠️ {self.account_name}: Failed to extract balance from elysiver /console/personal")
+			print(f"⚠️ {self.account_name}: Failed to extract balance from /console/personal")
 			return None
 		except Exception as e:
-			print(f"⚠️ {self.account_name}: Error extracting balance from elysiver: {e}")
+			print(f"⚠️ {self.account_name}: Error extracting balance from /console/personal: {e}")
 			return None
 
 	async def signin(
