@@ -449,7 +449,21 @@ class HybgzsCheckIn:
 				timeout=60000,
 			) as resp_info:
 				await checkin_btn.click()
-				# Turnstile 验证可能需要时间
+
+				# 等待 Turnstile 模态弹窗中的 iframe 加载完成
+				try:
+					await page.wait_for_selector(
+						'iframe[src*="challenges.cloudflare.com"]',
+						state='attached',
+						timeout=10000,
+					)
+					print(f'ℹ️ {self.account_name}: Turnstile iframe detected in modal')
+					# 给 iframe 一点时间完成渲染
+					await page.wait_for_timeout(1500)
+				except Exception:
+					print(f'⚠️ {self.account_name}: Turnstile iframe not found in modal, proceeding anyway')
+
+				# Turnstile 验证
 				if CAPTCHA_SOLVER_AVAILABLE and solve_captcha and _should_try_turnstile_solver():
 					try:
 						await solve_captcha(page, captcha_type='cloudflare', challenge_type='turnstile')
