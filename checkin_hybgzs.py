@@ -416,6 +416,23 @@ class HybgzsCheckIn:
 		if not (isinstance(status_json, dict) and status_json.get('success')):
 			return False, f'获取签到状态失败 (HTTP {status.get("status")})'
 
+		# 通过 API 直接判断是否已签到（比 DOM 检测更可靠）
+		try:
+			now = datetime.now()
+			config = await self._browser_fetch_json(page, f'/api/checkin/config?month={now.year}-{now.month:02d}')
+			config_json = config.get('json') or {}
+			config_data = config_json.get('data') or {}
+			if config_data.get('hasCheckedInToday'):
+				checkin_info = config_data.get('todayCheckinInfo') or {}
+				reward = checkin_info.get('rewardQuota', 0)
+				reward_usd = reward / self.UNIT_PER_DOLLAR if reward else 0
+				consecutive = checkin_info.get('consecutiveDays', 0)
+				msg = f'今日已签到 (+${reward_usd:.2f}, 连续{consecutive}天)'
+				print(f'ℹ️ {self.account_name}: {msg}')
+				return True, msg
+		except Exception as e:
+			print(f'⚠️ {self.account_name}: checkin config API check failed: {e}')
+
 		# 导航到签到页面
 		await page.goto(f'{self.ORIGIN}/gas-station/checkin', wait_until='domcontentloaded')
 
