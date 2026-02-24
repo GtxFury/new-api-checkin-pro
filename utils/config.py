@@ -318,13 +318,13 @@ class AppConfig:
                 # 该站点更依赖同源 SPA /oauth/linuxdo 完成回调并写入 localStorage
                 linuxdo_callback_mode="spa",
             ),
-            "dik3": ProviderConfig(
-                name="dik3",
-                origin="https://mb666.zeabur.app",
+            "taizi": ProviderConfig(
+                name="taizi",
+                origin="https://api.codeme.me",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
-                # 曼波api：使用 SPA 回调完成登录，再用后端接口 POST 触发签到
+                # 太子公益站：使用 SPA 回调完成登录，再用后端接口 POST 触发签到
                 sign_in_path="/api/user/checkin",
                 user_info_path="/api/user/self",
                 api_user_key="new-api-user",
