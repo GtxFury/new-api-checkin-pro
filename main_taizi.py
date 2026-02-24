@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-dik3（曼波api）自动签到脚本（独立入口）
+taizi（太子公益站）自动签到脚本（独立入口）
 """
 
 import asyncio
@@ -18,20 +18,20 @@ from utils.notify import notify
 
 load_dotenv(override=True)
 
-BALANCE_HASH_FILE = "balance_hash_dik3.txt"
-CACHE_DIR = os.path.join("storage-states", "dik3")
+BALANCE_HASH_FILE = "balance_hash_taizi.txt"
+CACHE_DIR = os.path.join("storage-states", "taizi")
 
 
 def _load_accounts() -> list[AccountConfig] | None:
-    accounts_str = os.getenv("ACCOUNTS_DIK3")
+    accounts_str = os.getenv("ACCOUNTS_TAIZI")
     if not accounts_str:
-        print("❌ ACCOUNTS_DIK3 environment variable not found")
+        print("❌ ACCOUNTS_TAIZI environment variable not found")
         return None
 
     try:
         data = json.loads(accounts_str)
     except json.JSONDecodeError as e:
-        print(f"❌ Failed to parse ACCOUNTS_DIK3 as JSON: {e}")
+        print(f"❌ Failed to parse ACCOUNTS_TAIZI as JSON: {e}")
         return None
 
     if isinstance(data, dict):
@@ -39,7 +39,7 @@ def _load_accounts() -> list[AccountConfig] | None:
     elif isinstance(data, list):
         accounts_data = data
     else:
-        print("❌ ACCOUNTS_DIK3 must be a JSON object or array")
+        print("❌ ACCOUNTS_TAIZI must be a JSON object or array")
         return None
 
     accounts: list[AccountConfig] = []
@@ -53,8 +53,8 @@ def _load_accounts() -> list[AccountConfig] | None:
             print(f"❌ Account {i + 1} missing linux.do credentials")
             return None
 
-        # 默认强制 provider=dik3（也允许用户显式填写）
-        account.setdefault("provider", "dik3")
+        # 默认强制 provider=taizi（也允许用户显式填写）
+        account.setdefault("provider", "taizi")
 
         accounts.append(AccountConfig.from_dict(account, i))
 
@@ -104,13 +104,13 @@ def _generate_balance_hash(balances: dict) -> str:
 
 
 async def main() -> int:
-    print("🚀 dik3（曼波api）自动签到脚本启动")
+    print("🚀 taizi（太子公益站）自动签到脚本启动")
     print(f"🕒 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     app_config = AppConfig.load_from_env()
-    provider = app_config.get_provider("dik3")
+    provider = app_config.get_provider("taizi")
     if not provider:
-        print("❌ Provider 'dik3' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置")
+        print("❌ Provider 'taizi' 未加载：请通过 PROVIDERS 注入/覆盖该站点配置")
         return 1
 
     accounts = _load_accounts()
@@ -188,7 +188,7 @@ async def main() -> int:
     if need_notify and notification_lines:
         summary = [
             "-------------------------------",
-            "📢 dik3（曼波api）签到统计:",
+            "📢 taizi（太子公益站）签到统计:",
             f"🔵 Success: {success_count}/{total_count}",
             f"🔴 Failed: {total_count - success_count}/{total_count}",
         ]
@@ -199,7 +199,7 @@ async def main() -> int:
                 "\n".join(summary),
             ]
         )
-        title = "dik3 签到成功" if success_count == total_count else "dik3 签到告警"
+        title = "taizi 签到成功" if success_count == total_count else "taizi 签到告警"
         print(content)
         notify.push_message(title, content, msg_type="text")
 

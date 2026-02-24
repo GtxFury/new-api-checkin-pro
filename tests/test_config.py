@@ -43,13 +43,13 @@ def test_default_providers_include_huan(monkeypatch: pytest.MonkeyPatch):
 	assert provider.checkin_mode == 'new_api_post'
 
 
-def test_default_providers_include_dik3(monkeypatch: pytest.MonkeyPatch):
+def test_default_providers_include_taizi(monkeypatch: pytest.MonkeyPatch):
 	monkeypatch.delenv('PROVIDERS', raising=False)
 	cfg = AppConfig.load_from_env()
 
-	provider = cfg.get_provider('dik3')
+	provider = cfg.get_provider('taizi')
 	assert provider is not None
-	assert provider.origin == 'https://ai.dik3.cn'
+	assert provider.origin == 'https://api.codeme.me'
 	assert provider.sign_in_path == '/api/user/checkin'
 	assert provider.checkin_mode == 'new_api_post'
 

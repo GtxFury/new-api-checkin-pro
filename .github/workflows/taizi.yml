@@ -1,11 +1,11 @@
-name: dik3（曼波api）自动签到
+name: taizi（太子公益站）自动签到
 on:
   schedule:
     - cron: '0 */8 * * *'
   workflow_dispatch:
 
 jobs:
-  dik3:
+  taizi:
     permissions:
       contents: read
     runs-on: windows-2025
@@ -77,23 +77,23 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/dik3
-        key: dik3-storage-states-${{ hashFiles('storage-states/dik3/*.json') }}
+          storage-states/taizi
+        key: taizi-storage-states-${{ hashFiles('storage-states/taizi/*.json') }}
         restore-keys: |
-          dik3-storage-states-
+          taizi-storage-states-
 
     - name: 恢复余额历史缓存
       uses: actions/cache/restore@v4
       with:
         path: |
-          balance_hash_dik3.txt
-        key: balance-hash-dik3-${{ hashFiles('balance_hash_dik3.txt') }}
+          balance_hash_taizi.txt
+        key: balance-hash-taizi-${{ hashFiles('balance_hash_taizi.txt') }}
         restore-keys: |
-          balance-hash-dik3-
+          balance-hash-taizi-
 
-    - name: 执行 dik3 签到
+    - name: 执行 taizi 签到
       env:
-        ACCOUNTS_DIK3: ${{ secrets.ACCOUNTS_DIK3 }}
+        ACCOUNTS_TAIZI: ${{ secrets.ACCOUNTS_TAIZI }}
         PROXY: ${{ secrets.PROXY }}
         LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -108,29 +108,29 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        uv run python -u main_dik3.py
+        uv run python -u main_taizi.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/dik3/*.json') != ''
+      if: hashFiles('storage-states/taizi/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/dik3
-        key: dik3-storage-states-${{ hashFiles('storage-states/dik3/*.json') }}
+          storage-states/taizi
+        key: taizi-storage-states-${{ hashFiles('storage-states/taizi/*.json') }}
 
     - name: 保存余额历史缓存
-      if: hashFiles('balance_hash_dik3.txt') != ''
+      if: hashFiles('balance_hash_taizi.txt') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          balance_hash_dik3.txt
-        key: balance-hash-dik3-${{ hashFiles('balance_hash_dik3.txt') }}
+          balance_hash_taizi.txt
+        key: balance-hash-taizi-${{ hashFiles('balance_hash_taizi.txt') }}
 
     - name: 保存日志和截图
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: dik3-artifacts-${{ github.run_number }}
+        name: taizi-artifacts-${{ github.run_number }}
         path: |
           logs/
           screenshots/
@@ -140,6 +140,6 @@ jobs:
     - name: 执行结果
       if: always()
       run: |
-        echo "dik3 签到任务执行完成"
+        echo "taizi 签到任务执行完成"
         echo "时间: $(Get-Date)"
 
