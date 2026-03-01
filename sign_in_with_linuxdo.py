@@ -110,12 +110,15 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 	try:
 		# Initialize AgentConfig (GEMINI_API_KEY is read from env automatically)
 		# Override default models: gemini-2.5-pro requires paid account,
-		# use gemini-2.0-flash which is available on the free tier.
+		# use gemini-2.5-flash which is available on the free tier.
+		# DISABLE_BEZIER_TRAJECTORY: Camoufox has its own humanize mode,
+		# disable hcaptcha-challenger's built-in Bezier trajectory to avoid conflicts.
 		agent_config = AgentConfig(
 			IMAGE_CLASSIFIER_MODEL="gemini-2.5-flash",
 			SPATIAL_POINT_REASONER_MODEL="gemini-2.5-flash",
 			SPATIAL_PATH_REASONER_MODEL="gemini-2.5-flash",
 			CHALLENGE_CLASSIFIER_MODEL="gemini-2.5-flash",
+			DISABLE_BEZIER_TRAJECTORY=True,
 		)
 
 		# Create AgentV instance
