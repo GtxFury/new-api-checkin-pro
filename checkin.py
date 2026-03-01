@@ -4876,6 +4876,37 @@ class CheckIn:
             username_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
             cache_file_path = f"{self.storage_state_dir}/linuxdo_{username_hash}_storage_state.json"
 
+            # If LINUXDO_T env var is set, pre-generate storage state to skip login.
+            # Format: single value "xxx" or multi-account "user1:xxx,user2:yyy"
+            # Get _t from F12 → Application → Cookies → linux.do → _t
+            _t_env = os.getenv("LINUXDO_T", "").strip()
+            _t_cookie = ""
+            if _t_env:
+                if ":" in _t_env:
+                    # Multi-account: username:_t_value,username2:_t_value2
+                    for pair in _t_env.split(","):
+                        pair = pair.strip()
+                        if ":" in pair:
+                            u, t = pair.split(":", 1)
+                            if u.strip() == username:
+                                _t_cookie = t.strip()
+                                break
+                else:
+                    # Single value: all accounts share one _t
+                    _t_cookie = _t_env
+            if _t_cookie and not os.path.exists(cache_file_path):
+                os.makedirs(self.storage_state_dir, exist_ok=True)
+                state = {
+                    "cookies": [
+                        {"name": "_t", "value": _t_cookie, "domain": "linux.do", "path": "/",
+                         "secure": True, "httpOnly": True, "sameSite": "Lax"},
+                    ],
+                    "origins": [],
+                }
+                with open(cache_file_path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False)
+                print(f"ℹ️ {self.account_name}: Pre-generated storage state from LINUXDO_T")
+
             from sign_in_with_linuxdo import LinuxDoSignIn
 
             linuxdo = LinuxDoSignIn(

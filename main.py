@@ -16,25 +16,6 @@ from checkin import CheckIn
 
 load_dotenv(override=True)
 
-# Restore storage states from env var if provided
-# Format: base64-encoded JSON: {"filename.json": {storage_state_content}, ...}
-_storage_env = os.getenv("LINUXDO_STORAGE_STATES", "").strip()
-if _storage_env:
-    import base64
-    try:
-        _decoded = json.loads(base64.b64decode(_storage_env).decode("utf-8"))
-        os.makedirs("storage-states", exist_ok=True)
-        for fname, content in _decoded.items():
-            fpath = os.path.join("storage-states", os.path.basename(fname))
-            if not os.path.exists(fpath):
-                with open(fpath, "w", encoding="utf-8") as f:
-                    json.dump(content, f, ensure_ascii=False)
-                print(f"ℹ️ Restored storage state: {fpath}")
-            else:
-                print(f"ℹ️ Storage state already exists (skip): {fpath}")
-    except Exception as e:
-        print(f"⚠️ Failed to restore storage states from env: {e}")
-
 BALANCE_HASH_FILE = "balance_hash.txt"
 
 

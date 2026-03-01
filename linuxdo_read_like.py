@@ -33,11 +33,6 @@ try:  # pragma: no cover - 可选依赖
 except Exception:  # pragma: no cover - 可选依赖缺失时静默跳过
 	linuxdo_solve_captcha = None
 
-try:  # pragma: no cover - 可选依赖
-	from sign_in_with_linuxdo import solve_hcaptcha as linuxdo_solve_hcaptcha  # type: ignore
-except Exception:  # pragma: no cover
-	linuxdo_solve_hcaptcha = None
-
 
 UTC = timezone.utc
 
@@ -805,17 +800,6 @@ class LinuxDoAutoReadLike:
 		# 等待跳出 /login 或 session/current 可获取到 current_user
 		print(f"🔍 {self.account_name}: [登录] 步骤6: 等待登录跳转")
 		await page.wait_for_timeout(2000)
-
-		# After clicking login, Linux.do may show an hCaptcha verification modal
-		if linuxdo_solve_hcaptcha is not None:
-			print(f"🔍 {self.account_name}: [登录] 步骤6a: 检测并解决 hCaptcha 验证")
-			try:
-				hcaptcha_solved = await linuxdo_solve_hcaptcha(page, account_name=self.account_name)
-				if hcaptcha_solved:
-					print(f"✅ {self.account_name}: [登录] hCaptcha 验证通过，等待登录完成")
-					await page.wait_for_timeout(3000)
-			except Exception as hc_err:
-				print(f"⚠️ {self.account_name}: [登录] hCaptcha 验证尝试出错: {hc_err}")
 
 		# 记录点击登录后的页面状态
 		try:
