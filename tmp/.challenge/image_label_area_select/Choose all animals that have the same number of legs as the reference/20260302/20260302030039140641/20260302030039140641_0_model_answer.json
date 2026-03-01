@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-c770ea9c-950e-4508-a155-f2573af192b3",
+  "object": "chat.completion",
+  "created": 1772391638,
+  "model": "gemini-3.1-pro-preview",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "```json\n{\"challenge_prompt\": \"选择所有与参考动物有相同腿数的动物\", \"points\": [{\"x\": 185, \"y\": 305}, {\"x\": 395, \"y\": 305}, {\"x\": 605, \"y\": 235}, {\"x\": 570, \"y\": 485}, {\"x\": 780, \"y\": 435}]}\n```"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  }
+}
