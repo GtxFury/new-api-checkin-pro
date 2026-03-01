@@ -109,7 +109,14 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 
 	try:
 		# Initialize AgentConfig (GEMINI_API_KEY is read from env automatically)
-		agent_config = AgentConfig()
+		# Override default models: gemini-2.5-pro requires paid account,
+		# use gemini-2.0-flash which is available on the free tier.
+		agent_config = AgentConfig(
+			IMAGE_CLASSIFIER_MODEL="gemini-2.5-flash",
+			SPATIAL_POINT_REASONER_MODEL="gemini-2.5-flash",
+			SPATIAL_PATH_REASONER_MODEL="gemini-2.5-flash",
+			CHALLENGE_CLASSIFIER_MODEL="gemini-2.5-flash",
+		)
 
 		# Create AgentV instance
 		agent = AgentV(page=page, agent_config=agent_config)
