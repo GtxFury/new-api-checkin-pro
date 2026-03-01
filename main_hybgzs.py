@@ -56,8 +56,8 @@ def _load_accounts() -> list[dict] | None:
 		has_credentials = isinstance(linuxdo, dict) and bool(linuxdo.get('username') and linuxdo.get('password'))
 		cookies_cfg = linuxdo.get('cookies') if isinstance(linuxdo, dict) else None
 		has_cookie_auth = bool(cookies_cfg.strip()) if isinstance(cookies_cfg, str) else bool(cookies_cfg)
-		if has_cookie_auth and not isinstance(cookies_cfg, (dict, str)):
-			print(f'❌ Account {i + 1} linux.do cookies 必须是字典或字符串')
+		if has_cookie_auth and not isinstance(cookies_cfg, (dict, str, list)):
+			print(f'❌ Account {i + 1} linux.do cookies 必须是字典、字符串或列表')
 			continue
 		if not has_credentials and not has_cookie_auth:
 			print(f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码或 cookies')

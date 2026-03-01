@@ -46,11 +46,18 @@ def parse_cookies(cookies_data) -> dict:
             # 常见浏览器导出格式: {"name": "...", "value": "...", ...}
             if isinstance(cookie, dict):
                 name = str(cookie.get("name", "")).strip()
-                if not name:
+                if name:
+                    if cookie.get("value") is None:
+                        continue
+                    cookies_dict[name] = str(cookie.get("value"))
                     continue
-                if cookie.get("value") is None:
-                    continue
-                cookies_dict[name] = str(cookie.get("value"))
+
+                # 兼容 [{"_t":"..."}, {"_forum_session":"..."}] 这类列表字典格式
+                for key, value in cookie.items():
+                    k = str(key).strip()
+                    if not k or value is None:
+                        continue
+                    cookies_dict[k] = str(value)
                 continue
 
             # 兼容列表字符串项: ["a=b", "c=d"]

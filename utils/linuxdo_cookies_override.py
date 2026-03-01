@@ -34,6 +34,25 @@ def _set_linuxdo_cookies(account: dict, payload: Any) -> bool:
     return True
 
 
+def _apply_by_account_name(accounts_data: list[dict], payload: dict[str, Any]) -> int:
+    by_name_raw = payload.get("__by_name__")
+    if not isinstance(by_name_raw, dict):
+        return 0
+
+    default_payload = payload.get("__default__")
+    applied = 0
+
+    for account in accounts_data:
+        account_name = str(account.get("name") or "").strip()
+        account_payload = by_name_raw.get(account_name)
+        if account_payload is None:
+            account_payload = default_payload
+        if _set_linuxdo_cookies(account, account_payload):
+            applied += 1
+
+    return applied
+
+
 def apply_linuxdo_cookies_override(
     accounts_data: list[dict],
     *,
@@ -49,7 +68,9 @@ def apply_linuxdo_cookies_override(
        - 浏览器导出数组: [{"name":"_t","value":"..."}, ...]
     2) 按账号索引覆盖（当前工作流）：
        - 数组: [cookie_for_account1, cookie_for_account2, ...]
-    3) 多工作流覆盖：
+    3) 按账号名称覆盖（当前工作流）：
+       - 对象: {"__by_name__": {"a": {...}, "9": {...}}, "__default__": {...}}
+    4) 多工作流覆盖：
        - 对象: {"ACCOUNTS": <payload>, "ACCOUNTS_KFC": <payload>}
     """
     raw = os.getenv(env_key)
@@ -70,6 +91,10 @@ def apply_linuxdo_cookies_override(
             payload = parsed["__all__"]
 
     applied = 0
+
+    # 按账号名称覆盖（当前工作流）
+    if isinstance(payload, dict) and "__by_name__" in payload:
+        return _apply_by_account_name(accounts_data, payload)
 
     # 直接 cookie（作用到当前工作流全部账号）
     if isinstance(payload, (dict, str)):
@@ -95,4 +120,3 @@ def apply_linuxdo_cookies_override(
         return applied
 
     return 0
-

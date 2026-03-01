@@ -78,8 +78,8 @@ def load_accounts() -> list[AccountConfig] | None:
                 has_credentials = bool(username and password)
                 has_linuxdo_cookies = bool(linuxdo_cookies)
 
-                if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str)):
-                    print(f"❌ Account {i + 1} linux.do cookies must be a dictionary or string")
+                if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str, list)):
+                    print(f"❌ Account {i + 1} linux.do cookies must be a dictionary, string, or list")
                     return None
 
                 if isinstance(linuxdo_cookies, str) and not linuxdo_cookies.strip():

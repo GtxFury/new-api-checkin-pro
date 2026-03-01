@@ -58,8 +58,8 @@ def _load_accounts() -> list[dict] | None:
 		has_linuxdo_cookies = bool(linuxdo_cookies.strip()) if isinstance(linuxdo_cookies, str) else bool(linuxdo_cookies)
 		has_linuxdo = has_linuxdo_credentials or has_linuxdo_cookies
 
-		if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str)):
-			print(f'❌ Account {i + 1} linux.do cookies 必须是字典或字符串')
+		if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str, list)):
+			print(f'❌ Account {i + 1} linux.do cookies 必须是字典、字符串或列表')
 			continue
 
 		# 兼容旧配置：access_token + cookies + api_user

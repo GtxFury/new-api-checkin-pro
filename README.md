@@ -96,7 +96,7 @@
 
 当设置 `LINUXDO_COOKIES` 时，所有签到工作流会优先注入此变量中的 cookies。
 
-支持三种格式：
+支持四种格式：
 
 1) 当前工作流全部账号共用同一份 cookies（字符串 / 对象 / 浏览器导出数组）：
 
@@ -136,6 +136,38 @@
   "ACCOUNTS_X666": [
     {"_t": "x1_t", "_forum_session": "x1_s"},
     {"_t": "x2_t", "_forum_session": "x2_s"}
+  ]
+}
+```
+
+4) 当前工作流按账号名覆盖（推荐用于账号顺序不固定）：
+
+```json
+{
+  "__by_name__": {
+    "a": {"_t": "a_t", "_forum_session": "a_s"},
+    "9": {"_t": "9_t", "_forum_session": "9_s"},
+    "m": {"_t": "m_t", "_forum_session": "m_s"}
+  },
+  "__default__": {"_t": "fallback_t", "_forum_session": "fallback_s"}
+}
+```
+
+也可与多工作流组合：
+
+```json
+{
+  "__all__": {
+    "__by_name__": {
+      "a": {"_t": "a_t", "_forum_session": "a_s"},
+      "9": {"_t": "9_t", "_forum_session": "9_s"},
+      "m": {"_t": "m_t", "_forum_session": "m_s"}
+    }
+  },
+  "ACCOUNTS_X666": [
+    {"_t": "x1_t", "_forum_session": "x1_s"},
+    {"_t": "x2_t", "_forum_session": "x2_s"},
+    {"_t": "x3_t", "_forum_session": "x3_s"}
   ]
 }
 ```

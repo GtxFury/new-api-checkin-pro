@@ -191,6 +191,8 @@ class LinuxDoSignIn:
 				for k, v in raw_cookies.items()
 				if str(k).strip() and v is not None
 			}
+		if isinstance(raw_cookies, list):
+			return parse_cookies(raw_cookies)
 		if isinstance(raw_cookies, str):
 			return parse_cookies(raw_cookies)
 		return {}
@@ -1163,6 +1165,7 @@ class LinuxDoSignIn:
 				print(f"ℹ️ {self.account_name}: No auth cookies to set")
 
 			# 可选：注入 linux.do cookies，支持 cookies-only 登录流程（绕过手动输入账号密码）
+			linuxdo_cookie_dict: dict = {}
 			try:
 				linuxdo_cookie_dict = self._normalize_cookie_dict(linuxdo_cookies)
 				linuxdo_browser_cookies = self._linuxdo_cookie_dict_to_browser_cookies(linuxdo_cookie_dict)
@@ -1186,11 +1189,14 @@ class LinuxDoSignIn:
 					f"&redirect_uri={quote(redirect_uri, safe='')}"
 				)
 
-				# 如果存在缓存，先尝试直接访问授权页面
-				if os.path.exists(cache_file_path):
+				# 如果存在缓存，或已注入 linux.do cookies，先尝试直接访问授权页面
+				# （此前仅缓存场景会走这里，导致 cookies-only 首次运行仍会被迫打开 /login）
+				if os.path.exists(cache_file_path) or bool(linuxdo_cookie_dict):
 					try:
+						probe_source = "cache" if os.path.exists(cache_file_path) else "linux.do cookies"
 						print(
-							f"ℹ️ {self.account_name}: Checking login status at {redact_url_for_log(oauth_url)}"
+							f"ℹ️ {self.account_name}: Checking login status at {redact_url_for_log(oauth_url)} "
+							f"(source: {probe_source})"
 						)
 						response = await page.goto(oauth_url, wait_until="domcontentloaded")
 						print(
