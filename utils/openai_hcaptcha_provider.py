@@ -304,6 +304,6 @@ def patch_agent_with_openai(agent) -> bool:
 
     print(
         f"ℹ️ hCaptcha: Using OpenAI-compatible provider "
-        f"(model={cfg['model']}, base_url={cfg['base_url']})"
+        f"(model={cfg['model']})"
     )
     return True
