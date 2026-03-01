@@ -118,11 +118,10 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 
 	try:
 		# Check if OpenAI-compatible provider is configured
-		_use_openai = (
-			_OPENAI_HCAPTCHA_AVAILABLE
-			and get_openai_config is not None
-			and get_openai_config() is not None
-		)
+		_openai_cfg = None
+		if _OPENAI_HCAPTCHA_AVAILABLE and get_openai_config is not None:
+			_openai_cfg = get_openai_config()
+		_use_openai = _openai_cfg is not None
 
 		# Build AgentConfig kwargs
 		# DISABLE_BEZIER_TRAJECTORY: Camoufox has its own humanize mode,
@@ -139,6 +138,7 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 		# but we won't actually use it — supply a placeholder so init succeeds.
 		if _use_openai and not os.getenv("GEMINI_API_KEY"):
 			config_kwargs["GEMINI_API_KEY"] = "openai-mode-placeholder"
+			print(f"ℹ️ {prefix}OpenAI mode detected, bypassing GEMINI_API_KEY requirement")
 
 		agent_config = AgentConfig(**config_kwargs)
 
