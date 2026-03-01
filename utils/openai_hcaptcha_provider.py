@@ -33,11 +33,30 @@ _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # ---------------------------------------------------------------------------
 
 def get_openai_config() -> dict | None:
-    """Parse ``HCAPTCHA_OPENAI`` env var.
+    """Parse ``HCAPTCHA_OPENAI`` from env var or ``.env`` file.
 
     Returns a dict with api_key / base_url / model, or None if not configured.
     """
     raw = (os.getenv("HCAPTCHA_OPENAI") or "").strip()
+
+    # Also try reading from .env file if not in system env
+    if not raw:
+        for env_path in (Path(".env"), Path(__file__).resolve().parent.parent / ".env"):
+            if env_path.is_file():
+                try:
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line.startswith("#") or "=" not in line:
+                            continue
+                        key, _, val = line.partition("=")
+                        if key.strip() == "HCAPTCHA_OPENAI":
+                            raw = val.strip().strip("'\"")
+                            break
+                except Exception:
+                    pass
+            if raw:
+                break
+
     if not raw:
         return None
 
