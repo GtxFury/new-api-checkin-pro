@@ -33,6 +33,17 @@ except Exception as e1:  # pragma: no cover - 可选依赖
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = False
 	print(f"⚠️ LinuxDoSignIn: playwright-captcha not available: {e1!r}")
 
+# hcaptcha-challenger: solve hCaptcha on Linux.do login page via multimodal LLM
+try:
+	from hcaptcha_challenger.agent import AgentV, AgentConfig  # type: ignore[assignment]
+	HCAPTCHA_CHALLENGER_AVAILABLE = True
+	print("ℹ️ LinuxDoSignIn: hcaptcha-challenger imported successfully")
+except Exception as e2:  # pragma: no cover
+	AgentV = None  # type: ignore[assignment]
+	AgentConfig = None  # type: ignore[assignment]
+	HCAPTCHA_CHALLENGER_AVAILABLE = False
+	print(f"⚠️ LinuxDoSignIn: hcaptcha-challenger not available: {e2!r}")
+
 
 def _should_try_turnstile_solver() -> bool:
 	# 默认开启：若需要关闭请设 LINUXDO_TRY_TURNSTILE_SOLVER=0/false/no/off
@@ -44,6 +55,143 @@ def _should_try_turnstile_solver() -> bool:
 		return True
 	# 未设置/未知值：默认开启
 	return True
+
+
+async def solve_hcaptcha(page, account_name: str = "") -> bool:
+	"""Use hcaptcha-challenger to solve hCaptcha on Linux.do login page.
+
+	Flow:
+	1. Detect if hCaptcha is present on the page (checkbox/modal)
+	2. Use AgentV robotic_arm to click hCaptcha checkbox
+	3. Wait for and solve image challenge via multimodal LLM
+	4. Click the modal "Verify" button to complete verification
+
+	Returns True if solved, False otherwise.
+	"""
+	prefix = f"{account_name}: " if account_name else ""
+
+	if not HCAPTCHA_CHALLENGER_AVAILABLE or AgentV is None or AgentConfig is None:
+		print(f"⚠️ {prefix}hcaptcha-challenger not available, skipping hCaptcha solve")
+		return False
+
+	# Detect hCaptcha elements on the page
+	try:
+		has_hcaptcha = await page.evaluate("""() => {
+			try {
+				const hasCheckbox = !!document.querySelector('iframe[src*="hcaptcha.com"], iframe[data-hcaptcha-widget-id]');
+				const hasChallenge = !!document.querySelector('iframe[src*="hcaptcha.com/challenge"]');
+				const hasContainer = !!document.querySelector('.h-captcha, [data-hcaptcha-widget-id], div[data-sitekey]');
+				const hasModal = !!document.querySelector('.modal-body iframe[src*="hcaptcha.com"], .modal iframe[src*="hcaptcha.com"]');
+				return hasCheckbox || hasChallenge || hasContainer || hasModal;
+			} catch (e) {
+				return false;
+			}
+		}""")
+	except Exception:
+		has_hcaptcha = False
+
+	if not has_hcaptcha:
+		# Wait a bit - hCaptcha may still be loading
+		try:
+			await page.wait_for_selector(
+				'iframe[src*="hcaptcha.com"], .h-captcha, [data-hcaptcha-widget-id]',
+				timeout=5000,
+			)
+			has_hcaptcha = True
+		except Exception:
+			pass
+
+	if not has_hcaptcha:
+		print(f"ℹ️ {prefix}No hCaptcha detected on page, skipping")
+		return False
+
+	print(f"ℹ️ {prefix}hCaptcha detected, solving via hcaptcha-challenger...")
+
+	try:
+		# Initialize AgentConfig (GEMINI_API_KEY is read from env automatically)
+		agent_config = AgentConfig()
+
+		# Create AgentV instance
+		agent = AgentV(page=page, agent_config=agent_config)
+
+		# Click the hCaptcha checkbox to trigger the challenge
+		print(f"ℹ️ {prefix}Clicking hCaptcha checkbox...")
+		await agent.robotic_arm.click_checkbox()
+
+		# Wait for challenge to appear and solve it
+		print(f"ℹ️ {prefix}Waiting for hCaptcha challenge and solving...")
+		await agent.wait_for_challenge()
+
+		# Log challenge results
+		if agent.cr_list:
+			print(f"ℹ️ {prefix}hCaptcha challenge completed, {len(agent.cr_list)} round(s)")
+		else:
+			print(f"ℹ️ {prefix}hCaptcha may have auto-passed (no image challenge needed)")
+
+		# Wait for hCaptcha callback to complete
+		await page.wait_for_timeout(2000)
+
+		# After hCaptcha verification, click the "Verify" button in the Linux.do modal
+		# Linux.do shows a modal dialog with a separate "Verify" button after hCaptcha
+		try:
+			verify_clicked = await page.evaluate("""() => {
+				try {
+					const selectors = [
+						'.modal-footer button.btn-primary',
+						'.modal-footer button:not(.btn-flat)',
+						'.modal button.btn-primary',
+						'button.hcaptcha-submit',
+						'button',
+					];
+					for (const sel of selectors) {
+						const btns = document.querySelectorAll(sel);
+						for (const btn of btns) {
+							const text = (btn.textContent || '').trim();
+							if (['Verify', 'Submit'].includes(text)
+								|| text === '\u9a8c\u8bc1' || text === '\u78ba\u8a8d') {
+								if (btn.offsetParent !== null && !btn.disabled) {
+									btn.click();
+									return true;
+								}
+							}
+						}
+					}
+					return false;
+				} catch (e) {
+					return false;
+				}
+			}""")
+			if verify_clicked:
+				print(f"ℹ️ {prefix}Clicked modal 'Verify' button")
+				await page.wait_for_timeout(2000)
+			else:
+				# Fallback: try Playwright selectors
+				for btn_sel in [
+					'button:has-text("Verify")',
+					'button:has-text("\u9a8c\u8bc1")',
+					'.modal-footer button.btn-primary',
+				]:
+					try:
+						btn = await page.query_selector(btn_sel)
+						if btn:
+							await btn.click()
+							print(f"ℹ️ {prefix}Clicked modal 'Verify' button via Playwright selector ({btn_sel})")
+							await page.wait_for_timeout(2000)
+							break
+					except Exception:
+						continue
+		except Exception as e:
+			print(f"⚠️ {prefix}Error clicking 'Verify' button (may not be needed): {e}")
+
+		print(f"✅ {prefix}hCaptcha verification flow completed")
+		return True
+
+	except asyncio.TimeoutError:
+		print(f"⚠️ {prefix}hCaptcha verification timed out")
+		return False
+	except Exception as e:
+		print(f"⚠️ {prefix}hCaptcha verification failed: {e}")
+		return False
 
 
 async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
@@ -1375,7 +1523,19 @@ class LinuxDoSignIn:
 							except Exception:
 								pass
 
+						# After clicking login, Linux.do may show an hCaptcha verification modal
+						# Need to solve hCaptcha and click "Verify" button before login can proceed
+						await page.wait_for_timeout(2000)  # Wait for modal to load
+						try:
+							hcaptcha_solved = await solve_hcaptcha(page, account_name=self.account_name)
+							if hcaptcha_solved:
+								print(f"✅ {self.account_name}: hCaptcha solved, waiting for login to complete")
+								await page.wait_for_timeout(3000)
+						except Exception as hc_err:
+							print(f"⚠️ {self.account_name}: hCaptcha solve attempt error: {hc_err}")
+
 						# 等待跳出 /login（或出现授权按钮）
+						# Increased timeout to 90s to accommodate hCaptcha solving time
 						try:
 							await page.wait_for_function(
 								"""() => {
@@ -1385,7 +1545,7 @@ class LinuxDoSignIn:
 									const t = document.body ? (document.body.innerText || '') : '';
 									return t.includes('授权') || t.includes('Authorize') || t.includes('/oauth2/approve');
 								}""",
-								timeout=30000,
+								timeout=90000,
 							)
 						except Exception:
 							await self._take_screenshot(page, "linuxdo_login_timeout")
