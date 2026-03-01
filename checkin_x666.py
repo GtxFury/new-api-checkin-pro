@@ -15,6 +15,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 import httpx
+from utils.browser_utils import parse_cookies
 
 
 class _TokenExpiredError(Exception):
@@ -43,6 +44,21 @@ class X666CheckIn:
 		if proxy is not None:
 			kwargs['proxy'] = proxy
 		return httpx.Client(**kwargs)
+
+	@staticmethod
+	def _linuxdo_cookie_dict_to_browser_cookies(cookie_dict: dict) -> list[dict]:
+		cookies: list[dict] = []
+		for name, value in (cookie_dict or {}).items():
+			cn = str(name or '').strip()
+			if not cn:
+				continue
+			cv = str(value)
+			if cn.startswith('__Host-'):
+				for url in ('https://linux.do', 'https://connect.linux.do'):
+					cookies.append({'name': cn, 'value': cv, 'url': url, 'path': '/', 'secure': True})
+				continue
+			cookies.append({'name': cn, 'value': cv, 'domain': '.linux.do', 'path': '/', 'secure': True})
+		return cookies
 
 	@staticmethod
 	def _get_http_proxy(proxy_config: dict | None = None) -> httpx.URL | None:
@@ -300,6 +316,9 @@ class X666CheckIn:
 		# 仅当确实处于 linux.do 的登录页时才填表；若已登录会被重定向到首页/授权页，此时不应误判失败。
 		if 'linux.do/login' not in cur:
 			return
+
+		if not (username and password):
+			raise RuntimeError('linux.do cookies 已失效，且未提供 username/password 作为兜底登录凭据')
 
 		await page.wait_for_timeout(800)
 		await self._take_screenshot(page, 'linuxdo_login_page')
@@ -1415,7 +1434,12 @@ class X666CheckIn:
 		finally:
 			client.close()
 
-	async def execute_with_linuxdo(self, username: str, password: str) -> tuple[bool, dict]:
+	async def execute_with_linuxdo(
+		self,
+		username: str,
+		password: str,
+		linuxdo_cookies: dict | str | None = None,
+	) -> tuple[bool, dict]:
 		"""新流程：在 qd.x666.me 使用 linux.do OAuth 登录 -> 点击签到 -> 登录 x666.me 获取余额"""
 		print(f'\n\n⏳ 开始处理 {self.account_name}')
 		print(f'ℹ️ {self.account_name}: 执行 x666 新签到流程（linux.do OAuth）')
@@ -1428,7 +1452,12 @@ class X666CheckIn:
 		headless = self._env_bool('HEADLESS', False)
 		storage_dir = Path('storage-states') / 'x666'
 		storage_dir.mkdir(parents=True, exist_ok=True)
-		username_hash = hashlib.sha256(username.encode('utf-8')).hexdigest()[:8]
+		linuxdo_cookie_dict = parse_cookies(linuxdo_cookies) if linuxdo_cookies else {}
+		cookie_fingerprint = ",".join(
+			f"{str(k)}={str(v)}" for k, v in sorted((linuxdo_cookie_dict or {}).items(), key=lambda item: str(item[0]))
+		)
+		cache_id_source = username if username else f"cookie:{cookie_fingerprint}"
+		username_hash = hashlib.sha256(cache_id_source.encode('utf-8')).hexdigest()[:8]
 		cache_file = str(storage_dir / f'linuxdo_{username_hash}_storage_state.json')
 
 		async with AsyncCamoufox(
@@ -1445,6 +1474,12 @@ class X666CheckIn:
 				"""执行完整的 OAuth 登录 + 签到 + 余额查询流程"""
 				storage_state = cache_file if use_cache and os.path.exists(cache_file) else None
 				context = await browser.new_context(storage_state=storage_state)
+				if linuxdo_cookie_dict:
+					try:
+						await context.add_cookies(self._linuxdo_cookie_dict_to_browser_cookies(linuxdo_cookie_dict))
+						print(f'ℹ️ {self.account_name}: 已注入 {len(linuxdo_cookie_dict)} 个 linux.do cookies')
+					except Exception as e:
+						print(f'⚠️ {self.account_name}: 注入 linux.do cookies 失败: {e}')
 				page = await context.new_page()
 
 				try:

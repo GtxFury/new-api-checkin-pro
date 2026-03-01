@@ -94,6 +94,7 @@ jobs:
     - name: 执行 taizi 签到
       env:
         ACCOUNTS_TAIZI: ${{ secrets.ACCOUNTS_TAIZI }}
+        LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         PROXY: ${{ secrets.PROXY }}
         LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}

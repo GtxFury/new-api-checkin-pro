@@ -97,6 +97,7 @@ jobs:
     - name: 执行 x666 签到
       env:
         ACCOUNTS_X666: ${{ secrets.ACCOUNTS_X666 }}
+        LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         PROXY: ${{ secrets.PROXY }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}

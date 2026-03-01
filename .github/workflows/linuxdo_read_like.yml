@@ -106,6 +106,7 @@ jobs:
           LINUXDO_ACCOUNTS: ${{ secrets.LINUXDO_ACCOUNTS }}
           # 兼容旧配置：如果 LINUXDO_ACCOUNTS 未设置，会回退到 ACCOUNTS 中的 linux.do 配置
           ACCOUNTS: ${{ secrets.ACCOUNTS }}
+          LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
           DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}

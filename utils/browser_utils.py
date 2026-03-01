@@ -10,23 +10,55 @@ from urllib.parse import urlparse
 def parse_cookies(cookies_data) -> dict:
     """解析 cookies 数据
 
-    支持字典格式和字符串格式的 cookies
+    支持以下 cookies 格式：
+    - 字典: {"session": "xxx", "_t": "yyy"}
+    - 字符串: "session=xxx; _t=yyy"
+    - 列表对象（浏览器导出）: [{"name": "session", "value": "xxx"}, ...]
 
     Args:
-        cookies_data: cookies 数据，可以是字典或分号分隔的字符串
+        cookies_data: cookies 数据
 
     Returns:
         解析后的 cookies 字典
     """
     if isinstance(cookies_data, dict):
-        return cookies_data
+        cookies_dict = {}
+        for key, value in cookies_data.items():
+            k = str(key).strip()
+            if not k or value is None:
+                continue
+            cookies_dict[k] = str(value)
+        return cookies_dict
 
     if isinstance(cookies_data, str):
         cookies_dict = {}
         for cookie in cookies_data.split(";"):
             if "=" in cookie:
                 key, value = cookie.strip().split("=", 1)
-                cookies_dict[key] = value
+                key = key.strip()
+                if key:
+                    cookies_dict[key] = value
+        return cookies_dict
+
+    if isinstance(cookies_data, list):
+        cookies_dict = {}
+        for cookie in cookies_data:
+            # 常见浏览器导出格式: {"name": "...", "value": "...", ...}
+            if isinstance(cookie, dict):
+                name = str(cookie.get("name", "")).strip()
+                if not name:
+                    continue
+                if cookie.get("value") is None:
+                    continue
+                cookies_dict[name] = str(cookie.get("value"))
+                continue
+
+            # 兼容列表字符串项: ["a=b", "c=d"]
+            if isinstance(cookie, str) and "=" in cookie:
+                key, value = cookie.strip().split("=", 1)
+                key = key.strip()
+                if key:
+                    cookies_dict[key] = value
         return cookies_dict
     return {}
 

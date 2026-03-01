@@ -94,6 +94,7 @@ jobs:
     - name: 执行 neb 签到
       env:
         ACCOUNTS_NEB: ${{ secrets.ACCOUNTS_NEB }}
+        LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         PROXY: ${{ secrets.PROXY }}
         LINUXDO_TRY_TURNSTILE_SOLVER: ${{ secrets.LINUXDO_TRY_TURNSTILE_SOLVER }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}

@@ -13,6 +13,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from checkin_hybgzs import HybgzsCheckIn
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 
 load_dotenv(override=True)
@@ -41,6 +42,10 @@ def _load_accounts() -> list[dict] | None:
 		print('❌ ACCOUNTS_HYBGZS must be a JSON object or array')
 		return None
 
+	overridden = apply_linuxdo_cookies_override(accounts, accounts_env_key='ACCOUNTS_HYBGZS')
+	if overridden:
+		print(f'⚙️ Applied linux.do cookies override for {overridden} account(s) from LINUXDO_COOKIES')
+
 	valid: list[dict] = []
 	for i, account in enumerate(accounts):
 		if not isinstance(account, dict):
@@ -48,8 +53,14 @@ def _load_accounts() -> list[dict] | None:
 			continue
 
 		linuxdo = account.get('linux.do') or {}
-		if not (isinstance(linuxdo, dict) and linuxdo.get('username') and linuxdo.get('password')):
-			print(f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码')
+		has_credentials = isinstance(linuxdo, dict) and bool(linuxdo.get('username') and linuxdo.get('password'))
+		cookies_cfg = linuxdo.get('cookies') if isinstance(linuxdo, dict) else None
+		has_cookie_auth = bool(cookies_cfg.strip()) if isinstance(cookies_cfg, str) else bool(cookies_cfg)
+		if has_cookie_auth and not isinstance(cookies_cfg, (dict, str)):
+			print(f'❌ Account {i + 1} linux.do cookies 必须是字典或字符串')
+			continue
+		if not has_credentials and not has_cookie_auth:
+			print(f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码或 cookies')
 			continue
 
 		valid.append(account)
@@ -140,6 +151,7 @@ async def main() -> int:
 		account_name = account.get('name') or f'account_{i + 1}'
 		account_proxy = account.get('proxy') or global_proxy
 		linuxdo = account.get('linux.do') or {}
+		linuxdo_cookies = linuxdo.get('cookies')
 
 		if notification_lines:
 			notification_lines.append('-------------------------------')
@@ -152,8 +164,9 @@ async def main() -> int:
 				transfer_threshold=account.get('transfer_threshold', transfer_threshold),
 			)
 			ok, result = await checkin.execute(
-				str(linuxdo.get('username')),
-				str(linuxdo.get('password')),
+				str(linuxdo.get('username') or ''),
+				str(linuxdo.get('password') or ''),
+				linuxdo_cookies=linuxdo_cookies,
 			)
 			current_checkin_info[account_name] = result if isinstance(result, dict) else {}
 
@@ -249,6 +262,3 @@ def run_main():
 
 if __name__ == '__main__':
 	run_main()
-
-
-

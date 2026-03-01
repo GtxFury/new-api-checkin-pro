@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from checkin import CheckIn
 from utils.config import AccountConfig, AppConfig
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 
 load_dotenv(override=True)
@@ -42,6 +43,10 @@ def _load_accounts() -> list[AccountConfig] | None:
         print("❌ ACCOUNTS_DAIJU must be a JSON object or array")
         return None
 
+    overridden = apply_linuxdo_cookies_override(accounts_data, accounts_env_key="ACCOUNTS_DAIJU")
+    if overridden:
+        print(f"⚙️ Applied linux.do cookies override for {overridden} account(s) from LINUXDO_COOKIES")
+
     accounts: list[AccountConfig] = []
     for i, account in enumerate(accounts_data):
         if not isinstance(account, dict):
@@ -49,8 +54,16 @@ def _load_accounts() -> list[AccountConfig] | None:
             return None
 
         linuxdo = account.get("linux.do")
-        if not isinstance(linuxdo, dict) or not linuxdo.get("username") or not linuxdo.get("password"):
-            print(f"❌ Account {i + 1} missing linux.do credentials")
+        has_credentials = isinstance(linuxdo, dict) and bool(linuxdo.get("username") and linuxdo.get("password"))
+        cookies_cfg = linuxdo.get("cookies") if isinstance(linuxdo, dict) else None
+        has_cookie_auth = bool(cookies_cfg.strip()) if isinstance(cookies_cfg, str) else bool(cookies_cfg)
+
+        if has_cookie_auth and not isinstance(cookies_cfg, (dict, str)):
+            print(f"❌ Account {i + 1} linux.do cookies must be a dictionary or string")
+            return None
+
+        if not has_credentials and not has_cookie_auth:
+            print(f"❌ Account {i + 1} missing linux.do credentials (username/password or cookies)")
             return None
 
         # 默认强制 provider=daiju（也允许用户显式填写）
@@ -219,4 +232,3 @@ def run_main() -> None:
 
 if __name__ == "__main__":
     run_main()
-

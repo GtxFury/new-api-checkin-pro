@@ -26,6 +26,7 @@ from typing import Any
 from camoufox.async_api import AsyncCamoufox
 
 from utils.config import AccountConfig
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 
 try:  # pragma: no cover - 可选依赖
@@ -131,11 +132,19 @@ class RunStats:
 class LinuxDoAutoReadLike:
 	LIKE_LIMITS: dict[int, int] = {0: 50, 1: 50, 2: 75, 3: 100, 4: 150}
 
-	def __init__(self, account_name: str, username: str, password: str, settings: LinuxDoSettings):
+	def __init__(
+		self,
+		account_name: str,
+		username: str,
+		password: str,
+		settings: LinuxDoSettings,
+		linuxdo_cookies: dict | str | list | None = None,
+	):
 		self.account_name = account_name
 		self.safe_account_name = _safe_name(account_name)
 		self.username = username
 		self.password = password
+		self.linuxdo_cookies = linuxdo_cookies
 		self.settings = settings
 		self._warned_no_cf_solver = False
 
@@ -197,6 +206,52 @@ class LinuxDoAutoReadLike:
 			removed = [k for k, v in m.items() if isinstance(v, int) and v < cutoff]
 			for k in removed:
 				m.pop(k, None)
+
+	@staticmethod
+	def _linuxdo_cookie_dict_to_browser_cookies(cookie_dict: dict) -> list[dict]:
+		cookies: list[dict] = []
+		for name, value in (cookie_dict or {}).items():
+			cn = str(name or "").strip()
+			if not cn:
+				continue
+			cv = str(value)
+			if cn.startswith("__Host-"):
+				for url in ("https://linux.do", "https://connect.linux.do"):
+					cookies.append({"name": cn, "value": cv, "url": url, "path": "/", "secure": True})
+				continue
+			cookies.append({"name": cn, "value": cv, "domain": ".linux.do", "path": "/", "secure": True})
+		return cookies
+
+	@staticmethod
+	def _normalize_cookie_dict(raw: dict | str | list | None) -> dict:
+		if not raw:
+			return {}
+		if isinstance(raw, dict):
+			if "name" in raw and "value" in raw:
+				name = str(raw.get("name") or "").strip()
+				value = raw.get("value")
+				return {name: str(value)} if name and value is not None else {}
+			return {str(k).strip(): str(v) for k, v in raw.items() if str(k).strip() and v is not None}
+		if isinstance(raw, str):
+			result: dict[str, str] = {}
+			for cookie in raw.split(";"):
+				if "=" not in cookie:
+					continue
+				k, v = cookie.strip().split("=", 1)
+				k = k.strip()
+				if k:
+					result[k] = v
+			return result
+		if isinstance(raw, list):
+			result: dict[str, str] = {}
+			for item in raw:
+				if isinstance(item, dict):
+					name = str(item.get("name") or "").strip()
+					value = item.get("value")
+					if name and value is not None:
+						result[name] = str(value)
+			return result
+		return {}
 
 	async def _is_cloudflare_interstitial(self, page) -> bool:
 		try:
@@ -1180,6 +1235,13 @@ class LinuxDoAutoReadLike:
 		) as browser:
 			print(f"✅ {self.account_name}: [运行] 浏览器启动成功")
 			context = await browser.new_context(storage_state=storage_state)
+			try:
+				cookie_dict = self._normalize_cookie_dict(self.linuxdo_cookies)
+				if cookie_dict:
+					await context.add_cookies(self._linuxdo_cookie_dict_to_browser_cookies(cookie_dict))
+					print(f"ℹ️ {self.account_name}: [运行] 已优先注入 {len(cookie_dict)} 个 linux.do cookies")
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: [运行] 注入 linux.do cookies 失败: {e}")
 			page = await context.new_page()
 			print(f"✅ {self.account_name}: [运行] 新页面创建成功")
 			self._install_like_rate_limit_listener(page)
@@ -1344,7 +1406,7 @@ class LinuxDoAutoReadLike:
 		return stats
 
 
-def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
+def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str, dict | str | list | None]]:
 	"""从环境变量加载 Linux.do 账号配置
 
 	优先使用 LINUXDO_ACCOUNTS 变量（专用），如果不存在则回退到 ACCOUNTS 变量（兼容旧配置）
@@ -1362,9 +1424,9 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 	]
 
 	Returns:
-		list[tuple[str, str, str]]: [(账号名, 用户名, 密码), ...]
+		list[tuple[str, str, str, cookies]]: [(账号名, 用户名, 密码, linux.do cookies), ...]
 	"""
-	targets: list[tuple[str, str, str]] = []
+	targets: list[tuple[str, str, str, dict | str | list | None]] = []
 
 	# 优先使用 LINUXDO_ACCOUNTS
 	linuxdo_accounts_str = os.getenv("LINUXDO_ACCOUNTS")
@@ -1376,6 +1438,10 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 		if not isinstance(data, list):
 			raise RuntimeError("LINUXDO_ACCOUNTS 必须是 JSON 数组")
 
+		overridden = apply_linuxdo_cookies_override(data, accounts_env_key="LINUXDO_ACCOUNTS")
+		if overridden:
+			print(f"⚙️ 从 LINUXDO_COOKIES 覆盖了 {overridden} 个 LINUXDO_ACCOUNTS 账号的 cookies")
+
 		for i, item in enumerate(data):
 			if not isinstance(item, dict):
 				continue
@@ -1384,7 +1450,11 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 			if not username or not password:
 				continue
 			name = str(item.get("name") or f"LinuxDo账号{i + 1}").strip()
-			targets.append((name, username, password))
+			linuxdo = item.get("linux.do")
+			cookies = item.get("cookies")
+			if isinstance(linuxdo, dict) and linuxdo.get("cookies"):
+				cookies = linuxdo.get("cookies")
+			targets.append((name, username, password, cookies))
 
 		if targets:
 			print(f"ℹ️ 从 LINUXDO_ACCOUNTS 加载了 {len(targets)} 个账号")
@@ -1401,6 +1471,10 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 	if not isinstance(data, list):
 		raise RuntimeError("ACCOUNTS 必须是 JSON 数组")
 
+	overridden = apply_linuxdo_cookies_override(data, accounts_env_key="ACCOUNTS")
+	if overridden:
+		print(f"⚙️ 从 LINUXDO_COOKIES 覆盖了 {overridden} 个 ACCOUNTS 账号的 cookies")
+
 	accounts = [AccountConfig.from_dict(item, i) for i, item in enumerate(data) if isinstance(item, dict)]
 
 	for i, ac in enumerate(accounts):
@@ -1412,7 +1486,7 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 		p = str(ld.get("password") or "").strip()
 		if not u or not p:
 			continue
-		targets.append((name, u, p))
+		targets.append((name, u, p, ld.get("cookies")))
 
 	if targets:
 		print(f"ℹ️ 从 ACCOUNTS 加载了 {len(targets)} 个 Linux.do 账号（兼容模式）")
@@ -1442,20 +1516,26 @@ async def _run_all() -> None:
 		if read_rounds > 1:
 			print(f"\n{'='*20} 第 {round_idx + 1}/{read_rounds} 轮 {'='*20}")
 
-		for idx, (name, u, p) in enumerate(targets):
-			round_info = f"[轮次{round_idx + 1}] " if read_rounds > 1 else ""
-			print(f"\n===== {round_info}linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
-			try:
-				stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
-				all_stats.append(stats)
-				print(f"✅ {name}: 完成")
-			except Exception as e:
-				print(f"❌ {name}: 失败: {e}")
+			for idx, (name, u, p, cks) in enumerate(targets):
+				round_info = f"[轮次{round_idx + 1}] " if read_rounds > 1 else ""
+				print(f"\n===== {round_info}linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
+				try:
+					stats = await LinuxDoAutoReadLike(
+						account_name=name,
+						username=u,
+						password=p,
+						settings=settings,
+						linuxdo_cookies=cks,
+					).run()
+					all_stats.append(stats)
+					print(f"✅ {name}: 完成")
+				except Exception as e:
+					print(f"❌ {name}: 失败: {e}")
 
-			# 账号之间添加延迟，避免触发 429 限流
-			if idx < len(targets) - 1 and account_delay > 0:
-				print(f"ℹ️ 等待 {account_delay} 秒后处理下一个账号...")
-				await asyncio.sleep(account_delay)
+				# 账号之间添加延迟，避免触发 429 限流
+				if idx < len(targets) - 1 and account_delay > 0:
+					print(f"ℹ️ 等待 {account_delay} 秒后处理下一个账号...")
+					await asyncio.sleep(account_delay)
 
 		# 轮次之间添加延迟
 		if round_idx < read_rounds - 1 and round_delay > 0:

@@ -13,6 +13,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from checkin_x666 import X666CheckIn
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 
 load_dotenv(override=True)
@@ -41,6 +42,10 @@ def _load_accounts() -> list[dict] | None:
 		print('❌ ACCOUNTS_X666 must be a JSON object or array')
 		return None
 
+	overridden = apply_linuxdo_cookies_override(accounts, accounts_env_key='ACCOUNTS_X666')
+	if overridden:
+		print(f'⚙️ Applied linux.do cookies override for {overridden} account(s) from LINUXDO_COOKIES')
+
 	valid: list[dict] = []
 	for i, account in enumerate(accounts):
 		if not isinstance(account, dict):
@@ -48,14 +53,21 @@ def _load_accounts() -> list[dict] | None:
 			continue
 
 		linuxdo = account.get('linux.do') or {}
-		has_linuxdo = isinstance(linuxdo, dict) and linuxdo.get('username') and linuxdo.get('password')
+		has_linuxdo_credentials = isinstance(linuxdo, dict) and bool(linuxdo.get('username') and linuxdo.get('password'))
+		linuxdo_cookies = linuxdo.get('cookies') if isinstance(linuxdo, dict) else None
+		has_linuxdo_cookies = bool(linuxdo_cookies.strip()) if isinstance(linuxdo_cookies, str) else bool(linuxdo_cookies)
+		has_linuxdo = has_linuxdo_credentials or has_linuxdo_cookies
+
+		if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str)):
+			print(f'❌ Account {i + 1} linux.do cookies 必须是字典或字符串')
+			continue
 
 		# 兼容旧配置：access_token + cookies + api_user
 		has_legacy = bool(account.get('access_token') and account.get('cookies') and account.get('api_user'))
 
 		if not has_linuxdo and not has_legacy:
 			print(
-				f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码，或旧版 access_token/cookies/api_user'
+				f'❌ Account {i + 1} 配置不完整：需要提供 linux.do 账号密码或 cookies，或旧版 access_token/cookies/api_user'
 			)
 			continue
 
@@ -148,8 +160,13 @@ async def main() -> int:
 			print(f'🌀 处理账号: {account_name}')
 			checkin = X666CheckIn(account_name, proxy_config=account_proxy)
 			linuxdo = account.get('linux.do') or {}
-			if isinstance(linuxdo, dict) and linuxdo.get('username') and linuxdo.get('password'):
-				ok, result = await checkin.execute_with_linuxdo(str(linuxdo.get('username')), str(linuxdo.get('password')))
+			linuxdo_cookies = linuxdo.get('cookies') if isinstance(linuxdo, dict) else None
+			if isinstance(linuxdo, dict) and (linuxdo.get('username') and linuxdo.get('password') or linuxdo_cookies):
+				ok, result = await checkin.execute_with_linuxdo(
+					str(linuxdo.get('username') or ''),
+					str(linuxdo.get('password') or ''),
+					linuxdo_cookies=linuxdo_cookies,
+				)
 			else:
 				ok, result = await checkin.execute(str(access_token), cookies or {}, api_user)
 			current_checkin_info[account_name] = result if isinstance(result, dict) else {}

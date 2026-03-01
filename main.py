@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 from utils.config import AppConfig, AccountConfig
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 from checkin import CheckIn
 
@@ -33,6 +34,10 @@ def load_accounts() -> list[AccountConfig] | None:
         if not isinstance(accounts_data, list):
             print("❌ Account configuration must use array format [{}]")
             return None
+
+        overridden = apply_linuxdo_cookies_override(accounts_data, accounts_env_key="ACCOUNTS")
+        if overridden:
+            print(f"⚙️ Applied linux.do cookies override for {overridden} account(s) from LINUXDO_COOKIES")
 
         accounts = []
         # 验证账号数据格式
@@ -66,14 +71,25 @@ def load_accounts() -> list[AccountConfig] | None:
                     print(f"❌ Account {i + 1} linux.do configuration must be a " f"dictionary")
                     return None
 
-                # 验证必需字段
-                if "username" not in auth_config or "password" not in auth_config:
-                    print(f"❌ Account {i + 1} linux.do configuration must contain username and password")
+                username = str(auth_config.get("username", "") or "").strip()
+                password = str(auth_config.get("password", "") or "").strip()
+                linuxdo_cookies = auth_config.get("cookies")
+
+                has_credentials = bool(username and password)
+                has_linuxdo_cookies = bool(linuxdo_cookies)
+
+                if has_linuxdo_cookies and not isinstance(linuxdo_cookies, (dict, str)):
+                    print(f"❌ Account {i + 1} linux.do cookies must be a dictionary or string")
                     return None
 
-                # 验证字段不为空
-                if not auth_config["username"] or not auth_config["password"]:
-                    print(f"❌ Account {i + 1} linux.do username and password cannot be empty")
+                if isinstance(linuxdo_cookies, str) and not linuxdo_cookies.strip():
+                    has_linuxdo_cookies = False
+
+                if not has_credentials and not has_linuxdo_cookies:
+                    print(
+                        f"❌ Account {i + 1} linux.do configuration must contain either "
+                        f"username/password or cookies"
+                    )
                     return None
 
             # 验证 github 配置

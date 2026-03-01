@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from checkin import CheckIn
 from utils.config import AccountConfig, AppConfig
+from utils.linuxdo_cookies_override import apply_linuxdo_cookies_override
 from utils.notify import notify
 
 load_dotenv(override=True)
@@ -45,6 +46,10 @@ def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
         print(msg)
         return None, msg
 
+    overridden = apply_linuxdo_cookies_override(accounts_data, accounts_env_key="ACCOUNTS_KFC")
+    if overridden:
+        print(f"⚙️ Applied linux.do cookies override for {overridden} account(s) from LINUXDO_COOKIES")
+
     accounts: list[AccountConfig] = []
     for i, account in enumerate(accounts_data):
         if not isinstance(account, dict):
@@ -53,8 +58,17 @@ def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
             return None, msg
 
         linuxdo = account.get("linux.do")
-        if not isinstance(linuxdo, dict) or not linuxdo.get("username") or not linuxdo.get("password"):
-            msg = f"❌ Account {i + 1} missing linux.do credentials"
+        has_credentials = isinstance(linuxdo, dict) and bool(linuxdo.get("username") and linuxdo.get("password"))
+        cookies_cfg = linuxdo.get("cookies") if isinstance(linuxdo, dict) else None
+        has_cookie_auth = bool(cookies_cfg.strip()) if isinstance(cookies_cfg, str) else bool(cookies_cfg)
+
+        if has_cookie_auth and not isinstance(cookies_cfg, (dict, str)):
+            msg = f"❌ Account {i + 1} linux.do cookies must be a dictionary or string"
+            print(msg)
+            return None, msg
+
+        if not has_credentials and not has_cookie_auth:
+            msg = f"❌ Account {i + 1} missing linux.do credentials (username/password or cookies)"
             print(msg)
             return None, msg
 
@@ -241,4 +255,3 @@ def run_main() -> None:
 
 if __name__ == "__main__":
     run_main()
-

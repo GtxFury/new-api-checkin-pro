@@ -98,6 +98,7 @@ jobs:
     - name: 执行签到
       env:
         ACCOUNTS: ${{ secrets.ACCOUNTS }}
+        LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         PROXY: ${{secrets.PROXY}}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}

@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from camoufox.async_api import AsyncCamoufox
 
-from utils.browser_utils import filter_cookies
+from utils.browser_utils import filter_cookies, parse_cookies
 
 # 复用 sign_in_with_linuxdo 中的验证码解决方案
 try:
@@ -48,6 +48,21 @@ class FovtCheckIn:
         self.account_name = account_name
         self.safe_account_name = "".join(c if c.isalnum() else "_" for c in account_name)
         self.proxy_config = proxy_config
+
+    @staticmethod
+    def _linuxdo_cookie_dict_to_browser_cookies(cookie_dict: dict) -> list[dict]:
+        cookies: list[dict] = []
+        for name, value in (cookie_dict or {}).items():
+            cn = str(name or "").strip()
+            if not cn:
+                continue
+            cv = str(value)
+            if cn.startswith("__Host-"):
+                for url in ("https://linux.do", "https://connect.linux.do"):
+                    cookies.append({"name": cn, "value": cv, "url": url, "path": "/", "secure": True})
+                continue
+            cookies.append({"name": cn, "value": cv, "domain": ".linux.do", "path": "/", "secure": True})
+        return cookies
 
     async def _take_screenshot(self, page, reason: str) -> None:
         """截取当前页面截图"""
@@ -141,6 +156,9 @@ class FovtCheckIn:
         u = page.url or ""
         if "linux.do/login" not in u:
             return
+
+        if not (linuxdo_username and linuxdo_password):
+            raise RuntimeError("linux.do cookies 已失效，且未提供 username/password 作为兜底登录凭据")
 
         print(f"ℹ️ {self.account_name}: Detected linux.do login page, filling credentials...")
 
@@ -1391,6 +1409,7 @@ class FovtCheckIn:
         linuxdo_username: str,
         linuxdo_password: str,
         cache_file_path: str = "",
+        linuxdo_cookies: dict | str | None = None,
     ) -> tuple[bool, dict]:
         """执行 Fovt 签到"""
         print(f"\n\n⏳ 开始处理 {self.account_name}")
@@ -1438,6 +1457,15 @@ class FovtCheckIn:
                     print(f"ℹ️ {self.account_name}: No cache file found, starting fresh")
 
                 context = await browser.new_context(storage_state=storage_state)
+                linuxdo_cookie_dict = parse_cookies(linuxdo_cookies) if linuxdo_cookies else {}
+                if linuxdo_cookie_dict:
+                    try:
+                        await context.add_cookies(self._linuxdo_cookie_dict_to_browser_cookies(linuxdo_cookie_dict))
+                        print(
+                            f"ℹ️ {self.account_name}: Injected {len(linuxdo_cookie_dict)} linux.do cookies into browser context"
+                        )
+                    except Exception as e:
+                        print(f"⚠️ {self.account_name}: Failed to inject linux.do cookies: {e}")
                 page = await context.new_page()
 
                 try:

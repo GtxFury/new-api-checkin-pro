@@ -13,6 +13,7 @@ import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
+from utils.browser_utils import parse_cookies
 
 try:
 	from sign_in_with_linuxdo import solve_captcha, _should_try_turnstile_solver
@@ -53,6 +54,21 @@ class HybgzsCheckIn:
 		d = 'logs'
 		os.makedirs(d, exist_ok=True)
 		return d
+
+	@staticmethod
+	def _linuxdo_cookie_dict_to_browser_cookies(cookie_dict: dict) -> list[dict]:
+		cookies: list[dict] = []
+		for name, value in (cookie_dict or {}).items():
+			cn = str(name or '').strip()
+			if not cn:
+				continue
+			cv = str(value)
+			if cn.startswith('__Host-'):
+				for url in ('https://linux.do', 'https://connect.linux.do'):
+					cookies.append({'name': cn, 'value': cv, 'url': url, 'path': '/', 'secure': True})
+				continue
+			cookies.append({'name': cn, 'value': cv, 'domain': '.linux.do', 'path': '/', 'secure': True})
+		return cookies
 
 	async def _take_screenshot(self, page, name: str) -> None:
 		try:
@@ -103,6 +119,9 @@ class HybgzsCheckIn:
 		cur = getattr(page, 'url', '') or ''
 		if 'linux.do/login' not in cur:
 			return
+
+		if not (username and password):
+			raise RuntimeError('linux.do cookies 已失效，且未提供 username/password 作为兜底登录凭据')
 
 		await page.wait_for_timeout(800)
 
@@ -677,7 +696,12 @@ class HybgzsCheckIn:
 
 	# ── 主执行入口 ───────────────────────────────────────────
 
-	async def execute(self, username: str, password: str) -> tuple[bool, dict]:
+	async def execute(
+		self,
+		username: str,
+		password: str,
+		linuxdo_cookies: dict | str | None = None,
+	) -> tuple[bool, dict]:
 		"""执行完整签到流程"""
 		print(f'\n\n⏳ 开始处理 {self.account_name} (黑与白公益站)')
 
@@ -689,7 +713,12 @@ class HybgzsCheckIn:
 		headless = self._env_bool('HEADLESS', False)
 		storage_dir = Path('storage-states') / 'hybgzs'
 		storage_dir.mkdir(parents=True, exist_ok=True)
-		username_hash = hashlib.sha256(username.encode('utf-8')).hexdigest()[:8]
+		linuxdo_cookie_dict = parse_cookies(linuxdo_cookies) if linuxdo_cookies else {}
+		cookie_fingerprint = ",".join(
+			f"{str(k)}={str(v)}" for k, v in sorted((linuxdo_cookie_dict or {}).items(), key=lambda item: str(item[0]))
+		)
+		cache_id_source = username if username else f"cookie:{cookie_fingerprint}"
+		username_hash = hashlib.sha256(cache_id_source.encode('utf-8')).hexdigest()[:8]
 		cache_file = str(storage_dir / f'linuxdo_{username_hash}_storage_state.json')
 
 		async with AsyncCamoufox(
@@ -703,6 +732,12 @@ class HybgzsCheckIn:
 		) as browser:
 			storage_state = cache_file if os.path.exists(cache_file) else None
 			context = await browser.new_context(storage_state=storage_state)
+			if linuxdo_cookie_dict:
+				try:
+					await context.add_cookies(self._linuxdo_cookie_dict_to_browser_cookies(linuxdo_cookie_dict))
+					print(f'ℹ️ {self.account_name}: 已注入 {len(linuxdo_cookie_dict)} 个 linux.do cookies')
+				except Exception as e:
+					print(f'⚠️ {self.account_name}: 注入 linux.do cookies 失败: {e}')
 			page = await context.new_page()
 
 			results = {
@@ -763,7 +798,5 @@ class HybgzsCheckIn:
 					await context.close()
 				except Exception:
 					pass
-
-
 
 

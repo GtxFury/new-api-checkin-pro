@@ -4810,17 +4810,23 @@ class CheckIn:
 
     async def check_in_with_linuxdo(
         self,
-        username: str,
-        password: str,
+        username: str | None,
+        password: str | None,
         waf_cookies: dict,
+        linuxdo_cookies: dict | None = None,
     ) -> tuple[bool, dict]:
         """使用 Linux.do 账号执行签到操作
 
         Args:
-            username: Linux.do 用户名
-            password: Linux.do 密码
+            username: Linux.do 用户名（可选，作为 cookies 失效后的兜底）
+            password: Linux.do 密码（可选，作为 cookies 失效后的兜底）
             waf_cookies: WAF cookies
+            linuxdo_cookies: Linux.do cookies（可选）
         """
+        username = (username or "").strip()
+        password = (password or "").strip()
+        linuxdo_cookies = linuxdo_cookies or {}
+
         print(
             f"ℹ️ {self.account_name}: Executing check-in with Linux.do account (using proxy: {'true' if self.http_proxy_config else 'false'})"
         )
@@ -4872,8 +4878,12 @@ class CheckIn:
                 print(f"❌ {self.account_name}: {error_msg}")
                 return False, {"error": "Failed to get Linux.do auth state"}
 
-            # 生成缓存文件路径
-            username_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
+            # 生成缓存文件路径（优先用 username；cookies-only 场景用 cookie keys 做稳定区分）
+            cookie_fingerprint = ",".join(
+                f"{str(k)}={str(v)}" for k, v in sorted((linuxdo_cookies or {}).items(), key=lambda item: str(item[0]))
+            )
+            cache_id_source = username if username else f"cookie:{cookie_fingerprint}"
+            username_hash = hashlib.sha256(cache_id_source.encode("utf-8")).hexdigest()[:8]
             cache_file_path = f"{self.storage_state_dir}/linuxdo_{username_hash}_storage_state.json"
 
             from sign_in_with_linuxdo import LinuxDoSignIn
@@ -4890,6 +4900,7 @@ class CheckIn:
                 auth_state=auth_state_result["state"],
                 auth_cookies=auth_state_result.get("cookies", []),
                 cache_file_path=cache_file_path,
+                linuxdo_cookies=linuxdo_cookies,
             )
 
             # 如果 session verify 失败需要重试，重新获取 auth_state 并执行完整登录流程
@@ -4908,6 +4919,7 @@ class CheckIn:
                         auth_state=retry_auth_state_result["state"],
                         auth_cookies=retry_auth_state_result.get("cookies", []),
                         cache_file_path=cache_file_path,
+                        linuxdo_cookies=linuxdo_cookies,
                     )
                 else:
                     print(f"⚠️ {self.account_name}: Failed to get new auth_state for retry")
@@ -5022,6 +5034,7 @@ class CheckIn:
                                     auth_state=retry_auth_state_result["state"],
                                     auth_cookies=retry_auth_state_result.get("cookies", []),
                                     cache_file_path=cache_file_path,
+                                    linuxdo_cookies=linuxdo_cookies,
                                 )
                                 if success2 and "cookies" in result2 and "api_user" in result2:
                                     user_cookies = result2["cookies"]
@@ -5040,6 +5053,10 @@ class CheckIn:
 
                 # runanytime：控制台每日签到 + fuli 转盘兑换
                 if self.provider_config.name == "runanytime":
+                    if not username or not password:
+                        return False, {
+                            "error": "runanytime 在 linux.do cookies 模式下仍需 username/password 作为 fuli 登录兜底"
+                        }
                     return await self._runanytime_check_in_via_fuli_and_topup(
                         runanytime_cookies=user_cookies,
                         api_user=api_user,
@@ -5078,6 +5095,7 @@ class CheckIn:
                                 auth_state=retry_auth_state_result["state"],
                                 auth_cookies=retry_auth_state_result.get("cookies", []),
                                 cache_file_path=cache_file_path,
+                                linuxdo_cookies=linuxdo_cookies,
                             )
                             if success2 and "cookies" in result2 and "api_user" in result2:
                                 user_cookies2 = result2["cookies"]
@@ -5153,6 +5171,10 @@ class CheckIn:
 
                                 # runanytime：控制台每日签到 + fuli 转盘兑换
                                 if self.provider_config.name == "runanytime":
+                                    if not username or not password:
+                                        return False, {
+                                            "error": "runanytime 在 linux.do cookies 模式下仍需 username/password 作为 fuli 登录兜底"
+                                        }
                                     return await self._runanytime_check_in_via_fuli_and_topup(
                                         runanytime_cookies=user_cookies,
                                         api_user=api_user,
@@ -5190,6 +5212,7 @@ class CheckIn:
                                                 auth_state=retry_auth_state_result["state"],
                                                 auth_cookies=retry_auth_state_result.get("cookies", []),
                                                 cache_file_path=cache_file_path,
+                                                linuxdo_cookies=linuxdo_cookies,
                                             )
                                             if success2 and "cookies" in result2 and "api_user" in result2:
                                                 user_cookies2 = result2["cookies"]
@@ -5301,17 +5324,23 @@ class CheckIn:
         if linuxdo_info:
             print(f"\nℹ️ {self.account_name}: Trying Linux.do authentication")
             try:
-                username = linuxdo_info.get("username")
-                password = linuxdo_info.get("password")
-                if not username or not password:
+                username = (linuxdo_info.get("username") or "").strip()
+                password = (linuxdo_info.get("password") or "").strip()
+                linuxdo_cookies_raw = linuxdo_info.get("cookies")
+                linuxdo_cookies = parse_cookies(linuxdo_cookies_raw) if linuxdo_cookies_raw else {}
+
+                if not (username and password) and not linuxdo_cookies:
                     print(f"❌ {self.account_name}: Incomplete Linux.do account information")
-                    results.append(("linux.do", False, {"error": "Incomplete Linux.do account information"}))
+                    results.append(
+                        ("linux.do", False, {"error": "Incomplete Linux.do account information (need username/password or cookies)"})
+                    )
                 else:
-                    # 使用 Linux.do 账号执行签到
+                    # 使用 Linux.do 账号或 cookies 执行签到
                     success, user_info = await self.check_in_with_linuxdo(
-                        username,
-                        password,
+                        username or None,
+                        password or None,
                         waf_cookies,
+                        linuxdo_cookies=linuxdo_cookies,
                     )
                     if success:
                         print(f"✅ {self.account_name}: Linux.do authentication successful")

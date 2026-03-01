@@ -96,6 +96,7 @@ jobs:
     - name: 执行黑与白公益站签到
       env:
         ACCOUNTS_HYBGZS: ${{ secrets.ACCOUNTS_HYBGZS }}
+        LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
         HYBGZS_TRANSFER_THRESHOLD: ${{ secrets.HYBGZS_TRANSFER_THRESHOLD }}
         PROXY: ${{ secrets.PROXY }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}

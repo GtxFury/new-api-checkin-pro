@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse, quote, urlencode
 
 from camoufox.async_api import AsyncCamoufox
 
-from utils.browser_utils import filter_cookies
+from utils.browser_utils import filter_cookies, parse_cookies
 from utils.config import ProviderConfig
 from utils.redact import redact_url_for_log, redact_value_for_log
 
@@ -179,6 +179,56 @@ class LinuxDoSignIn:
 		self.provider_config = provider_config
 		self.username = username
 		self.password = password
+
+	@staticmethod
+	def _normalize_cookie_dict(raw_cookies: dict | str | None) -> dict:
+		"""规范化 linux.do cookies 输入（dict 或 Cookie 字符串）。"""
+		if not raw_cookies:
+			return {}
+		if isinstance(raw_cookies, dict):
+			return {
+				str(k).strip(): str(v)
+				for k, v in raw_cookies.items()
+				if str(k).strip() and v is not None
+			}
+		if isinstance(raw_cookies, str):
+			return parse_cookies(raw_cookies)
+		return {}
+
+	@staticmethod
+	def _linuxdo_cookie_dict_to_browser_cookies(cookie_dict: dict) -> list[dict]:
+		"""将 linux.do cookie 字典转换为浏览器可注入格式。"""
+		cookies: list[dict] = []
+		for name, value in (cookie_dict or {}).items():
+			cn = str(name or "").strip()
+			if not cn:
+				continue
+			cv = str(value)
+
+			# __Host- cookie 不能带 domain，使用 url 注入最稳。
+			if cn.startswith("__Host-"):
+				for url in ("https://linux.do", "https://connect.linux.do"):
+					cookies.append(
+						{
+							"name": cn,
+							"value": cv,
+							"url": url,
+							"path": "/",
+							"secure": True,
+						}
+					)
+				continue
+
+			cookies.append(
+				{
+					"name": cn,
+					"value": cv,
+					"domain": ".linux.do",
+					"path": "/",
+					"secure": True,
+				}
+			)
+		return cookies
 
 	@staticmethod
 	def _looks_like_cloudflare_interstitial_html(body: str) -> bool:
@@ -1073,6 +1123,7 @@ class LinuxDoSignIn:
 		auth_state: str,
 		auth_cookies: list,
 		cache_file_path: str = "",
+		linuxdo_cookies: dict | str | None = None,
 	) -> tuple[bool, dict]:
 		"""使用 Linux.do 账号执行登录授权并返回 provider cookies / api_user"""
 
@@ -1110,6 +1161,18 @@ class LinuxDoSignIn:
 				print(f"ℹ️ {self.account_name}: Set {len(auth_cookies)} auth cookies from provider")
 			else:
 				print(f"ℹ️ {self.account_name}: No auth cookies to set")
+
+			# 可选：注入 linux.do cookies，支持 cookies-only 登录流程（绕过手动输入账号密码）
+			try:
+				linuxdo_cookie_dict = self._normalize_cookie_dict(linuxdo_cookies)
+				linuxdo_browser_cookies = self._linuxdo_cookie_dict_to_browser_cookies(linuxdo_cookie_dict)
+				if linuxdo_browser_cookies:
+					await context.add_cookies(linuxdo_browser_cookies)
+					print(
+						f"ℹ️ {self.account_name}: Set {len(linuxdo_browser_cookies)} linux.do cookies into browser context"
+					)
+			except Exception as e:
+				print(f"⚠️ {self.account_name}: Failed to set linux.do cookies to browser context: {e}")
 
 			page = await context.new_page()
 
@@ -1299,6 +1362,12 @@ class LinuxDoSignIn:
 								await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
 							except Exception:
 								pass
+
+						# cookies-only 模式下若仍落到登录页，说明 cookies 失效且无法继续自动登录。
+						if not (self.username and self.password):
+							raise RuntimeError(
+								"linux.do cookies 可能已失效，且未提供 username/password 作为兜底登录凭据"
+							)
 
 						async def _set_value(selectors: list[str], value: str) -> bool:
 							for sel in selectors:

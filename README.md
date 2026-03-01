@@ -31,6 +31,8 @@
 5. 点击 "Add environment secret" 创建 secret：
    - Name: `ACCOUNTS`
    - Value: 你的多账号配置数据
+   - Name: `LINUXDO_COOKIES`（可选，统一覆盖 linux.do cookies，优先级高于账号内 `linux.do.cookies`）
+   - Value: 见下方“linux.do cookies 独立环境变量”
 
 ### 3. 多账号配置格式
 > 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称。  
@@ -83,8 +85,64 @@
   - `anyrouter` / `agentrouter`：对应请求头 `new-api-user` 的值  
   - `runanytime`：对应请求头 `new-api-user`（或旧实现的 `Veloera-User`）的值（内部登录流程会自动获取，通常无需手动填写）
 - `linux.do`(可选)：用于登录身份验证
-  - `username`: 用户名
-  - `password`: 密码
+  - 方式一：账号密码
+    - `username`: 用户名
+    - `password`: 密码
+  - 方式二：`cookies`（可直接复用已登录会话，支持对象或 `a=b; c=d` 字符串）
+  - 可同时提供 `username/password + cookies`，当 cookies 失效时自动回退账号密码登录
+  - `runanytime` 建议始终保留 `username/password` 作为福利站流程兜底
+
+#### `linux.do` cookies 独立环境变量（`LINUXDO_COOKIES`）
+
+当设置 `LINUXDO_COOKIES` 时，所有签到工作流会优先注入此变量中的 cookies。
+
+支持三种格式：
+
+1) 当前工作流全部账号共用同一份 cookies（字符串 / 对象 / 浏览器导出数组）：
+
+```json
+"_t=xxx; _forum_session=yyy"
+```
+
+```json
+{
+  "_t": "xxx",
+  "_forum_session": "yyy"
+}
+```
+
+```json
+[
+  {"name": "_t", "value": "xxx"},
+  {"name": "_forum_session", "value": "yyy"}
+]
+```
+
+2) 当前工作流按账号索引覆盖（从 0 开始）：
+
+```json
+[
+  {"_t": "acc1_t", "_forum_session": "acc1_s"},
+  {"_t": "acc2_t", "_forum_session": "acc2_s"}
+]
+```
+
+3) 多工作流分别配置（按账号环境变量名分组）：
+
+```json
+{
+  "ACCOUNTS": {"_t": "main_t", "_forum_session": "main_s"},
+  "ACCOUNTS_KFC": {"_t": "kfc_t", "_forum_session": "kfc_s"},
+  "ACCOUNTS_X666": [
+    {"_t": "x1_t", "_forum_session": "x1_s"},
+    {"_t": "x2_t", "_forum_session": "x2_s"}
+  ]
+}
+```
+
+说明：
+- 若账号内同时配置了 `linux.do` 的账号密码，cookies 失效时仍会回退账号密码登录（`runanytime` 建议保留账号密码）。
+- `LINUXDO_COOKIES` 未设置时，仍按账号配置中的 `linux.do` 进行登录。
 - `github`(可选)：用于登录身份验证
   - `username`: 用户名
   - `password`: 密码
@@ -222,6 +280,7 @@
 
 说明：
 - 目前 x666 签到已改为：访问 `https://qd.x666.me/` -> 右上角用 `linux.do` 登录 -> 点击“签到” -> 再登录 `https://x666.me/` 获取余额。
+- `linux.do` 支持账号密码或 cookies；也可通过 `LINUXDO_COOKIES` 对 `ACCOUNTS_X666` 统一覆盖。
 - 旧版 `access_token/cookies/api_user` 仍保留兼容，但站点改版后可能无法使用。
 
 - 可以在 Actions 页面查看详细的运行日志
@@ -234,7 +293,7 @@
 - 入口脚本：`main_kfc.py`
 - Workflow：`.github/workflows/kfc.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_KFC`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "kfc"`（未填写时 `main_kfc.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_KFC`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "kfc"`（未填写时 `main_kfc.py` 会自动补全）。
 
 ## neb（独立签到）
 
@@ -242,7 +301,7 @@
 - 入口脚本：`main_neb.py`
 - Workflow：`.github/workflows/neb.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_NEB`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "neb"`（未填写时 `main_neb.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_NEB`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "neb"`（未填写时 `main_neb.py` 会自动补全）。
 
 ## huan（独立签到）
 
@@ -250,7 +309,7 @@
 - 入口脚本：`main_huan.py`
 - Workflow：`.github/workflows/huan.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_HUAN`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "huan"`（未填写时 `main_huan.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_HUAN`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "huan"`（未填写时 `main_huan.py` 会自动补全）。
 
 ## taizi（太子公益站）（独立签到）
 
@@ -258,7 +317,7 @@
 - 入口脚本：`main_taizi.py`
 - Workflow：`.github/workflows/taizi.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_TAIZI`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "taizi"`（未填写时 `main_taizi.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_TAIZI`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "taizi"`（未填写时 `main_taizi.py` 会自动补全）。
 
 ## mu（Mu.API）（独立签到）
 
@@ -266,7 +325,7 @@
 - 入口脚本：`main_mu.py`
 - Workflow：`.github/workflows/mu.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_MU`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "mu"`（未填写时 `main_mu.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_MU`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "mu"`（未填写时 `main_mu.py` 会自动补全）。
 
 ## daiju（小呆公益站）（独立签到）
 
@@ -274,7 +333,7 @@
 - 入口脚本：`main_daiju.py`
 - Workflow：`.github/workflows/daiju.yml`
 
-配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_DAIJU`，格式参考 `ACCOUNTS`（需提供 `linux.do` 账号密码），并在账号配置中使用 `provider: "daiju"`（未填写时 `main_daiju.py` 会自动补全）。
+配置方式：在 `production` 的 Environment secrets 中新增 `ACCOUNTS_DAIJU`，格式参考 `ACCOUNTS`（可提供 `linux.do` 账号密码或 cookies，或通过 `LINUXDO_COOKIES` 覆盖），并在账号配置中使用 `provider: "daiju"`（未填写时 `main_daiju.py` 会自动补全）。
 
 ## gemai（哈基米API站）（独立签到）
 
