@@ -119,6 +119,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           HCAPTCHA_OPENAI: ${{ secrets.HCAPTCHA_OPENAI }}
+          LINUXDO_STORAGE_STATES: ${{ secrets.LINUXDO_STORAGE_STATES }}
         run: |
           uv run python -u linuxdo_read_like.py
 

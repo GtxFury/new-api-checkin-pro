@@ -1,0 +1,56 @@
+{
+  "key": "E1_eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.hKNleHDOaaSLp6RkYXRhxHNY8MXppOl2tY0nDabfu2lSYXNIPohwNU8vQ6tO2ubpegQqW3RZxkFUGnQngkna7s_wWBpG0IHYlLpY1cVTrKSAHRsIfZ41--Kc4B9mOCHw5wg6OjMuen5usApsz6-hR0OJ6tn4sC0fWsSWmjJlEwuAJqahomtyqDI5ZjE0OTNhqHNoYXJkX2lkzhWZ5FQ.M1ZY0jZlGk2Cz653RpYRYStU-9S7UfjokSjk69_jW7E",
+  "request_config": {
+    "version": 0,
+    "shape_type": "point",
+    "min_points": null,
+    "max_points": null,
+    "min_shapes_per_image": 1,
+    "max_shapes_per_image": 4,
+    "restrict_to_coords": null,
+    "minimum_selection_area_per_shape": null,
+    "multiple_choice_max_choices": 1,
+    "multiple_choice_min_choices": 1,
+    "overlap_threshold": null,
+    "answer_type": "str",
+    "max_value": null,
+    "min_value": null,
+    "max_length": null,
+    "min_length": null,
+    "sig_figs": null,
+    "keep_answers_order": null,
+    "ignore_case": false,
+    "new_translation": true
+  },
+  "request_type": "image_label_area_select",
+  "requester_question": {
+    "zh": "选择所有与参考动物有相同腿数的动物",
+    "en": "Choose all animals that have the same number of legs as the reference"
+  },
+  "requester_restricted_answer_set": {
+    "default": {
+      "en": "default"
+    }
+  },
+  "requester_question_example": [
+    "https://imgs.hcaptcha.com/J6qmXJ-RbUs1lJk5rqaLqSdmEXvnxe3pLTa1yoy8FBMBiWI9DbmS3TZCGl6_8DJGF-IKe2Mbueio5IbTzMLzX3te0lQ984AlDwBgg4wo1GCdniNML0EcGDF8cIFvJGAC7uX5bLRTf4T_-gsYKVt8NoYTZoZs0J9K2CfxrBAC_tyzuKJHo69eRiZA7yiI0xQpiG1qAQdp7UKtSxjWnOhflFZI7OSaUQQz0k9fQ799kIirp8W2YaIXsmBFvIBm7XpsWrxuFZiO4kMgKpW0qD8KG6ghg2xuhlniofJj50xUiwQ9IW6G8CsGRR-t3dS5C-39jws3ujOO0NjnqcFrTWR6YJJLo8cZd6K7XKtStM7sXvwIqZEPvHwpxPpjxvSfFFb0e53EYe1oDCTmlQEdZfKtuFltUFxizkw9NGlXMQU81AA88l-nLDD0Vo"
+  ],
+  "tasklist": [
+    {
+      "datapoint_uri": "https://imgs3.hcaptcha.com/tip/7c2ad6e21ad5efd5ae00898b6fa9ddf17c99d6959ab197a105e32bd9f62e2da9/0807b3a0aac28ce4fa30e7f003ae732dbb898bc69bcb8a125d425fe3b2978d4d.jpeg",
+      "task_key": "a9a1c135-7fe5-494d-801f-c1a08dc00789",
+      "entities": []
+    },
+    {
+      "datapoint_uri": "https://imgs3.hcaptcha.com/tip/c691f6cd99971ad3ac7e30823222bf6adc85a5e85416f1b7d8963ee67d243984/10a837952640f379e82cabdc451f911337cbb030ff29ffa3683c18f1615c056e.jpeg",
+      "task_key": "d9624482-655a-4454-92be-af98c400909b",
+      "entities": []
+    }
+  ],
+  "oby": "v2:QEmYHu4783KSg/Opq/INLDhjMzI5NDkzMrIi+tKc3dOE+ui7TC0Da901AfBYabgqp6EFMidy3RYWNgVpBL6gez6Y4EOiBjZvIdqb8ZjO4V5CprVcpP/5V+4QpH7l2x2MeyQRBkn+vIRKHlKk17sfyxTFlcDHaQHmSzxyfmL7UpIbdWX+8oJ/0JqG0gUHyW1bdnWgpf7sFpk=",
+  "normalized": true,
+  "c": {
+    "req": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJmIjowLCJzIjoyLCJ0IjoidyIsImQiOiJtWGhZa3diWGtRZzNUa3NvV0hqR0hyNnlXTDZFVEh6QUE0K2theTZYQ2RkMm9GT1hLTWNqVHhBRXEvT0FuM0hlekJzSlYzNXBXK3B4VlloVitmckJreUhuRERyV1c0R2tBQVE0eVozNE9sYjIveWh0aVE5Tm0wMXNSdEdqd2FobGdtU2ZSVVBvbVR6M0o5ZC9KT0NPZU1IR1hocWtNQXF0QzQ4ZkluQUNWYjRRSWhiWHd3N3ZVdEJ1YVFoR0dxQjBIN3ZoNkhIUzg3N2pYRTBObkN1VFlnRFFPNjl1ZG00cEpKVXl3bmdDaE5YOUpEUkxlaUowY3RZRHR4d2ZKUG5pZmhMNkpDRnBRV3hLcGtZPW1FWEU0Umx2eEIrTEM0RFIiLCJsIjoiL2MvNDdkY2Q5NDE3Nzk1YmRjZGRkOWRhMWQ0MzA2NGU3OGY3YmJiZjhiODRlM2JhZDE4NjIyOTJjNWIzZWI5YWEzMSIsImkiOiJzaGEyNTYtRHZadWpqVFhOSkJzU1kwaGV6RUYxVUV5WWIwZjh6Tm11K3cwNXc5ME5nND0iLCJlIjoxNzcyMzk0ODE2LCJuIjoiaHN3IiwiYyI6MTAwMH0.24t1l0Rzz8WsnrFuSCISp8OGQXIwJOv6QbSzijuF2Xg",
+    "type": "hsw"
+  }
+}

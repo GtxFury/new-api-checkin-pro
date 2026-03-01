@@ -132,6 +132,8 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 			SPATIAL_PATH_REASONER_MODEL="gemini-2.5-flash",
 			CHALLENGE_CLASSIFIER_MODEL="gemini-2.5-flash",
 			DISABLE_BEZIER_TRAJECTORY=True,
+			EXECUTION_TIMEOUT=300,  # default 120s is too short for slow model APIs
+			WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS=800,  # default 1500ms, reduce to save time for model calls
 		)
 
 		# When using OpenAI provider, AgentConfig still validates GEMINI_API_KEY
@@ -222,6 +224,72 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 			return result
 
 		agent.wait_for_challenge = _logged_wait
+
+		# 4) Fix: patch challenge_image_label_select to use more reliable clicking
+		#    Camoufox humanize mode can swallow the last mouse.click, so use
+		#    explicit move → down → up with longer delays between points.
+		_orig_label_select = _arm.challenge_image_label_select
+
+		async def _reliable_label_select(job_type):
+			from contextlib import suppress as _suppress
+			from playwright.async_api import TimeoutError as _TE
+
+			frame_challenge = await _arm.get_challenge_frame_locator()
+			crumb_count = await _arm.check_crumb_count()
+			cache_key = _arm.config.create_cache_key(_arm.captcha_payload)
+
+			# Log challenge-view bbox for coordinate debugging
+			challenge_view = frame_challenge.locator("//div[@class='challenge-view']")
+			cv_bbox = await challenge_view.bounding_box()
+			print(f"🔍 {prefix}challenge-view bbox: {cv_bbox}")
+
+			for cid in range(crumb_count):
+				await _arm.page.wait_for_timeout(_arm.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+				raw, projection = await _arm._capture_spatial_mapping(frame_challenge, cache_key, cid)
+				user_prompt = _arm._match_user_prompt(job_type)
+				response = await _arm._spatial_point_reasoner(
+					challenge_screenshot=raw,
+					grid_divisions=projection,
+					auxiliary_information=user_prompt,
+				)
+				print(f"🔍 {prefix}[{cid+1}/{crumb_count}] Points to click: {[(p.x, p.y) for p in response.points]}")
+				_arm._spatial_point_reasoner.cache_response(
+					path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
+				)
+
+				for i, point in enumerate(response.points):
+					# Bounds check: skip points outside challenge-view
+					if cv_bbox:
+						if (point.x < cv_bbox['x'] - 5
+							or point.x > cv_bbox['x'] + cv_bbox['width'] + 5
+							or point.y < cv_bbox['y'] - 5
+							or point.y > cv_bbox['y'] + cv_bbox['height'] + 5):
+							print(f"⚠️ {prefix}  Point {i+1} ({point.x}, {point.y}) is OUTSIDE challenge-view, skipping!")
+							continue
+
+					# Explicit move → down → up is more reliable than mouse.click
+					await _arm.page.mouse.move(point.x, point.y)
+					await _arm.page.wait_for_timeout(100)
+					await _arm.page.mouse.down()
+					await _arm.page.wait_for_timeout(150)
+					await _arm.page.mouse.up()
+					print(f"🔍 {prefix}  Clicked point {i+1}/{len(response.points)}: ({point.x}, {point.y})")
+					await _arm.page.wait_for_timeout(300)
+
+				# Extra wait before submit to ensure last click registers
+				await _arm.page.wait_for_timeout(200)
+
+				# {{ Verify }}
+				with _suppress(_TE):
+					submit_btn = frame_challenge.locator("//div[@class='button-submit button']")
+					sb_bbox = await submit_btn.bounding_box()
+					print(f"🔍 {prefix}  Submit button bbox: {sb_bbox}")
+					if sb_bbox:
+						await _arm.click_by_mouse(submit_btn)
+					else:
+						print(f"⚠️ {prefix}  Submit button not found/visible, skipping!")
+
+		_arm.challenge_image_label_select = _reliable_label_select
 
 		# Click the hCaptcha checkbox to trigger the challenge
 		print(f"ℹ️ {prefix}Clicking hCaptcha checkbox...")

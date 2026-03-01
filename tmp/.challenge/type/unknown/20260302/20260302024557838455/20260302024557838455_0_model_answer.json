@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-6a2b5207-d5bc-440f-be6c-fa61b42f5508",
+  "object": "chat.completion",
+  "created": 1772390758,
+  "model": "gemini-3.1-pro-preview",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "```json\n{\n  \"challenge_prompt\": \"选择所有与参考动物有相同腿数的动物\",\n  \"points\": [\n    {\n      \"x\": 644,\n      \"y\": 241\n    },\n    {\n      \"x\": 501,\n      \"y\": 390\n    },\n    {\n      \"x\": 608,\n      \"y\": 439\n    },\n    {\n      \"x\": 715,\n      \"y\": 439\n    },\n    {\n      \"x\": 823,\n      \"y\": 390\n    }\n  ]\n}\n```",
+        "reasoning_content": "**Analyzing Animal Attributes**\n**Evaluating Object Selection**\n**Calculating Candidate Locations**\n**Identifying Optimal Points**\n**Selecting Confirmed Coordinates**\n**Selecting the Final Targets**\n**Verifying Final Selections**\n**Concluding Selections and JSON**\n**Confirming the Selections**\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  }
+}
