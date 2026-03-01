@@ -9,3 +9,5 @@ storage-states
 logs
 balance_hash.txt
 nul
+# Generated secrets
+linuxdot_secret.txt

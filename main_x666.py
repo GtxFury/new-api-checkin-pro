@@ -17,6 +17,9 @@ from utils.notify import notify
 
 load_dotenv(override=True)
 
+from utils.restore_linuxdot import restore_linuxdot
+restore_linuxdot()
+
 BALANCE_HASH_FILE = 'balance_hash_x666.txt'
 CACHE_DIR = os.path.join('storage-states', 'x666')
 
