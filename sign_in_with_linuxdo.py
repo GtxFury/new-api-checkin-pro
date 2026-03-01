@@ -149,6 +149,49 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 		if _use_openai and patch_agent_with_openai is not None:
 			patch_agent_with_openai(agent)
 
+		# Monkey-patch challenge methods to capture screenshots after each submit
+		_screenshots_dir = Path("screenshots")
+		_screenshots_dir.mkdir(exist_ok=True)
+		_arm = agent.robotic_arm
+
+		_orig_binary = _arm.challenge_image_label_binary
+		_orig_drag = _arm.challenge_image_drag_drop
+		_orig_select = _arm.challenge_image_label_select
+
+		async def _wrap_binary():
+			await _orig_binary()
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			ss = _screenshots_dir / f"{prefix.strip()}{ts}_hcaptcha_binary_submit.png"
+			try:
+				await page.screenshot(path=str(ss))
+				print(f"📸 {prefix}hCaptcha screenshot (binary): {ss}")
+			except Exception:
+				pass
+
+		async def _wrap_drag(job_type):
+			await _orig_drag(job_type)
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			ss = _screenshots_dir / f"{prefix.strip()}{ts}_hcaptcha_drag_submit.png"
+			try:
+				await page.screenshot(path=str(ss))
+				print(f"📸 {prefix}hCaptcha screenshot (drag): {ss}")
+			except Exception:
+				pass
+
+		async def _wrap_select(job_type):
+			await _orig_select(job_type)
+			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+			ss = _screenshots_dir / f"{prefix.strip()}{ts}_hcaptcha_select_submit.png"
+			try:
+				await page.screenshot(path=str(ss))
+				print(f"📸 {prefix}hCaptcha screenshot (select): {ss}")
+			except Exception:
+				pass
+
+		_arm.challenge_image_label_binary = _wrap_binary
+		_arm.challenge_image_drag_drop = _wrap_drag
+		_arm.challenge_image_label_select = _wrap_select
+
 		# Click the hCaptcha checkbox to trigger the challenge
 		print(f"ℹ️ {prefix}Clicking hCaptcha checkbox...")
 		await agent.robotic_arm.click_checkbox()
