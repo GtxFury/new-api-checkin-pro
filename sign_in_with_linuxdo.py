@@ -157,12 +157,13 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 		_arm = agent.robotic_arm
 		_orig_click = _arm.click_by_mouse
 		_click_counter = [0]  # mutable counter
+		_safe_prefix = prefix.strip().replace(":", "").replace(" ", "_")  # avoid Windows drive letter issue
 
 		async def _click_with_screenshot(locator):
 			await _orig_click(locator)
 			_click_counter[0] += 1
 			ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-			ss = _screenshots_dir / f"{prefix.strip()}{ts}_hcaptcha_click_{_click_counter[0]}.png"
+			ss = _screenshots_dir / f"{_safe_prefix}_{ts}_hcaptcha_click_{_click_counter[0]}.png"
 			try:
 				await page.screenshot(path=str(ss))
 				print(f"📸 {prefix}hCaptcha click #{_click_counter[0]} screenshot: {ss}")
