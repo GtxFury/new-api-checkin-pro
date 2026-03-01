@@ -172,19 +172,77 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 
 		_arm.click_by_mouse = _click_with_screenshot
 
+		# ----- Additional debug logging via monkey-patching -----
+		# 1) Log every checkcaptcha / getcaptcha response
+		_orig_task_handler = agent._task_handler
+
+		async def _logged_task_handler(response):
+			url = response.url
+			if "/checkcaptcha/" in url:
+				try:
+					data = await response.json()
+					is_pass = data.get("pass", False)
+					print(f"🔍 {prefix}checkcaptcha response: pass={is_pass}")
+					if not is_pass:
+						print(f"🔍 {prefix}checkcaptcha details: {str(data)[:300]}")
+				except Exception as e:
+					print(f"🔍 {prefix}checkcaptcha parse error: {e}")
+			elif "/getcaptcha/" in url:
+				print(f"🔍 {prefix}getcaptcha response received (status={response.status})")
+			await _orig_task_handler(response)
+
+		# Replace page response handler
+		agent.page.remove_listener("response", agent._task_handler)
+		agent._task_handler = _logged_task_handler
+		agent.page.on("response", _logged_task_handler)
+
+		# 2) Log _solve_captcha attempts
+		_orig_solve = agent._solve_captcha
+		_solve_counter = [0]
+
+		async def _logged_solve():
+			_solve_counter[0] += 1
+			print(f"🔍 {prefix}_solve_captcha attempt #{_solve_counter[0]}")
+			result = await _orig_solve()
+			print(f"🔍 {prefix}_solve_captcha attempt #{_solve_counter[0]} returned")
+			return result
+
+		agent._solve_captcha = _logged_solve
+
+		# 3) Log wait_for_challenge result
+		_orig_wait = agent.wait_for_challenge
+		_wait_counter = [0]
+
+		async def _logged_wait():
+			_wait_counter[0] += 1
+			print(f"🔍 {prefix}wait_for_challenge call #{_wait_counter[0]}")
+			result = await _orig_wait()
+			result_name = getattr(result, 'name', str(result))
+			print(f"🔍 {prefix}wait_for_challenge call #{_wait_counter[0]} → {result_name}")
+			return result
+
+		agent.wait_for_challenge = _logged_wait
+
 		# Click the hCaptcha checkbox to trigger the challenge
 		print(f"ℹ️ {prefix}Clicking hCaptcha checkbox...")
 		await agent.robotic_arm.click_checkbox()
 
 		# Wait for challenge to appear and solve it
 		print(f"ℹ️ {prefix}Waiting for hCaptcha challenge and solving...")
-		await agent.wait_for_challenge()
+		challenge_result = await agent.wait_for_challenge()
 
-		# Log challenge results
+		# Import ChallengeSignal to check the result
+		from hcaptcha_challenger.models import ChallengeSignal
+
+		# Log challenge results based on actual outcome
 		if agent.cr_list:
-			print(f"ℹ️ {prefix}hCaptcha challenge completed, {len(agent.cr_list)} round(s)")
+			print(f"✅ {prefix}hCaptcha challenge passed, {len(agent.cr_list)} round(s)")
+		elif challenge_result == ChallengeSignal.SUCCESS:
+			print(f"✅ {prefix}hCaptcha auto-passed (no image challenge needed)")
 		else:
-			print(f"ℹ️ {prefix}hCaptcha may have auto-passed (no image challenge needed)")
+			signal_name = getattr(challenge_result, 'name', str(challenge_result))
+			print(f"❌ {prefix}hCaptcha challenge FAILED (result={signal_name})")
+			return False
 
 		# Wait for hCaptcha callback to complete
 		await page.wait_for_timeout(2000)
