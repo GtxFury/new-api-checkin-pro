@@ -1783,6 +1783,31 @@ class CheckIn:
                 return False, "点击签到失败"
 
         await page.wait_for_timeout(1200)
+
+        # 签到后可能弹出 Cloudflare Security Check 弹窗（模态框内嵌 Turnstile checkbox）
+        try:
+            # 等待 turnstile iframe 出现（最多 5 秒）
+            try:
+                await page.wait_for_selector(
+                    'iframe[src*="challenges.cloudflare.com"]',
+                    timeout=5000,
+                )
+                print(f"ℹ️ {self.account_name}: CF Turnstile Security Check popup detected, solving...")
+            except Exception:
+                pass  # 没有弹窗，正常继续
+
+            cf_iframe = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+            if cf_iframe:
+                # 用 playwright-captcha 解决 turnstile
+                if linuxdo_solve_captcha is not None:
+                    await linuxdo_solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+                    await page.wait_for_timeout(3000)
+                    print(f"✅ {self.account_name}: CF Turnstile solved via playwright-captcha")
+                else:
+                    print(f"⚠️ {self.account_name}: playwright-captcha not available, cannot solve turnstile")
+        except Exception as cf_err:
+            print(f"⚠️ {self.account_name}: CF Turnstile after check-in: {cf_err}")
+
         for _ in range(10):
             try:
                 status_after = await self._newapi_get_check_in_status_via_browser(page, origin, api_user)
@@ -2071,6 +2096,53 @@ class CheckIn:
                             return False, "点击签到失败"
 
                     await run_page.wait_for_timeout(1200)
+
+                    # 签到后弹出 CF Turnstile Security Check 弹窗
+                    try:
+                        # 多种方式检测 Turnstile
+                        turnstile_selectors = [
+                            'iframe[src*="challenges.cloudflare.com"]',
+                            '.cf-turnstile',
+                            'input[name="cf-turnstile-response"]',
+                            'iframe[src*="turnstile"]',
+                        ]
+                        cf_found = False
+                        for sel in turnstile_selectors:
+                            try:
+                                await run_page.wait_for_selector(sel, timeout=3000)
+                                cf_found = True
+                                print(f"ℹ️ {self.account_name}: CF Turnstile detected via: {sel}")
+                                break
+                            except Exception:
+                                continue
+
+                        if not cf_found:
+                            # Debug: 检查页面上有无 Security Check 弹窗
+                            try:
+                                has_security = await run_page.evaluate("""() => {
+                                    const text = document.body?.innerText || '';
+                                    const hasDialog = !!document.querySelector('dialog, [role="dialog"], .modal');
+                                    const hasSecCheck = text.includes('Security Check') || text.includes('确认您是真人');
+                                    const iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src || f.getAttribute('src') || '');
+                                    return { hasDialog, hasSecCheck, iframes: iframes.slice(0, 5) };
+                                }""")
+                                if has_security and (has_security.get("hasDialog") or has_security.get("hasSecCheck")):
+                                    print(f"ℹ️ {self.account_name}: Security Check dialog detected! iframes: {has_security.get('iframes')}")
+                                    cf_found = True
+                            except Exception:
+                                pass
+
+                        if cf_found:
+                            print(f"ℹ️ {self.account_name}: Solving CF Turnstile...")
+                            if linuxdo_solve_captcha is not None:
+                                await linuxdo_solve_captcha(run_page, captcha_type="cloudflare", challenge_type="turnstile")
+                                await run_page.wait_for_timeout(5000)
+                                print(f"✅ {self.account_name}: CF Turnstile solved")
+                            else:
+                                print(f"⚠️ {self.account_name}: playwright-captcha not available")
+                    except Exception as cf_err:
+                        print(f"⚠️ {self.account_name}: CF Turnstile after check-in: {cf_err}")
+
                     for _ in range(10):
                         try:
                             status_after = await _run_get_check_in_status_via_browser()
@@ -4875,37 +4947,6 @@ class CheckIn:
             # 生成缓存文件路径
             username_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
             cache_file_path = f"{self.storage_state_dir}/linuxdo_{username_hash}_storage_state.json"
-
-            # If LINUXDO_T env var is set, pre-generate storage state to skip login.
-            # Format: single value "xxx" or multi-account "user1:xxx,user2:yyy"
-            # Get _t from F12 → Application → Cookies → linux.do → _t
-            _t_env = os.getenv("LINUXDO_T", "").strip()
-            _t_cookie = ""
-            if _t_env:
-                if ":" in _t_env:
-                    # Multi-account: username:_t_value,username2:_t_value2
-                    for pair in _t_env.split(","):
-                        pair = pair.strip()
-                        if ":" in pair:
-                            u, t = pair.split(":", 1)
-                            if u.strip() == username:
-                                _t_cookie = t.strip()
-                                break
-                else:
-                    # Single value: all accounts share one _t
-                    _t_cookie = _t_env
-            if _t_cookie and not os.path.exists(cache_file_path):
-                os.makedirs(self.storage_state_dir, exist_ok=True)
-                state = {
-                    "cookies": [
-                        {"name": "_t", "value": _t_cookie, "domain": "linux.do", "path": "/",
-                         "secure": True, "httpOnly": True, "sameSite": "Lax"},
-                    ],
-                    "origins": [],
-                }
-                with open(cache_file_path, "w", encoding="utf-8") as f:
-                    json.dump(state, f, ensure_ascii=False)
-                print(f"ℹ️ {self.account_name}: Pre-generated storage state from LINUXDO_T")
 
             from sign_in_with_linuxdo import LinuxDoSignIn
 

@@ -774,6 +774,18 @@ class LinuxDoSignIn:
 				print(f"ℹ️ {self.account_name}: Clicking daily check-in button in browser")
 				await checkin_btn.click()
 
+				# 签到后可能弹出 CF Turnstile Security Check 弹窗
+				await page.wait_for_timeout(1500)
+				try:
+					cf_iframe = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+					if cf_iframe:
+						print(f"ℹ️ {self.account_name}: CF Turnstile popup after check-in, solving...")
+						await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+						await page.wait_for_timeout(3000)
+						print(f"✅ {self.account_name}: CF Turnstile solved")
+				except Exception as cf_err:
+					print(f"⚠️ {self.account_name}: CF Turnstile after check-in: {cf_err}")
+
 				# 等待状态变为“今日已签到”
 				try:
 					await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
