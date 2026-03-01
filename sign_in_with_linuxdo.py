@@ -44,6 +44,15 @@ except Exception as e2:  # pragma: no cover
 	HCAPTCHA_CHALLENGER_AVAILABLE = False
 	print(f"⚠️ LinuxDoSignIn: hcaptcha-challenger not available: {e2!r}")
 
+# OpenAI-compatible provider for hcaptcha-challenger (supports GPT-5.2 etc.)
+try:
+	from utils.openai_hcaptcha_provider import get_openai_config, patch_agent_with_openai
+	_OPENAI_HCAPTCHA_AVAILABLE = True
+except Exception:  # pragma: no cover
+	get_openai_config = None  # type: ignore[assignment]
+	patch_agent_with_openai = None  # type: ignore[assignment]
+	_OPENAI_HCAPTCHA_AVAILABLE = False
+
 
 def _should_try_turnstile_solver() -> bool:
 	# 默认开启：若需要关闭请设 LINUXDO_TRY_TURNSTILE_SOLVER=0/false/no/off
@@ -108,12 +117,17 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 	print(f"ℹ️ {prefix}hCaptcha detected, solving via hcaptcha-challenger...")
 
 	try:
-		# Initialize AgentConfig (GEMINI_API_KEY is read from env automatically)
-		# Override default models: gemini-2.5-pro requires paid account,
-		# use gemini-2.5-flash which is available on the free tier.
+		# Check if OpenAI-compatible provider is configured
+		_use_openai = (
+			_OPENAI_HCAPTCHA_AVAILABLE
+			and get_openai_config is not None
+			and get_openai_config() is not None
+		)
+
+		# Build AgentConfig kwargs
 		# DISABLE_BEZIER_TRAJECTORY: Camoufox has its own humanize mode,
 		# disable hcaptcha-challenger's built-in Bezier trajectory to avoid conflicts.
-		agent_config = AgentConfig(
+		config_kwargs = dict(
 			IMAGE_CLASSIFIER_MODEL="gemini-2.5-flash",
 			SPATIAL_POINT_REASONER_MODEL="gemini-2.5-flash",
 			SPATIAL_PATH_REASONER_MODEL="gemini-2.5-flash",
@@ -121,8 +135,19 @@ async def solve_hcaptcha(page, account_name: str = "") -> bool:
 			DISABLE_BEZIER_TRAJECTORY=True,
 		)
 
+		# When using OpenAI provider, AgentConfig still validates GEMINI_API_KEY
+		# but we won't actually use it — supply a placeholder so init succeeds.
+		if _use_openai and not os.getenv("GEMINI_API_KEY"):
+			config_kwargs["GEMINI_API_KEY"] = "openai-mode-placeholder"
+
+		agent_config = AgentConfig(**config_kwargs)
+
 		# Create AgentV instance
 		agent = AgentV(page=page, agent_config=agent_config)
+
+		# If OpenAI provider is configured, replace Gemini with it
+		if _use_openai and patch_agent_with_openai is not None:
+			patch_agent_with_openai(agent)
 
 		# Click the hCaptcha checkbox to trigger the challenge
 		print(f"ℹ️ {prefix}Clicking hCaptcha checkbox...")
