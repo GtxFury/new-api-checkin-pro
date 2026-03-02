@@ -234,7 +234,7 @@ class AppConfig:
             ),
             "hotaru": ProviderConfig(
                 name="hotaru",
-                origin="https://api.hotaruapi.top",
+                origin="https://hotaruapi.com",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
@@ -392,7 +392,7 @@ class AppConfig:
             # 兼容旧名称：ccode（有间公益）当前已迁移为 hotaru
             "ccode": ProviderConfig(
                 name="ccode",
-                origin="https://api.hotaruapi.top",
+                origin="https://hotaruapi.com",
                 login_path="/login",
                 status_path="/api/status",
                 auth_state_path="/api/oauth/state",
