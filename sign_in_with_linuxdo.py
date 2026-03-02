@@ -284,6 +284,12 @@ class LinuxDoSignIn:
 		相比等待 SPA 跳转 + 写入 localStorage，这条路径更快且不降低成功率：失败时仍会走旧兜底。
 		"""
 		try:
+			# SPA 前端路由（不以 /api 开头）返回 HTML 不是 JSON，跳过 fast callback
+			auth_path = self.provider_config.linuxdo_auth_path or ""
+			if not auth_path.startswith("/api"):
+				print(f"ℹ️ {self.account_name}: Skipping fast callback (SPA route: {auth_path})")
+				return None
+
 			base_callback_url = self.provider_config.get_linuxdo_auth_url()
 			parsed_cb = urlparse(base_callback_url)
 			cb_query = parse_qs(parsed_cb.query)
