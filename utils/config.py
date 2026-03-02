@@ -36,8 +36,10 @@ class ProviderConfig:
     # 可选：newapi 通用控制台签到模式（/console/personal 点击“立即签到”）
     # - newapi_console_personal: 浏览器进入 /console/personal 点击“立即签到”
     # - new_api_post: 通过后端接口 POST 触发签到（适用于部分站点控制台会跳转 /login 的情况）
+    # - protocol: 纯协议签到（缓存 session cookie，30天有效），首次需浏览器 OAuth
+
     # 兼容：历史值 "api_post" 会被自动映射为 "new_api_post"
-    checkin_mode: Literal["newapi_console_personal", "new_api_post"] | None = None
+    checkin_mode: Literal["newapi_console_personal", "new_api_post", "protocol"] | None = None
     # new_api_post 模式：可选的“是否已签到”查询策略（用于避免重复 POST）
     # - newapi_monthly: GET {path}?month=YYYY-MM，读取 data.stats.checked_in_today
     post_checkin_status_kind: Literal["newapi_monthly"] | None = None
@@ -227,6 +229,7 @@ class AppConfig:
                 # 从 https://runanytime.hxi.me/api/status 中获取
                 linuxdo_client_id="AHjK9O3FfbCXKpF6VXGBC60K21yJ2fYk",
                 linuxdo_auth_path="/oauth/linuxdo",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=True,
@@ -245,6 +248,8 @@ class AppConfig:
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
                 linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
@@ -265,12 +270,14 @@ class AppConfig:
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
                 linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
             ),
             "neb": ProviderConfig(
                 name="neb",
@@ -291,7 +298,7 @@ class AppConfig:
                 turnstile_check=False,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
             ),
             "huan": ProviderConfig(
                 name="huan",
@@ -336,7 +343,7 @@ class AppConfig:
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
-                checkin_mode="new_api_post",
+                checkin_mode="protocol",
                 # newapi 月度状态接口：/api/user/checkin?month=YYYY-MM
                 post_checkin_status_kind="newapi_monthly",
                 post_checkin_status_path="/api/user/checkin",
@@ -403,12 +410,14 @@ class AppConfig:
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
                 linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
             ),
             "elysiver": ProviderConfig(
                 name="elysiver",
@@ -449,13 +458,15 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取
-                linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
             ),
             "anthorpic": ProviderConfig(
                 name="anthorpic",
@@ -475,7 +486,7 @@ class AppConfig:
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
                 linuxdo_callback_mode="spa",
             ),
             "gemai": ProviderConfig(

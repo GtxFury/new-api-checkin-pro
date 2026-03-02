@@ -9,6 +9,7 @@ dependencies = [
   "playwright-captcha>=0.1.1",
   "httpx[http2,socks]>=0.24.0",
   "python-dotenv>=1.0.0",
+  "curl_cffi>=0.7.0",
 ]
 
 [dependency-groups]

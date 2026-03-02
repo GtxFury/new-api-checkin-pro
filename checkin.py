@@ -4893,6 +4893,31 @@ class CheckIn:
             password: Linux.do 密码
             waf_cookies: WAF cookies
         """
+        # ─── 纯协议签到模式：先尝试用缓存的 session cookie 直接签到 ───
+        if getattr(self.provider_config, "checkin_mode", None) == "protocol":
+            from utils.protocol_checkin import ProtocolCheckIn
+            import hashlib as _hashlib
+
+            _username_hash = _hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
+            _provider_name = getattr(self.provider_config, "name", "provider")
+            _session_cache = f"{self.storage_state_dir}/{_provider_name}_{_username_hash}_session_cache.json"
+
+            protocol = ProtocolCheckIn(
+                provider_config=self.provider_config,
+                account_name=self.account_name,
+                session_cache_path=_session_cache,
+                proxy=self.http_proxy_config,
+            )
+            p_ok, p_info = await protocol.check_in()
+            if p_ok:
+                return True, p_info
+            # fallback_browser=True → 继续走浏览器 OAuth
+            if isinstance(p_info, dict) and p_info.get("fallback_browser"):
+                print(f"ℹ️ {self.account_name}: protocol 需要浏览器 OAuth 刷新 session...")
+                # 走完浏览器 OAuth 后会存 session cache（见下方逻辑）
+            else:
+                return False, p_info
+
         print(
             f"ℹ️ {self.account_name}: Executing check-in with Linux.do account (using proxy: {'true' if self.http_proxy_config else 'false'})"
         )
@@ -4988,6 +5013,36 @@ class CheckIn:
             if success and "cookies" in result_data and "api_user" in result_data:
                 user_cookies = result_data["cookies"]
                 api_user = result_data["api_user"]
+
+                # protocol 模式：保存 session cookie 供后续纯协议签到使用
+                if getattr(self.provider_config, "checkin_mode", None) == "protocol":
+                    try:
+                        from utils.protocol_checkin import ProtocolCheckIn
+                        import hashlib as _hashlib
+
+                        _username_hash = _hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
+                        _provider_name = getattr(self.provider_config, "name", "provider")
+                        _session_cache = f"{self.storage_state_dir}/{_provider_name}_{_username_hash}_session_cache.json"
+
+                        # 从浏览器 cookies 提取 session cookie
+                        _session_value = ""
+                        if isinstance(user_cookies, list):
+                            for _c in user_cookies:
+                                if _c.get("name") == "session":
+                                    _session_value = _c.get("value", "")
+                                    break
+                        elif isinstance(user_cookies, dict):
+                            _session_value = user_cookies.get("session", "")
+
+                        if _session_value:
+                            _p = ProtocolCheckIn(
+                                provider_config=self.provider_config,
+                                account_name=self.account_name,
+                                session_cache_path=_session_cache,
+                            )
+                            _p.save_session_cache(_session_value, api_user)
+                    except Exception as _e:
+                        print(f"⚠️ {self.account_name}: save session cache error: {_e}")
 
                 # elysiver：如果登录流程已经在浏览器中完成了控制台签到/并解析出余额信息，
                 # 则视为本次认证成功，避免后续“新上下文 session 校验/强制重登”把一次成功变成失败。
@@ -5119,6 +5174,36 @@ class CheckIn:
                         linuxdo_password=password,
                         linuxdo_cache_file_path=cache_file_path,
                     )
+
+                # protocol 模式：浏览器 OAuth fallback 后，用刚保存的 session cache 做协议签到
+
+                if getattr(self.provider_config, "checkin_mode", None) == "protocol":
+
+                    from utils.protocol_checkin import ProtocolCheckIn
+
+                    import hashlib as _hashlib
+
+                    _username_hash = _hashlib.sha256(username.encode("utf-8")).hexdigest()[:8]
+
+                    _provider_name = getattr(self.provider_config, "name", "provider")
+
+                    _session_cache = f"{self.storage_state_dir}/{_provider_name}_{_username_hash}_session_cache.json"
+
+                    protocol = ProtocolCheckIn(
+
+                        provider_config=self.provider_config,
+
+                        account_name=self.account_name,
+
+                        session_cache_path=_session_cache,
+
+                        proxy=self.http_proxy_config,
+
+                    )
+
+                    return await protocol.check_in()
+
+
 
                 # newapi 通用控制台每日签到（/console/personal 右侧“立即签到”）
                 if getattr(self.provider_config, "checkin_mode", None) == "newapi_console_personal":
