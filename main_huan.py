@@ -22,7 +22,7 @@ from utils.restore_linuxdot import restore_linuxdot
 restore_linuxdot()
 
 BALANCE_HASH_FILE = "balance_hash_huan.txt"
-CACHE_DIR = os.path.join("storage-states", "huan")
+CACHE_DIR = "storage-states"
 
 
 def _load_accounts() -> list[AccountConfig] | None:

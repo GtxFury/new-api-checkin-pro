@@ -22,7 +22,7 @@ from utils.restore_linuxdot import restore_linuxdot
 restore_linuxdot()
 
 BALANCE_HASH_FILE = "balance_hash_anthorpic.txt"
-CACHE_DIR = os.path.join("storage-states", "anthorpic")
+CACHE_DIR = "storage-states"
 
 
 def _load_accounts() -> tuple[list[AccountConfig] | None, str | None]:
