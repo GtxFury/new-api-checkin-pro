@@ -253,7 +253,7 @@ class AppConfig:
                 turnstile_check=False,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
-                checkin_mode="newapi_console_personal",
+                checkin_mode="protocol",
             ),
             "kfc": ProviderConfig(
                 name="kfc",
