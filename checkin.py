@@ -5035,12 +5035,15 @@ class CheckIn:
                             _session_value = user_cookies.get("session", "")
 
                         if _session_value:
+                            print(f"ℹ️ {self.account_name}: [protocol] saving session cookie (len={len(_session_value)}, prefix={_session_value[:20]}...)")
                             _p = ProtocolCheckIn(
                                 provider_config=self.provider_config,
                                 account_name=self.account_name,
                                 session_cache_path=_session_cache,
                             )
                             _p.save_session_cache(_session_value, api_user)
+                        else:
+                            print(f"⚠️ {self.account_name}: [protocol] no session cookie found in user_cookies ({len(user_cookies) if isinstance(user_cookies, list) else 'dict'})")
                     except Exception as _e:
                         print(f"⚠️ {self.account_name}: save session cache error: {_e}")
 

@@ -8,7 +8,6 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Literal
 
-
 @dataclass
 class ProviderConfig:
     """Provider 配置"""
@@ -144,7 +143,6 @@ class ProviderConfig:
             return f"{self.origin}{self.check_in_status_path}"
         return None
 
-
 @dataclass
 class AppConfig:
     """应用配置"""
@@ -269,7 +267,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_auth_path="/api/oauth/linuxdo",
                 linuxdo_callback_mode="spa",
 
                 aliyun_captcha=False,
@@ -293,6 +291,8 @@ class AppConfig:
                 # 从 /api/status 获取，避免写死导致配置过期
                 linuxdo_client_id=None,
                 linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
@@ -409,7 +409,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_auth_path="/api/oauth/linuxdo",
                 linuxdo_callback_mode="spa",
 
                 aliyun_captcha=False,
@@ -458,7 +458,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取
-                linuxdo_auth_path="/oauth/linuxdo",
+                linuxdo_auth_path="/api/oauth/linuxdo",
                 linuxdo_callback_mode="spa",
 
                 aliyun_captcha=False,
@@ -481,13 +481,14 @@ class AppConfig:
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取
                 linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_callback_mode="spa",
+
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=True,
                 check_in_status_path="/api/user/check_in_status",
                 checkin_page_path="/console/personal",
                 checkin_mode="protocol",
-                linuxdo_callback_mode="spa",
             ),
             "gemai": ProviderConfig(
                 name="gemai",
@@ -542,7 +543,6 @@ class AppConfig:
     def get_provider(self, name: str) -> ProviderConfig | None:
         """获取指定 provider 配置"""
         return self.providers.get(name)
-
 
 @dataclass
 class AccountConfig:
