@@ -85,6 +85,9 @@ class ProtocolCheckIn:
                 data = r.json()
                 if data.get("success"):
                     return True
+                self._log(f"validate: HTTP 200 but success={data.get('success')}, msg={data.get('message', '')[:50]}")
+            else:
+                self._log(f"validate: HTTP {r.status_code}, body={r.text[:100]}")
             return False
         except Exception:
             return False
