@@ -5077,12 +5077,12 @@ class CheckIn:
                     try:
                         if not await _elysiver_session_ok():
                             print(f"⚠️ {self.account_name}: elysiver session invalid after OAuth, forcing fresh login once...")
-                            # 删除缓存文件，强制重新登录
-                            try:
-                                if cache_file_path and os.path.exists(cache_file_path):
-                                    os.remove(cache_file_path)
-                            except Exception:
-                                pass
+                            # 保留 linux.do 缓存（hCaptcha 限制），仅重新走 OAuth 获取站点 cookie
+                            # try:
+                            #     if cache_file_path and os.path.exists(cache_file_path):
+                            #         os.remove(cache_file_path)
+                            # except Exception:
+                            #     pass
 
                             retry_auth_state_result = await self.get_auth_state(
                                 client=client,
@@ -5133,12 +5133,12 @@ class CheckIn:
                     if not ok and isinstance(info, dict) and info.get("retry") is True:
                         print(f"⚠️ {self.account_name}: newapi console session expired, forcing fresh login once...")
 
-                        # 删除缓存文件，强制重新登录
-                        try:
-                            if cache_file_path and os.path.exists(cache_file_path):
-                                os.remove(cache_file_path)
-                        except Exception:
-                            pass
+                        # 保留 linux.do 缓存（hCaptcha 限制），仅重新走 OAuth 获取站点 cookie
+                        # try:
+                        #     if cache_file_path and os.path.exists(cache_file_path):
+                        #         os.remove(cache_file_path)
+                        # except Exception:
+                        #     pass
 
                         retry_auth_state_result = await self.get_auth_state(
                             client=client,
@@ -5245,12 +5245,12 @@ class CheckIn:
                                             f"⚠️ {self.account_name}: newapi console session expired, forcing fresh login once..."
                                         )
 
-                                        # 删除缓存文件，强制重新登录
-                                        try:
-                                            if cache_file_path and os.path.exists(cache_file_path):
-                                                os.remove(cache_file_path)
-                                        except Exception:
-                                            pass
+                                        # 保留 linux.do 缓存（hCaptcha 限制），仅重新走 OAuth 获取站点 cookie
+                                        # try:
+                                        #     if cache_file_path and os.path.exists(cache_file_path):
+                                        #         os.remove(cache_file_path)
+                                        # except Exception:
+                                        #     pass
 
                                         retry_auth_state_result = await self.get_auth_state(
                                             client=client,
