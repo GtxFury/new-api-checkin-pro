@@ -226,7 +226,7 @@ class AppConfig:
                 github_auth_path="/api/oauth/github",
                 # 从 https://runanytime.hxi.me/api/status 中获取
                 linuxdo_client_id="AHjK9O3FfbCXKpF6VXGBC60K21yJ2fYk",
-                linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_auth_path="/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=True,
@@ -244,7 +244,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_auth_path="/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
@@ -264,7 +264,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_auth_path="/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
@@ -402,7 +402,7 @@ class AppConfig:
                 github_client_id=None,
                 github_auth_path="/api/oauth/github",
                 linuxdo_client_id=None,  # 从 /api/status 获取，避免写死导致配置过期
-                linuxdo_auth_path="/api/oauth/linuxdo",
+                linuxdo_auth_path="/oauth/linuxdo",
                 aliyun_captcha=False,
                 bypass_method=None,
                 turnstile_check=False,
