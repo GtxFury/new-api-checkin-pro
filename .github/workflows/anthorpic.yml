@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/anthorpic
-        key: anthorpic-storage-states-${{ hashFiles('storage-states/anthorpic/*.json') }}
+          storage-states
+        key: anthorpic-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           anthorpic-storage-states-
 
@@ -112,12 +112,12 @@ jobs:
         uv run python -u main_anthorpic.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/anthorpic/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/anthorpic
-        key: anthorpic-storage-states-${{ hashFiles('storage-states/anthorpic/*.json') }}
+          storage-states
+        key: anthorpic-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_anthorpic.txt') != ''
