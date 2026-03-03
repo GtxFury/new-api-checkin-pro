@@ -2024,21 +2024,21 @@ class LinuxDoSignIn:
 
 						# runanytime/new-api：localStorage 里有 user 不代表服务端 session 已建立。
 						# 这里用 /api/user/self（带 new-api-user）强校验；若失败则删除缓存并返回 retry 标记。
-						if self.provider_config.name == "runanytime":
-							ok = await self._runanytime_verify_session(page, str(api_user))
-							if not ok:
-								print(f"⚠️ {self.account_name}: runanytime session verify failed (401), clearing cache for retry...")
+							if self.provider_config.name == "runanytime":
+								ok = await self._runanytime_verify_session(page, str(api_user))
+								if not ok:
+									print(
+										f"⚠️ {self.account_name}: runanytime session verify failed (401), "
+										"clearing provider cache for retry..."
+									)
+									# 401 分支仅清理 provider 侧缓存，不清理 linux.do 缓存。
+									self._clear_provider_site_caches(
+										cache_file_path,
+										include_linuxdo_state=False,
+									)
 
-								# 删除缓存文件，强制下次重新登录
-								if cache_file_path and os.path.exists(cache_file_path):
-									try:
-										os.remove(cache_file_path)
-										print(f"ℹ️ {self.account_name}: Deleted cache file: {cache_file_path}")
-									except Exception as del_err:
-										print(f"⚠️ {self.account_name}: Failed to delete cache file: {del_err}")
-
-								await self._take_screenshot(page, "runanytime_session_401_need_retry")
-								return False, {"error": "session_verify_failed_need_retry", "retry": True}
+									await self._take_screenshot(page, "runanytime_session_401_need_retry")
+									return False, {"error": "session_verify_failed_need_retry", "retry": True}
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None
