@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/freestyle
-        key: freestyle-storage-states-${{ hashFiles('storage-states/freestyle/*.json') }}
+          storage-states
+        key: freestyle-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           freestyle-storage-states-
 
@@ -112,12 +112,12 @@ jobs:
         uv run python -u main_freestyle.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/freestyle/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/freestyle
-        key: freestyle-storage-states-${{ hashFiles('storage-states/freestyle/*.json') }}
+          storage-states
+        key: freestyle-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_freestyle.txt') != ''

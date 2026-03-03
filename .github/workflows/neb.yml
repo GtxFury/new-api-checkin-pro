@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/neb
-        key: neb-storage-states-${{ hashFiles('storage-states/neb/*.json') }}
+          storage-states
+        key: neb-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           neb-storage-states-
 
@@ -112,12 +112,12 @@ jobs:
         uv run python -u main_neb.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/neb/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/neb
-        key: neb-storage-states-${{ hashFiles('storage-states/neb/*.json') }}
+          storage-states
+        key: neb-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_neb.txt') != ''
