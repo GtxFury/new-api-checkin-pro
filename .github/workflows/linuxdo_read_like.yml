@@ -96,7 +96,7 @@ jobs:
         with:
           path: |
             storage-states
-          key: storage-state-${{ hashFiles('storage-states/*.json') }}
+          key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
           restore-keys: |
             storage-state-
 
@@ -122,12 +122,12 @@ jobs:
           uv run python -u linuxdo_read_like.py
 
       - name: 保存 linux.do 登录状态/阅读状态缓存
-        if: hashFiles('storage-states/*.json') != ''
+        if: hashFiles('storage-states/**/*.json') != ''
         uses: actions/cache/save@v4
         with:
           path: |
             storage-states
-          key: storage-state-${{ hashFiles('storage-states/*.json') }}
+          key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
 
       - name: 保存日志
         if: always()

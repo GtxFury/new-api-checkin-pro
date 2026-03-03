@@ -82,7 +82,7 @@ jobs:
       with:
         path: |
           storage-states
-        key: storage-state-${{ hashFiles('storage-states/*.json') }}
+        key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           storage-state-
 
@@ -131,12 +131,12 @@ jobs:
         uv run python -u main.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
           storage-states
-        key: storage-state-${{ hashFiles('storage-states/*.json') }}
+        key: storage-state-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash.txt') != ''

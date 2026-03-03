@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/mu
-        key: mu-storage-states-${{ hashFiles('storage-states/mu/*.json') }}
+          storage-states
+        key: mu-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           mu-storage-states-
 
@@ -112,12 +112,12 @@ jobs:
         uv run python -u main_mu.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/mu/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/mu
-        key: mu-storage-states-${{ hashFiles('storage-states/mu/*.json') }}
+          storage-states
+        key: mu-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_mu.txt') != ''
