@@ -1434,8 +1434,15 @@ class LinuxDoSignIn:
 							pass
 					except Exception as e:
 						print(f"❌ {self.account_name}: Error occurred while signing in linux.do: {e}")
+						# 登录流程异常时删除本地 linuxdo cache，避免后续运行反复命中过期状态
+						if cache_file_path and os.path.exists(cache_file_path):
+							try:
+								os.remove(cache_file_path)
+								print(f"ℹ️ {self.account_name}: Deleted invalid cache file after sign-in error: {cache_file_path}")
+							except Exception as del_err:
+								print(f"⚠️ {self.account_name}: Failed to delete invalid cache file: {del_err}")
 						await self._take_screenshot(page, "signin_bypass_error")
-						return False, {"error": "Linux.do sign-in error"}
+						return False, {"error": "Linux.do sign-in error", "retry": True}
 
 					# 登录后访问授权页面
 					try:
@@ -1447,7 +1454,14 @@ class LinuxDoSignIn:
 					except Exception as e:
 						print(f"❌ {self.account_name}: Failed to navigate to authorization page: {e}")
 						await self._take_screenshot(page, "auth_page_navigation_failed_bypass")
-						return False, {"error": "Linux.do authorization page navigation failed"}
+						# 导航授权页失败通常意味着当前缓存上下文异常，删除缓存后允许上层重试一次
+						if cache_file_path and os.path.exists(cache_file_path):
+							try:
+								os.remove(cache_file_path)
+								print(f"ℹ️ {self.account_name}: Deleted invalid cache file after auth navigation failure: {cache_file_path}")
+							except Exception as del_err:
+								print(f"⚠️ {self.account_name}: Failed to delete invalid cache file: {del_err}")
+						return False, {"error": "Linux.do authorization page navigation failed", "retry": True}
 
 					# 统一处理授权逻辑（无论是否通过缓存登录）
 				try:
