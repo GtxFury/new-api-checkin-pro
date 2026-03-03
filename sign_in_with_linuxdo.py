@@ -2031,6 +2031,87 @@ class LinuxDoSignIn:
 					# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
 					print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
 					await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
+					# 回调没有 user_id 时，先尝试用 LINUXDOT 重建 linuxdo state 并重试一次 OAuth，
+					# 避免直接落到 no-code 失败。
+					try:
+						from utils.restore_linuxdot import restore_linuxdot_entry
+
+						target_basename = os.path.basename(cache_file_path) if cache_file_path else ""
+						restored, restore_reason = restore_linuxdot_entry(
+							target_basename,
+							force_overwrite=True,
+						)
+						if restored and cache_file_path and os.path.exists(cache_file_path):
+							print(
+								f"ℹ️ {self.account_name}: Rebuilt linuxdo state from LINUXDOT "
+								f"({target_basename}, reason={restore_reason}), rechecking login..."
+							)
+							try:
+								await page.close()
+							except Exception:
+								pass
+							try:
+								await context.close()
+							except Exception:
+								pass
+
+							context = await browser.new_context(storage_state=cache_file_path)
+							if auth_cookies:
+								await context.add_cookies(auth_cookies)
+							page = await context.new_page()
+
+							resp_retry = None
+							try:
+								resp_retry = await page.goto(oauth_url, wait_until="domcontentloaded")
+							except Exception as retry_err:
+								print(
+									f"⚠️ {self.account_name}: OAuth recheck navigation after LINUXDOT restore failed: {retry_err}"
+								)
+							print(
+								f"ℹ️ {self.account_name}: recheck redirected to "
+								f"{redact_url_for_log(resp_retry.url) if resp_retry else redact_url_for_log(page.url)}"
+							)
+							await self._save_page_content_to_file(page, "oauth_no_user_recheck_after_linuxdot_restore")
+
+							# 先再尝试一次直接取 user_id，成功则直接返回。
+							try:
+								await page.wait_for_function(
+									"""() => {
+										return (
+											localStorage.getItem('user') !== null ||
+											localStorage.getItem('user_info') !== null ||
+											localStorage.getItem('userInfo') !== null
+										);
+									}""",
+									timeout=10000,
+								)
+							except Exception:
+								pass
+
+							api_user_retry = await self._extract_api_user_from_localstorage(page)
+							if not api_user_retry:
+								api_user_retry = await self._extract_api_user_from_body_json(page)
+
+							if api_user_retry:
+								print(f"✅ {self.account_name}: Got api user after LINUXDOT recheck: {api_user_retry}")
+								restore_cookies = await page.context.cookies()
+								user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+								try:
+									await page.context.storage_state(path=cache_file_path)
+								except Exception:
+									pass
+								return True, {"cookies": user_cookies, "api_user": api_user_retry}
+
+							# 更新候选回调 URL，供下方 code 解析继续使用
+							if resp_retry and getattr(resp_retry, "url", ""):
+								oauth_redirect_url = resp_retry.url
+						else:
+							print(
+								f"ℹ️ {self.account_name}: LINUXDOT rebuild skipped "
+								f"(target={target_basename or 'N/A'}, reason={restore_reason})"
+							)
+					except Exception as rebuild_err:
+						print(f"⚠️ {self.account_name}: LINUXDOT rebuild on missing user_id error: {rebuild_err}")
 					# 优先使用首次捕获到的 OAuth 回调 URL（如果存在），避免站点后续重定向到
 					# /app/me 或 /login?expired 等页面导致 code/state 丢失。
 					source_url = oauth_redirect_url or page.url
