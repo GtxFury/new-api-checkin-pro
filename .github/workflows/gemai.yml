@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/gemai
-        key: gemai-storage-states-${{ hashFiles('storage-states/gemai/*.json') }}
+          storage-states
+        key: gemai-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           gemai-storage-states-
 
@@ -111,12 +111,12 @@ jobs:
         uv run python -u main_gemai.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/gemai/*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/gemai
-        key: gemai-storage-states-${{ hashFiles('storage-states/gemai/*.json') }}
+          storage-states
+        key: gemai-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_gemai.txt') != ''

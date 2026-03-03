@@ -77,8 +77,8 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
-          storage-states/fovt_*.json
-        key: fovt-storage-states-${{ hashFiles('storage-states/fovt_*.json') }}
+          storage-states
+        key: fovt-storage-states-${{ hashFiles('storage-states/**/*.json') }}
         restore-keys: |
           fovt-storage-states-
 
@@ -112,12 +112,12 @@ jobs:
         uv run python -u main_fovt.py
 
     - name: 保存登录状态缓存
-      if: hashFiles('storage-states/fovt_*.json') != ''
+      if: hashFiles('storage-states/**/*.json') != ''
       uses: actions/cache/save@v4
       with:
         path: |
-          storage-states/fovt_*.json
-        key: fovt-storage-states-${{ hashFiles('storage-states/fovt_*.json') }}
+          storage-states
+        key: fovt-storage-states-${{ hashFiles('storage-states/**/*.json') }}
 
     - name: 保存余额历史缓存
       if: hashFiles('balance_hash_fovt.txt') != ''
