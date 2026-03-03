@@ -642,6 +642,50 @@ class LinuxDoSignIn:
 		except Exception as e:
 			print(f"⚠️ {self.account_name}: Failed to save HTML: {e}")
 
+	def _clear_provider_site_caches(
+		self,
+		cache_file_path: str = "",
+		include_linuxdo_state: bool = True,
+	) -> None:
+		"""清理当前 provider 的站点缓存（跨账号）。"""
+		try:
+			provider_name = str(getattr(self.provider_config, "name", "") or "").strip()
+			if not provider_name:
+				return
+
+			cache_dir = Path(cache_file_path).parent if cache_file_path else Path("storage-states")
+			if not str(cache_dir):
+				cache_dir = Path("storage-states")
+
+			target_files: set[Path] = set()
+			if include_linuxdo_state and cache_file_path:
+				target_files.add(Path(cache_file_path))
+
+			name_variants = {provider_name, provider_name.lower(), provider_name.upper()}
+			for n in name_variants:
+				target_files.update(cache_dir.glob(f"cf_{n}_*_cookies.json"))
+				target_files.update(cache_dir.glob(f"{n}_*_session_cache.json"))
+				legacy_dir = cache_dir / n
+				if legacy_dir.exists() and legacy_dir.is_dir():
+					target_files.update(legacy_dir.rglob("*.json"))
+
+			deleted = 0
+			for p in target_files:
+				try:
+					if p.exists() and p.is_file():
+						p.unlink()
+						deleted += 1
+						print(f"ℹ️ {self.account_name}: Cleared provider cache file: {p}")
+				except Exception as del_err:
+					print(f"⚠️ {self.account_name}: Failed to clear cache file {p}: {del_err}")
+
+			print(
+				f"ℹ️ {self.account_name}: Provider cache cleanup done "
+				f"(provider={provider_name}, deleted={deleted}, include_linuxdo_state={include_linuxdo_state})"
+			)
+		except Exception as e:
+			print(f"⚠️ {self.account_name}: Provider cache cleanup error: {e}")
+
 	async def _solve_turnstile(self, page) -> bool:
 		"""尝试解决 Cloudflare Turnstile 验证
 
@@ -2028,9 +2072,12 @@ class LinuxDoSignIn:
 
 						return True, result
 
-					# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
-					print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
-					await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
+						# 未能从 localStorage 获取 user，尝试从回调 URL 中解析 code
+						print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
+						await self._take_screenshot(page, "oauth_failed_no_user_id_bypass")
+						# 按 provider 维度清理站点缓存（例如 runanytime），避免残留坏状态反复失败。
+						# 这里不清理 linux.do 缓存，只清理 provider 侧缓存。
+						self._clear_provider_site_caches(cache_file_path, include_linuxdo_state=False)
 					# 回调没有 user_id 时，先尝试用 LINUXDOT 重建 linuxdo state 并重试一次 OAuth，
 					# 避免直接落到 no-code 失败。
 					try:
@@ -2138,8 +2185,10 @@ class LinuxDoSignIn:
 						)
 					else:
 						print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+						self._clear_provider_site_caches(cache_file_path)
 						return False, {
 							"error": "Linux.do OAuth failed - no code in callback",
+							"retry": True,
 						}
 
 					# elysiver：必须走前端 /oauth/linuxdo（SPA）完成 OAuth 回调，才能建立 session/localStorage。
@@ -2522,8 +2571,10 @@ class LinuxDoSignIn:
 						return True, query_params
 
 					print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+					self._clear_provider_site_caches(cache_file_path)
 					return False, {
 						"error": "Linux.do OAuth failed - no code in callback",
+						"retry": True,
 					}
 				except Exception as e:
 					print(
