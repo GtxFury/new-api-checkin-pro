@@ -1278,6 +1278,62 @@ class LinuxDoSignIn:
 							)
 						else:
 							print(f"ℹ️ {self.account_name}: Cache session expired, need to login again")
+							# 优先尝试用 LINUXDOT 重建当前账号的 linuxdo storage-state，避免直接进入重登录。
+							try:
+								from utils.restore_linuxdot import restore_linuxdot_entry
+
+								target_basename = os.path.basename(cache_file_path) if cache_file_path else ""
+								restored, restore_reason = restore_linuxdot_entry(
+									target_basename,
+									force_overwrite=True,
+								)
+								if restored and cache_file_path and os.path.exists(cache_file_path):
+									print(
+										f"ℹ️ {self.account_name}: Rebuilt linuxdo state from LINUXDOT "
+										f"({target_basename}, reason={restore_reason}), rechecking login..."
+									)
+									try:
+										await page.close()
+									except Exception:
+										pass
+									try:
+										await context.close()
+									except Exception:
+										pass
+
+									context = await browser.new_context(storage_state=cache_file_path)
+									if auth_cookies:
+										await context.add_cookies(auth_cookies)
+									page = await context.new_page()
+
+									response2 = await page.goto(oauth_url, wait_until="domcontentloaded")
+									print(
+										f"ℹ️ {self.account_name}: recheck redirected to "
+										f"{redact_url_for_log(response2.url) if response2 else 'N/A'}"
+									)
+									await self._save_page_content_to_file(page, "sign_in_check_after_linuxdot_restore")
+
+									if response2 and response2.url.startswith(self.provider_config.origin):
+										is_logged_in = True
+									else:
+										is_logged_in = await _wait_cache_oauth_ready()
+
+									if is_logged_in:
+										print(
+											f"✅ {self.account_name}: LINUXDOT state restore worked, skip relogin"
+										)
+									else:
+										print(
+											f"⚠️ {self.account_name}: LINUXDOT restored but still not logged in, "
+											"will continue relogin flow"
+										)
+								else:
+									print(
+										f"ℹ️ {self.account_name}: LINUXDOT rebuild skipped "
+										f"(target={target_basename or 'N/A'}, reason={restore_reason})"
+									)
+							except Exception as restore_err:
+								print(f"⚠️ {self.account_name}: LINUXDOT rebuild attempt error: {restore_err}")
 					except Exception as e:
 						print(f"⚠️ {self.account_name}: Failed to check login status: {e}")
 

@@ -65,6 +65,52 @@ def _should_restore_file(fpath: str, force_overwrite: bool) -> tuple[bool, str]:
     return False, "exists_fresh"
 
 
+def _decode_linuxdot_payload(raw: str) -> dict:
+    decoded = json.loads(gzip.decompress(base64.b64decode(raw)).decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("LINUXDOT payload is not a dict")
+    return decoded
+
+
+def restore_linuxdot_entry(target_basename: str, force_overwrite: bool = True) -> tuple[bool, str]:
+    """只恢复一个指定 basename 的 storage state。"""
+    raw = os.getenv("LINUXDOT", "").strip()
+    if not raw:
+        return False, "no_linuxdot"
+    if not target_basename:
+        return False, "empty_target"
+
+    try:
+        decoded = _decode_linuxdot_payload(raw)
+    except Exception as e:
+        return False, f"decode_error:{e}"
+
+    matched_state = None
+    for fname, state in decoded.items():
+        if os.path.basename(str(fname)) == target_basename:
+            matched_state = state
+            break
+    if matched_state is None:
+        return False, "target_not_found_in_linuxdot"
+
+    os.makedirs("storage-states", exist_ok=True)
+    fpath = os.path.join("storage-states", target_basename)
+    existed_before = os.path.exists(fpath)
+    should_restore, reason = _should_restore_file(fpath, force_overwrite=force_overwrite)
+    if not should_restore:
+        return False, reason
+
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(matched_state, f, ensure_ascii=False)
+        nc = len(matched_state.get("cookies", [])) if isinstance(matched_state, dict) else 0
+        action = "Overwrote" if existed_before else "Restored"
+        print(f"ℹ️ {action}: {fpath} ({nc} cookies, reason={reason})")
+        return True, reason
+    except Exception as e:
+        return False, f"write_error:{e}"
+
+
 def restore_linuxdot():
     """Decode LINUXDOT env var and write storage-state files."""
     raw = os.getenv("LINUXDOT", "").strip()
@@ -72,7 +118,7 @@ def restore_linuxdot():
         return
     try:
         force_overwrite = _is_truthy(os.getenv("LINUXDOT_OVERWRITE", ""))
-        decoded = json.loads(gzip.decompress(base64.b64decode(raw)).decode("utf-8"))
+        decoded = _decode_linuxdot_payload(raw)
         os.makedirs("storage-states", exist_ok=True)
         for fname, state in decoded.items():
             fpath = os.path.join("storage-states", os.path.basename(fname))
