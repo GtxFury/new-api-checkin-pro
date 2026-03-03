@@ -2149,9 +2149,26 @@ class LinuxDoSignIn:
 									pass
 								return True, {"cookies": user_cookies, "api_user": api_user_retry}
 
-							# 更新候选回调 URL，供下方 code 解析继续使用
-							if resp_retry and getattr(resp_retry, "url", ""):
-								oauth_redirect_url = resp_retry.url
+							# 更新候选回调 URL，供下方 code 解析继续使用。
+							# 仅当重试后 URL 确实是 provider 回调且带 code 时才覆盖，
+							# 避免把已捕获的有效回调 URL 覆盖为 connect.linux.do 授权页。
+							retry_url = (getattr(resp_retry, "url", "") if resp_retry else "") or (page.url or "")
+							if (
+								retry_url
+								and retry_url.startswith(self.provider_config.origin)
+								and "code=" in retry_url
+								and "linuxdo" in retry_url
+							):
+								oauth_redirect_url = retry_url
+								print(
+									f"ℹ️ {self.account_name}: Updated OAuth redirect URL after recheck: "
+									f"{redact_url_for_log(oauth_redirect_url)}"
+								)
+							else:
+								print(
+									f"ℹ️ {self.account_name}: Keeping previous OAuth redirect URL for code parsing: "
+									f"{redact_url_for_log(oauth_redirect_url) if oauth_redirect_url else 'N/A'}"
+								)
 						else:
 							print(
 								f"ℹ️ {self.account_name}: LINUXDOT rebuild skipped "
@@ -2185,7 +2202,10 @@ class LinuxDoSignIn:
 						)
 					else:
 						print(f"❌ {self.account_name}: OAuth failed, no code in callback")
-						self._clear_provider_site_caches(cache_file_path)
+						self._clear_provider_site_caches(
+							cache_file_path,
+							include_linuxdo_state=False,
+						)
 						return False, {
 							"error": "Linux.do OAuth failed - no code in callback",
 							"retry": True,
@@ -2571,7 +2591,10 @@ class LinuxDoSignIn:
 						return True, query_params
 
 					print(f"❌ {self.account_name}: OAuth failed, no code in callback")
-					self._clear_provider_site_caches(cache_file_path)
+					self._clear_provider_site_caches(
+						cache_file_path,
+						include_linuxdo_state=False,
+					)
 					return False, {
 						"error": "Linux.do OAuth failed - no code in callback",
 						"retry": True,
