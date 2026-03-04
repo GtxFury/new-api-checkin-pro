@@ -33,6 +33,110 @@ except Exception as e1:  # pragma: no cover - 可选依赖
 	PLAYWRIGHT_CAPTCHA_AVAILABLE = False
 	print(f"⚠️ LinuxDoSignIn: playwright-captcha not available: {e1!r}")
 
+# hcaptcha-challenger: 可选依赖，用于自动解 hCaptcha 验证码
+try:
+	from hcaptcha_challenger.agent.challenger import AgentConfig as HCaptchaAgentConfig, AgentV as HCaptchaAgentV
+	HCAPTCHA_CHALLENGER_AVAILABLE = True
+	# 运行时注入 OpenAI Provider 等补丁（不修改 site-packages）
+	from utils.hcaptcha_patch import apply_patches as _apply_hcaptcha_patches, ensure_env_for_agent_config as _ensure_hcaptcha_env
+	_apply_hcaptcha_patches()
+	print("ℹ️ LinuxDoSignIn: hcaptcha-challenger imported successfully")
+except Exception as e2:  # pragma: no cover - 可选依赖
+	HCaptchaAgentConfig = None  # type: ignore[assignment,misc]
+	HCaptchaAgentV = None  # type: ignore[assignment,misc]
+	HCAPTCHA_CHALLENGER_AVAILABLE = False
+	print(f"⚠️ LinuxDoSignIn: hcaptcha-challenger not available: {e2!r}")
+
+
+def _parse_hcaptcha_openai_config() -> dict | None:
+	"""解析 hCaptcha OpenAI 兼容接口的环境变量配置。
+
+	优先级: HCAPTCHA_OPENAI > HCAPTCHA_OPENAI_* 独立变量 > None (fallback to Gemini)
+
+	Returns:
+		dict with api_key, base_url, model keys, or None if not configured.
+	"""
+	# 方式 1: 逗号分隔的组合变量
+	combined = os.environ.get("HCAPTCHA_OPENAI", "").strip()
+	if combined:
+		parts = [p.strip() for p in combined.split(",")]
+		if len(parts) >= 3:
+			return {"api_key": parts[0], "base_url": parts[1], "model": parts[2]}
+		print(f"⚠️ HCAPTCHA_OPENAI format error: expected 'api_key,base_url,model', got {len(parts)} parts")
+
+	# 方式 2: 独立变量
+	api_key = os.environ.get("HCAPTCHA_OPENAI_API_KEY", "").strip()
+	base_url = os.environ.get("HCAPTCHA_OPENAI_BASE_URL", "").strip()
+	model = os.environ.get("HCAPTCHA_OPENAI_MODEL", "").strip()
+	if api_key and base_url and model:
+		return {"api_key": api_key, "base_url": base_url, "model": model}
+
+	return None
+
+
+async def _handle_hcaptcha(page, account_name: str = "") -> bool:
+	"""检测并处理 hCaptcha 验证码。
+
+	Args:
+		page: Playwright page object
+		account_name: 账号名称（用于日志）
+
+	Returns:
+		True if hCaptcha was detected and solved, False otherwise.
+	"""
+	if not HCAPTCHA_CHALLENGER_AVAILABLE or HCaptchaAgentConfig is None or HCaptchaAgentV is None:
+		return False
+
+	# 检测 hCaptcha iframe 是否存在
+	try:
+		hcaptcha_iframe = await page.query_selector(
+			"iframe[src*='hcaptcha.com'], iframe[src*='newassets.hcaptcha.com']"
+		)
+		if not hcaptcha_iframe:
+			return False
+	except Exception:
+		return False
+
+	print(f"🔍 {account_name}: hCaptcha iframe detected, attempting to solve...")
+
+	try:
+		# 解析 OpenAI 配置
+		openai_cfg = _parse_hcaptcha_openai_config()
+
+		# 构建 AgentConfig
+		if openai_cfg:
+			# 设置环境变量以供 patch 和 AgentConfig 读取
+			os.environ["HCAPTCHA_OPENAI_API_KEY"] = openai_cfg["api_key"]
+			os.environ["HCAPTCHA_OPENAI_BASE_URL"] = openai_cfg["base_url"]
+			os.environ["HCAPTCHA_OPENAI_MODEL"] = openai_cfg["model"]
+			print(f"ℹ️ {account_name}: Using OpenAI-compatible provider (model={openai_cfg['model']})")
+		else:
+			gemini_key = os.environ.get("GEMINI_API_KEY", "")
+			if not gemini_key:
+				print(f"⚠️ {account_name}: No hCaptcha AI provider configured (set HCAPTCHA_OPENAI or GEMINI_API_KEY)")
+				return False
+			print(f"ℹ️ {account_name}: Using Gemini provider for hCaptcha")
+
+		# 确保 GEMINI_API_KEY 满足原始 validator（OpenAI 模式下设 placeholder）
+		_ensure_hcaptcha_env()
+		agent_config = HCaptchaAgentConfig(DISABLE_BEZIER_TRAJECTORY=True)
+		agent = HCaptchaAgentV(page=page, agent_config=agent_config)
+
+		# 先点击 checkbox 触发验证码挑战
+		# AgentV.wait_for_challenge() 只监听 /getcaptcha/ 响应，不会主动点击 checkbox
+		print(f"ℹ️ {account_name}: Clicking hCaptcha checkbox...")
+		await agent.robotic_arm.click_checkbox()
+		await page.wait_for_timeout(2000)
+
+		# 等待并解题
+		result = await agent.wait_for_challenge()
+		print(f"ℹ️ {account_name}: hCaptcha challenge result: {result}")
+		return True
+
+	except Exception as e:
+		print(f"⚠️ {account_name}: hCaptcha solving failed (non-blocking): {e!r}")
+		return False
+
 
 def _should_try_turnstile_solver() -> bool:
 	# 默认开启：若需要关闭请设 LINUXDO_TRY_TURNSTILE_SOLVER=0/false/no/off
@@ -1406,17 +1510,26 @@ class LinuxDoSignIn:
 								raise RuntimeError("linux.do 返回 429（IP 被临时限流/封禁），请稍后重试或更换出口 IP")
 						except Exception:
 							raise
-						# linux.do 登录页会出现 Cloudflare Turnstile/Interstitial，先尝试处理（失败不阻塞，后续仍可能人工通过）
+						# linux.do 登录页：如果登录表单已加载，跳过 CF solver（避免白等 30s 超时）
+						_login_form_ready = False
 						try:
-							await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
+							_login_form_ready = await page.evaluate(
+								"() => !!document.querySelector('#login-account-name, #signin_username, input[name=\"login\"]')"
+							)
 						except Exception:
 							pass
-						# Turnstile click solver 默认关闭；如需启用请设 LINUXDO_TRY_TURNSTILE_SOLVER=1
-						if _should_try_turnstile_solver():
+						if not _login_form_ready:
+							# 登录表单未出现，可能被 CF Interstitial 拦截，尝试处理
 							try:
-								await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+								await solve_captcha(page, captcha_type="cloudflare", challenge_type="interstitial")
 							except Exception:
 								pass
+						# Turnstile click solver 暂时禁用（linux.do 登录页实际使用 hCaptcha，CF Turnstile solver 会白等 30s 超时）
+						# if _should_try_turnstile_solver():
+						# 	try:
+						# 		await solve_captcha(page, captcha_type="cloudflare", challenge_type="turnstile")
+						# 	except Exception:
+						# 		pass
 
 						async def _set_value(selectors: list[str], value: str) -> bool:
 							for sel in selectors:
@@ -1492,6 +1605,33 @@ class LinuxDoSignIn:
 								clicked = True
 							except Exception:
 								pass
+
+						# 检测并处理 hCaptcha（登录后可能触发）
+						if HCAPTCHA_CHALLENGER_AVAILABLE:
+							await asyncio.sleep(2)  # 等待页面加载，仅在 hcaptcha-challenger 可用时
+							try:
+								hcaptcha_solved = await _handle_hcaptcha(page, self.account_name)
+								if hcaptcha_solved:
+									print(f"✅ {self.account_name}: hCaptcha solved, continuing login flow")
+									# hCaptcha 解完后点击登录页的"验证"按钮提交表单
+									await asyncio.sleep(1)
+									for sel in [
+										'button:has-text("验证")',
+										"#signin-button",
+										"#login-button",
+										'button:has-text("登录")',
+										'button[type="submit"]',
+									]:
+										try:
+											btn = await page.query_selector(sel)
+											if btn:
+												await btn.click()
+												print(f"ℹ️ {self.account_name}: Clicked '{sel}' after hCaptcha")
+												break
+										except Exception:
+											continue
+							except Exception as e_hcaptcha:
+								print(f"⚠️ {self.account_name}: hCaptcha handling error (non-blocking): {e_hcaptcha!r}")
 
 						# 等待跳出 /login（或出现授权按钮）
 						try:
