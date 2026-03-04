@@ -8,6 +8,10 @@ screenshots
 storage-states
 logs
 balance_hash.txt
+balance_hash_*.txt
 nul
 # Generated secrets
 linuxdot_secret.txt
+# Temp / cache
+tmp/
+pdf_pages/
