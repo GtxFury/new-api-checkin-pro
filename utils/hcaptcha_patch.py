@@ -148,7 +148,7 @@ class OpenAIProvider:
 		url = f"{self._base_url}/chat/completions"
 		headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
-		logger.debug(f"OpenAIProvider: calling {url} with model={self._model}")
+		logger.debug(f"OpenAIProvider: calling model={self._model}")
 
 		async with httpx.AsyncClient(timeout=120.0) as client:
 			resp = await client.post(url, json=payload, headers=headers)
