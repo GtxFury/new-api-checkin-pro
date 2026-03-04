@@ -99,6 +99,7 @@ jobs:
       env:
         ACCOUNTS: ${{ secrets.ACCOUNTS }}
         LINUXDOT: ${{ secrets.LINUXDOT }}
+        HCAPTCHA_OPENAI: ${{ secrets.HCAPTCHA_OPENAI }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         PROXY: ${{secrets.PROXY}}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
