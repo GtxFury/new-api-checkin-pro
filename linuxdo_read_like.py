@@ -33,6 +33,12 @@ try:  # pragma: no cover - 可选依赖
 except Exception:  # pragma: no cover - 可选依赖缺失时静默跳过
 	linuxdo_solve_captcha = None
 
+# hcaptcha-challenger: 用于自动解 hCaptcha 验证码（登录时可能触发）
+try:  # pragma: no cover
+	from sign_in_with_linuxdo import _handle_hcaptcha  # type: ignore
+except Exception:  # pragma: no cover
+	_handle_hcaptcha = None
+
 
 UTC = timezone.utc
 
@@ -808,6 +814,33 @@ class LinuxDoAutoReadLike:
 			print(f"🔍 {self.account_name}: [登录] 点击登录后页面状态 URL={current_url}, title={title!r}")
 		except Exception as e:
 			print(f"⚠️ {self.account_name}: [登录] 获取点击后页面状态失败: {e}")
+
+		# 检测并处理 hCaptcha（登录后可能触发）
+		if _handle_hcaptcha is not None:
+			print(f"🔍 {self.account_name}: [登录] 步骤6.5: 检测 hCaptcha 验证码")
+			try:
+				hcaptcha_solved = await _handle_hcaptcha(page, self.account_name)
+				if hcaptcha_solved:
+					print(f"✅ {self.account_name}: [登录] hCaptcha 已解决，继续登录流程")
+					await page.wait_for_timeout(1000)
+					# hCaptcha 解完后可能需要再次点击登录/验证按钮
+					for sel in [
+						'button:has-text("验证")',
+						"#signin-button",
+						"#login-button",
+						'button:has-text("登录")',
+						'button[type="submit"]',
+					]:
+						try:
+							btn = await page.query_selector(sel)
+							if btn:
+								await btn.click()
+								print(f"ℹ️ {self.account_name}: [登录] hCaptcha 后点击了 '{sel}'")
+								break
+						except Exception:
+							continue
+			except Exception as e_hcaptcha:
+				print(f"⚠️ {self.account_name}: [登录] hCaptcha 处理异常(非阻塞): {e_hcaptcha!r}")
 
 		print(f"🔍 {self.account_name}: [登录] 步骤7: 再次尝试解决 Cloudflare 验证")
 		await self._maybe_solve_cloudflare(page)
