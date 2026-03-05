@@ -1,4 +1,4 @@
-name: linux.do 自动阅读点赞
+name: linux.do
 on:
   schedule:
     # 下午一点执行
