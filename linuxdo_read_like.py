@@ -72,14 +72,40 @@ def _env_str(key: str, default: str) -> str:
 	return v.strip() if isinstance(v, str) and v.strip() else default
 
 
+def _normalize_proxy(config: dict) -> dict:
+	"""将 server URL 中内嵌的 username:password@ 拆分为独立字段。
+
+	Camoufox/Playwright 要求 proxy 格式为:
+	  {"server": "http://host:port", "username": "...", "password": "..."}
+	而非:
+	  {"server": "http://user:pass@host:port"}
+	"""
+	from urllib.parse import urlparse, urlunparse
+
+	server = (config.get("server") or "").strip()
+	if not server:
+		return config
+	parsed = urlparse(server)
+	if not parsed.username:
+		return config
+	clean_server = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{parsed.port}" if parsed.port else parsed.hostname))
+	result = {**config, "server": clean_server}
+	result.setdefault("username", parsed.username)
+	result.setdefault("password", parsed.password or "")
+	return result
+
+
 def _load_proxy() -> dict | None:
 	proxy_str = os.getenv("PROXY")
 	if not proxy_str:
 		return None
 	try:
-		return json.loads(proxy_str)
+		config = json.loads(proxy_str)
 	except Exception:
-		return {"server": proxy_str}
+		config = {"server": proxy_str}
+	if not isinstance(config, dict):
+		return None
+	return _normalize_proxy(config)
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
