@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from camoufox.async_api import AsyncCamoufox
+from dotenv import load_dotenv
 
 from utils.config import AccountConfig
 from utils.notify import notify
@@ -41,6 +42,11 @@ except Exception:  # pragma: no cover
 
 
 UTC = timezone.utc
+PROJECT_ROOT = Path(__file__).resolve().parent
+DOTENV_PATH = PROJECT_ROOT / ".env"
+
+# 显式读取脚本同目录下的 .env，避免从其他工作目录启动时丢失配置。
+load_dotenv(DOTENV_PATH, override=True)
 
 
 def _now_ts() -> int:
@@ -64,6 +70,16 @@ def _env_int(key: str, default: int) -> int:
 def _env_str(key: str, default: str) -> str:
 	v = os.getenv(key)
 	return v.strip() if isinstance(v, str) and v.strip() else default
+
+
+def _load_proxy() -> dict | None:
+	proxy_str = os.getenv("PROXY")
+	if not proxy_str:
+		return None
+	try:
+		return json.loads(proxy_str)
+	except Exception:
+		return {"server": proxy_str}
 
 
 def _env_bool(key: str, default: bool = False) -> bool:
@@ -1188,7 +1204,7 @@ class LinuxDoAutoReadLike:
 		limited = bool(self._like_rate_limited_until and time.time() < self._like_rate_limited_until)
 		return liked, limited
 
-	async def run(self) -> None:
+	async def run(self, proxy_config: dict | None = None) -> None:
 		stats = RunStats(account_name=self.account_name, username=self.username)
 		print(f"🔍 {self.account_name}: [运行] 开始执行 Linux.do 自动阅读点赞")
 		print(f"🔍 {self.account_name}: [运行] 配置: origin={self.settings.origin}, feed={self.settings.feed}, topics_per_run={self.settings.topics_per_run}")
@@ -1197,7 +1213,7 @@ class LinuxDoAutoReadLike:
 
 		storage_state = self.storage_state_path if os.path.exists(self.storage_state_path) else None
 		print(
-			f"ℹ️ {self.account_name}: 启动浏览器 (headless={self.settings.headless}, cache={'yes' if storage_state else 'no'})"
+			f"ℹ️ {self.account_name}: 启动浏览器 (headless={self.settings.headless}, proxy={'yes' if proxy_config else 'no'}, cache={'yes' if storage_state else 'no'})"
 		)
 		if storage_state:
 			print(f"🔍 {self.account_name}: [运行] 使用缓存文件: {storage_state}")
@@ -1210,6 +1226,8 @@ class LinuxDoAutoReadLike:
 			config={"forceScopeAccess": True},
 			i_know_what_im_doing=True,
 			window=(1280, 720),
+			geoip=True if proxy_config else False,
+			proxy=proxy_config,
 		) as browser:
 			print(f"✅ {self.account_name}: [运行] 浏览器启动成功")
 			context = await browser.new_context(storage_state=storage_state)
@@ -1426,7 +1444,7 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 	# 回退到 ACCOUNTS（兼容旧配置）
 	accounts_str = os.getenv("ACCOUNTS")
 	if not accounts_str:
-		raise RuntimeError("缺少环境变量 LINUXDO_ACCOUNTS 或 ACCOUNTS")
+		raise RuntimeError(f"缺少环境变量 LINUXDO_ACCOUNTS 或 ACCOUNTS（已尝试加载 {DOTENV_PATH}）")
 	try:
 		data = json.loads(accounts_str)
 	except Exception as e:
@@ -1456,6 +1474,10 @@ def _load_linuxdo_accounts_from_env() -> list[tuple[str, str, str]]:
 async def _run_all() -> None:
 	settings = LinuxDoSettings.from_env()
 	targets = _load_linuxdo_accounts_from_env()
+	global_proxy = _load_proxy()
+
+	if global_proxy:
+		print(f"⚙️ 已加载全局代理: {global_proxy.get('server', '(unknown)')}")
 
 	if not targets:
 		print("⚠️ 未找到包含 linux.do 用户名密码的账号配置，任务结束")
@@ -1479,7 +1501,7 @@ async def _run_all() -> None:
 			round_info = f"[轮次{round_idx + 1}] " if read_rounds > 1 else ""
 			print(f"\n===== {round_info}linux.do 自动阅读点赞：{name} ({idx+1}/{len(targets)}) =====")
 			try:
-				stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run()
+				stats = await LinuxDoAutoReadLike(account_name=name, username=u, password=p, settings=settings).run(proxy_config=global_proxy)
 				all_stats.append(stats)
 				print(f"✅ {name}: 完成")
 			except Exception as e:
