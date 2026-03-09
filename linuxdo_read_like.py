@@ -1503,7 +1503,7 @@ async def _run_all() -> None:
 	global_proxy = _load_proxy()
 
 	if global_proxy:
-		print(f"⚙️ 已加载全局代理: {global_proxy.get('server', '(unknown)')}")
+		print("⚙️ 已加载全局代理")
 
 	if not targets:
 		print("⚠️ 未找到包含 linux.do 用户名密码的账号配置，任务结束")
