@@ -119,7 +119,9 @@ jobs:
           WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PROXY: ${{ secrets.PROXY }}
+          # Linux.do 专用代理；设置后仅作用于当前 workflow，未设置时回退到全局 PROXY
+          LINUXDO_PROXY: ${{ secrets.LINUXDO_PROXY }}
+          PROXY: ${{ secrets.LINUXDO_PROXY || secrets.PROXY }}
         run: |
           uv run python -u linuxdo_read_like.py
 
