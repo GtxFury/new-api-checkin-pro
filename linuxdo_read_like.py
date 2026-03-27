@@ -133,6 +133,7 @@ class LinuxDoSettings:
 	min_read_seconds: int = 25
 	max_read_seconds: int = 90
 	max_likes_per_topic: int = 2
+	max_likes_per_run: int = 0
 	skip_pinned: bool = True
 	try_turnstile_solver: bool = True
 	headless: bool = False
@@ -152,6 +153,7 @@ class LinuxDoSettings:
 			min_read_seconds=_clamp(_env_int("LINUXDO_MIN_READ_SECONDS", 25), 3, 3600),
 			max_read_seconds=_clamp(_env_int("LINUXDO_MAX_READ_SECONDS", 90), 3, 7200),
 			max_likes_per_topic=_clamp(_env_int("LINUXDO_MAX_LIKES_PER_TOPIC", 2), 0, 20),
+			max_likes_per_run=_clamp(_env_int("LINUXDO_MAX_LIKES_PER_RUN", 0), 0, 200),
 			skip_pinned=_env_int("LINUXDO_SKIP_PINNED", 1) != 0,
 			try_turnstile_solver=_env_int("LINUXDO_TRY_TURNSTILE_SOLVER", 1) == 1,
 			headless=_env_int("HEADLESS", 0) == 1,
@@ -1391,8 +1393,14 @@ class LinuxDoAutoReadLike:
 				print(f"🔍 {self.account_name}: [主题] 开始模拟阅读 {read_s} 秒")
 				await self._simulate_reading(page, read_s)
 
-				print(f"🔍 {self.account_name}: [主题] 阅读完成，开始点赞（剩余额度={remaining}）")
-				liked_in_topic, limited = await self._like_some_posts(page, remaining, liked_posts_24h)
+				run_like_budget = remaining
+				if self.settings.max_likes_per_run > 0:
+					run_like_budget = min(run_like_budget, max(0, self.settings.max_likes_per_run - stats.likes_clicked))
+
+				print(
+					f"🔍 {self.account_name}: [主题] 阅读完成，开始点赞（每日剩余额度={remaining}, 本轮剩余额度={run_like_budget}）"
+				)
+				liked_in_topic, limited = await self._like_some_posts(page, run_like_budget, liked_posts_24h)
 				stats.likes_clicked += liked_in_topic
 				remaining = max(0, remaining - liked_in_topic)
 
