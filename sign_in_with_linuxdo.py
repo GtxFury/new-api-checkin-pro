@@ -201,59 +201,59 @@ def _should_try_turnstile_solver() -> bool:
 	return True
 
 
-async def solve_captcha(page, captcha_type: str = “cloudflare”, challenge_type: str = “turnstile”) -> bool:
-	“””统一的验证码解决入口，优先使用 playwright-captcha，失败后 fallback 到 Frame API。
+async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
+	"""统一的验证码解决入口，优先使用 playwright-captcha，失败后 fallback 到 Frame API。
 
 	为了兼容现有调用方，保留 captcha_type / challenge_type 参数，但目前主要依赖
 	playwright-captcha 的自动检测能力。
-	“””
-	is_turnstile = captcha_type == “cloudflare” and challenge_type == “turnstile”
+	"""
+	is_turnstile = captcha_type == "cloudflare" and challenge_type == "turnstile"
 
 	# 默认不尝试 Turnstile click solver（除非显式开启）。
 	if is_turnstile and not _should_try_turnstile_solver():
 		return False
 
 	# 预检测：很多情况下页面并没有 Cloudflare iframe（例如已经通过校验、或被其他 WAF/401 页面拦截），
-	# 直接调用 ClickSolver 会反复抛出 “Cloudflare iframes not found” 并产生大量堆栈输出，造成”卡死/刷屏”。
+	# 直接调用 ClickSolver 会反复抛出 "Cloudflare iframes not found" 并产生大量堆栈输出，造成"卡死/刷屏"。
 	# 这里先做轻量判断：只有检测到 Cloudflare 相关元素/标记时才进入 solver。
 	try:
 		# 1) 快速 DOM 证据（Turnstile/Challenge iframe 或表单）
 		has_cf_evidence = await page.evaluate(
-			“””() => {
+			"""() => {
 				try {
-					const hasIframe = !!document.querySelector('iframe[src*=\”challenges.cloudflare.com\”]');
-					const hasTurnstileInput = !!document.querySelector('input[name=\”cf-turnstile-response\”], textarea[name=\”cf-turnstile-response\”]');
-					const hasChlForm = !!document.querySelector('form[action*=\”__cf_chl\”], input[name=\”cf_chl_seq_\”], input[name=\”cf_challenge_response\”]');
+					const hasIframe = !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');
+					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
+					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
 					const title = (document.title || '').toLowerCase();
 					const titleLooks = title.includes('just a moment') || title.includes('attention required');
 					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
 				} catch (e) {
 					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
 				}
-			}”””
+			}"""
 		)
 		if not isinstance(has_cf_evidence, dict):
 			has_cf_evidence = {}
 
 		# 2) 若标题疑似 CF，但 iframe 尚未渲染，给一个短等待窗口
-		if bool(has_cf_evidence.get(“titleLooks”)) and not bool(has_cf_evidence.get(“hasIframe”)):
+		if bool(has_cf_evidence.get("titleLooks")) and not bool(has_cf_evidence.get("hasIframe")):
 			try:
-				await page.wait_for_selector('iframe[src*=”challenges.cloudflare.com”]', timeout=6000)
-				has_cf_evidence[“hasIframe”] = True
+				await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=6000)
+				has_cf_evidence["hasIframe"] = True
 			except Exception:
 				pass
 
-		# 仅在”与目标挑战类型匹配”的证据存在时才进入 solver，避免把 interstitial 页面当 turnstile 点，
-		# 从而出现 “Cloudflare checkbox not found or not ready” 的误判/刷屏。
-		is_turnstile_evidence = bool(has_cf_evidence.get(“hasIframe”) or has_cf_evidence.get(“hasTurnstileInput”))
-		is_interstitial_evidence = bool(has_cf_evidence.get(“hasChlForm”))
+		# 仅在"与目标挑战类型匹配"的证据存在时才进入 solver，避免把 interstitial 页面当 turnstile 点，
+		# 从而出现 "Cloudflare checkbox not found or not ready" 的误判/刷屏。
+		is_turnstile_evidence = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput"))
+		is_interstitial_evidence = bool(has_cf_evidence.get("hasChlForm"))
 
 		should_try = False
 		if is_turnstile:
 			should_try = is_turnstile_evidence
-		elif captcha_type == “cloudflare” and challenge_type == “interstitial”:
+		elif captcha_type == "cloudflare" and challenge_type == "interstitial":
 			# interstitial 常见为 __cf_chl 表单；部分情况下只有标题信号但还未渲染，允许 titleLooks 作为弱触发
-			should_try = is_interstitial_evidence or bool(has_cf_evidence.get(“titleLooks”))
+			should_try = is_interstitial_evidence or bool(has_cf_evidence.get("titleLooks"))
 
 		if not should_try:
 			return False
@@ -270,12 +270,12 @@ async def solve_captcha(page, captcha_type: str = “cloudflare”, challenge_ty
 			# 将调用方传入的 captcha_type / challenge_type 映射到 playwright-captcha 的 CaptchaType
 			if is_turnstile:
 				target_type = CaptchaType.CLOUDFLARE_TURNSTILE
-			elif captcha_type == “cloudflare” and challenge_type == “interstitial”:
+			elif captcha_type == "cloudflare" and challenge_type == "interstitial":
 				target_type = CaptchaType.CLOUDFLARE_INTERSTITIAL
 			else:
 				print(
-					f”⚠️ LinuxDoSignIn: Unsupported captcha_type/challenge_type combination for playwright-captcha: “
-					f”{captcha_type}/{challenge_type}”
+					f"⚠️ LinuxDoSignIn: Unsupported captcha_type/challenge_type combination for playwright-captcha: "
+					f"{captcha_type}/{challenge_type}"
 				)
 				return False
 
@@ -287,20 +287,20 @@ async def solve_captcha(page, captcha_type: str = “cloudflare”, challenge_ty
 			try:
 				playwright_captcha_succeeded = await asyncio.wait_for(_run_solver(), timeout=30.0)
 			except asyncio.TimeoutError:
-				print(f”⚠️ LinuxDoSignIn: playwright-captcha solver timed out after 30s”)
+				print(f"⚠️ LinuxDoSignIn: playwright-captcha solver timed out after 30s")
 		except Exception as e:
-			print(f”⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}”)
+			print(f"⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}")
 
 		if playwright_captcha_succeeded:
 			return True
 
 	# ── Fallback: Frame API 直接点击 Turnstile iframe checkbox ──
 	if is_turnstile:
-		print(“ℹ️ LinuxDoSignIn: falling back to Frame API for Turnstile”)
+		print("ℹ️ LinuxDoSignIn: falling back to Frame API for Turnstile")
 		try:
 			return await click_turnstile_via_frame_api(page, max_attempts=3)
 		except Exception as e:
-			print(f”⚠️ LinuxDoSignIn: Frame API fallback error: {e}”)
+			print(f"⚠️ LinuxDoSignIn: Frame API fallback error: {e}")
 
 	return False
 
@@ -466,7 +466,7 @@ class LinuxDoSignIn:
 				f"{redact_url_for_log(final_callback_url)}"
 			)
 
-			# 某些站点会校验 api_user header，这里统一以 -1 作为“未登录”占位
+			# 某些站点会校验 api_user header，这里统一以 -1 作为"未登录"占位
 			headers = {
 				"Accept": "application/json, text/plain, */*",
 				"Origin": self.provider_config.origin,
@@ -491,7 +491,7 @@ class LinuxDoSignIn:
 
 			status = (resp or {}).get("status", 0)
 			text = (resp or {}).get("text", "") or ""
-			# Cloudflare interstitial：优先切到“导航回调”跑 challenge，再回来 fetch
+			# Cloudflare interstitial：优先切到"导航回调"跑 challenge，再回来 fetch
 			if status in (403, 429, 503) and self._looks_like_cloudflare_interstitial_html(text[:4000]):
 				return None
 			if status != 200 or not text:
@@ -736,7 +736,7 @@ class LinuxDoSignIn:
 					}
 				}""")
 				if not bool((check2 or {}).get("detected")):
-					# 注意：solver 可能抛错/返回 False，但页面也可能因自动跳转/刷新而“自己过了挑战”。
+					# 注意：solver 可能抛错/返回 False，但页面也可能因自动跳转/刷新而"自己过了挑战"。
 					if solver_succeeded:
 						print(f"✅ {self.account_name}: Cloudflare challenge cleared (solver)")
 					elif solver_attempted:
@@ -922,7 +922,7 @@ class LinuxDoSignIn:
 	async def _browser_check_in_with_turnstile(self, page) -> bool:
 		"""在 provider 的页面中执行每日签到（部分站点可能包含 Turnstile）。
 
-		返回：True 表示已确认“今日已签到/签到成功”，False 表示未能确认。
+		返回：True 表示已确认"今日已签到/签到成功"，False 表示未能确认。
 		"""
 		try:
 			# 如果配置了签到页面路径，只使用该路径
@@ -1008,7 +1008,7 @@ class LinuxDoSignIn:
 				except Exception as cf_err:
 					print(f"⚠️ {self.account_name}: CF Turnstile after check-in: {cf_err}")
 
-				# 等待状态变为“今日已签到”
+				# 等待状态变为"今日已签到"
 				try:
 					await page.wait_for_selector('button:has-text("今日已签到")', timeout=60000)
 					print(f"✅ {self.account_name}: Daily check-in completed in browser")
@@ -1416,7 +1416,7 @@ class LinuxDoSignIn:
 							pass
 
 						# 某些情况下（如 Discourse SSO 中转页 /session/sso_provider），页面会先落在 linux.do，
-						# 然后再自动跳回 connect.linux.do 展示授权按钮；这里不能立刻判定“缓存过期”。
+						# 然后再自动跳回 connect.linux.do 展示授权按钮；这里不能立刻判定"缓存过期"。
 						async def _wait_cache_oauth_ready() -> bool:
 							try:
 								start = time.time()
@@ -1843,7 +1843,7 @@ class LinuxDoSignIn:
 					if not oauth_redirect_url:
 						print(f"ℹ️ {self.account_name}: Clicking authorization button...")
 						try:
-							# 避免 click 自带的“等待导航/网络空闲”导致超时（linux.do 有时会被挑战页/风控卡住）
+							# 避免 click 自带的"等待导航/网络空闲"导致超时（linux.do 有时会被挑战页/风控卡住）
 							await allow_btn_ele.click(no_wait_after=True, timeout=30000)
 						except Exception:
 							# 兜底：走 JS click，不等待任何后续事件
@@ -1859,7 +1859,7 @@ class LinuxDoSignIn:
 								f"**{self.provider_config.origin}/**",
 								timeout=30000,
 							)
-							# 优先使用“带 code 的最早一次跳转”，否则回退到当前 URL
+							# 优先使用"带 code 的最早一次跳转"，否则回退到当前 URL
 							oauth_redirect_url = observed_oauth_urls[0] if observed_oauth_urls else page.url
 							print(
 								f"ℹ️ {self.account_name}: Captured OAuth redirect URL: "
@@ -2250,7 +2250,7 @@ class LinuxDoSignIn:
 
 						# 对于启用了 Turnstile 的站点（如 runanytime），在浏览器中直接完成每日签到
 						user_info = None
-						# newapi 通用签到入口在控制台 `/console/personal`（右侧“立即签到”）。
+						# newapi 通用签到入口在控制台 `/console/personal`（右侧"立即签到"）。
 						# 此处仅负责完成登录与 cookies 提取，不在登录流程里强依赖旧的 /app/me DOM 解析。
 						if getattr(self.provider_config, "turnstile_check", False) and self.provider_config.name != "runanytime":
 							checkin_done = await self._browser_check_in_with_turnstile(page)
@@ -2622,7 +2622,7 @@ class LinuxDoSignIn:
 								)
 							# localStorage 兜底失败并不代表 OAuth 失败：
 							# 对于 new-api 站点，真正建立会话的是后端回调 `/api/oauth/linuxdo`。
-							# 继续向下走“浏览器内调用回调接口”的通用逻辑，尝试从回调 JSON 拿到 api_user。
+							# 继续向下走"浏览器内调用回调接口"的通用逻辑，尝试从回调 JSON 拿到 api_user。
 
 						# 优先在浏览器内通过页面导航方式调用 Linux.do 回调接口，避免 httpx 再次触发 Cloudflare
 						try:
