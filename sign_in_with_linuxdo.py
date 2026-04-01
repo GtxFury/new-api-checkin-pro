@@ -138,6 +138,57 @@ async def _handle_hcaptcha(page, account_name: str = "") -> bool:
 		return False
 
 
+async def click_turnstile_via_frame_api(page, max_attempts: int = 5) -> bool:
+	"""通过 Frame API 直接在 Turnstile iframe 内部点击 checkbox。
+
+	Playwright 的 page.frames 列表通过浏览器调试协议直连各 iframe 进程，
+	不受跨域限制。在 iframe 内部用相对坐标 (28, 28) 点击 checkbox body。
+	"""
+	await asyncio.sleep(3)  # 等待 Turnstile iframe 加载
+
+	for attempt in range(max_attempts):
+		# 检查是否已有 token（无需重复点击）
+		has_token = await page.evaluate("""() => {
+			const el = document.querySelector('input[name^="cf-turnstile-response"], textarea[name^="cf-turnstile-response"]');
+			return !!(el && el.value && el.value.length > 20);
+		}""")
+		if has_token:
+			return True
+
+		# 在 page.frames 中查找 Turnstile iframe
+		cf_frame = None
+		for frame in page.frames:
+			if 'challenges.cloudflare.com' in (frame.url or ''):
+				cf_frame = frame
+				break
+
+		if not cf_frame:
+			await asyncio.sleep(2)
+			continue
+
+		# 在 iframe 内部点击 checkbox（相对坐标 28,28）
+		try:
+			print(f"ℹ️ Turnstile Frame API: clicking checkbox in iframe (attempt {attempt + 1}/{max_attempts})")
+			await cf_frame.click('body', position={'x': 28, 'y': 28}, timeout=3000)
+		except Exception as e:
+			print(f"⚠️ Turnstile Frame API: click error: {e}")
+
+		await asyncio.sleep(5)  # 等待验证完成
+
+		# 验证 token
+		has_token = await page.evaluate("""() => {
+			const el = document.querySelector('input[name^="cf-turnstile-response"], textarea[name^="cf-turnstile-response"]');
+			return !!(el && el.value && el.value.length > 20);
+		}""")
+		if has_token:
+			print("✅ Turnstile Frame API: verification passed")
+			return True
+
+		await asyncio.sleep(2)
+
+	return False
+
+
 def _should_try_turnstile_solver() -> bool:
 	# 默认开启：若需要关闭请设 LINUXDO_TRY_TURNSTILE_SOLVER=0/false/no/off
 	raw = str(os.getenv("LINUXDO_TRY_TURNSTILE_SOLVER", "") or "").strip().lower()
@@ -150,64 +201,59 @@ def _should_try_turnstile_solver() -> bool:
 	return True
 
 
-async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: str = "turnstile") -> bool:
-	"""统一的验证码解决入口，优先使用 playwright-captcha。
+async def solve_captcha(page, captcha_type: str = “cloudflare”, challenge_type: str = “turnstile”) -> bool:
+	“””统一的验证码解决入口，优先使用 playwright-captcha，失败后 fallback 到 Frame API。
 
 	为了兼容现有调用方，保留 captcha_type / challenge_type 参数，但目前主要依赖
 	playwright-captcha 的自动检测能力。
-	"""
-	if not PLAYWRIGHT_CAPTCHA_AVAILABLE or ClickSolver is None or FrameworkType is None or CaptchaType is None:
-		print(
-			f"⚠️ LinuxDoSignIn: playwright-captcha is not available, "
-			f"solve_captcha fallback will always return False"
-		)
-		return False
+	“””
+	is_turnstile = captcha_type == “cloudflare” and challenge_type == “turnstile”
 
 	# 默认不尝试 Turnstile click solver（除非显式开启）。
-	if captcha_type == "cloudflare" and challenge_type == "turnstile" and not _should_try_turnstile_solver():
+	if is_turnstile and not _should_try_turnstile_solver():
 		return False
 
 	# 预检测：很多情况下页面并没有 Cloudflare iframe（例如已经通过校验、或被其他 WAF/401 页面拦截），
-	# 直接调用 ClickSolver 会反复抛出 “Cloudflare iframes not found” 并产生大量堆栈输出，造成“卡死/刷屏”。
+	# 直接调用 ClickSolver 会反复抛出 “Cloudflare iframes not found” 并产生大量堆栈输出，造成”卡死/刷屏”。
 	# 这里先做轻量判断：只有检测到 Cloudflare 相关元素/标记时才进入 solver。
 	try:
 		# 1) 快速 DOM 证据（Turnstile/Challenge iframe 或表单）
 		has_cf_evidence = await page.evaluate(
-			"""() => {
+			“””() => {
 				try {
-					const hasIframe = !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');
-					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
-					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
+					const hasIframe = !!document.querySelector('iframe[src*=\”challenges.cloudflare.com\”]');
+					const hasTurnstileInput = !!document.querySelector('input[name=\”cf-turnstile-response\”], textarea[name=\”cf-turnstile-response\”]');
+					const hasChlForm = !!document.querySelector('form[action*=\”__cf_chl\”], input[name=\”cf_chl_seq_\”], input[name=\”cf_challenge_response\”]');
 					const title = (document.title || '').toLowerCase();
 					const titleLooks = title.includes('just a moment') || title.includes('attention required');
 					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
 				} catch (e) {
 					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
 				}
-			}"""
+			}”””
 		)
 		if not isinstance(has_cf_evidence, dict):
 			has_cf_evidence = {}
 
 		# 2) 若标题疑似 CF，但 iframe 尚未渲染，给一个短等待窗口
-		if bool(has_cf_evidence.get("titleLooks")) and not bool(has_cf_evidence.get("hasIframe")):
+		if bool(has_cf_evidence.get(“titleLooks”)) and not bool(has_cf_evidence.get(“hasIframe”)):
 			try:
-				await page.wait_for_selector('iframe[src*="challenges.cloudflare.com"]', timeout=6000)
-				has_cf_evidence["hasIframe"] = True
+				await page.wait_for_selector('iframe[src*=”challenges.cloudflare.com”]', timeout=6000)
+				has_cf_evidence[“hasIframe”] = True
 			except Exception:
 				pass
 
-		# 仅在“与目标挑战类型匹配”的证据存在时才进入 solver，避免把 interstitial 页面当 turnstile 点，
+		# 仅在”与目标挑战类型匹配”的证据存在时才进入 solver，避免把 interstitial 页面当 turnstile 点，
 		# 从而出现 “Cloudflare checkbox not found or not ready” 的误判/刷屏。
-		is_turnstile_evidence = bool(has_cf_evidence.get("hasIframe") or has_cf_evidence.get("hasTurnstileInput"))
-		is_interstitial_evidence = bool(has_cf_evidence.get("hasChlForm"))
+		is_turnstile_evidence = bool(has_cf_evidence.get(“hasIframe”) or has_cf_evidence.get(“hasTurnstileInput”))
+		is_interstitial_evidence = bool(has_cf_evidence.get(“hasChlForm”))
 
 		should_try = False
-		if captcha_type == "cloudflare" and challenge_type == "turnstile":
+		if is_turnstile:
 			should_try = is_turnstile_evidence
-		elif captcha_type == "cloudflare" and challenge_type == "interstitial":
+		elif captcha_type == “cloudflare” and challenge_type == “interstitial”:
 			# interstitial 常见为 __cf_chl 表单；部分情况下只有标题信号但还未渲染，允许 titleLooks 作为弱触发
-			should_try = is_interstitial_evidence or bool(has_cf_evidence.get("titleLooks"))
+			should_try = is_interstitial_evidence or bool(has_cf_evidence.get(“titleLooks”))
 
 		if not should_try:
 			return False
@@ -215,36 +261,48 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 		# 预检测失败时不影响原流程：继续尝试 solver（保持行为兼容）
 		pass
 
-	try:
-		framework = FrameworkType.CAMOUFOX  # 当前项目在 Camoufox 上运行
-
-		# 将调用方传入的 captcha_type / challenge_type 映射到 playwright-captcha 的 CaptchaType
-		if captcha_type == "cloudflare" and challenge_type == "turnstile":
-			target_type = CaptchaType.CLOUDFLARE_TURNSTILE
-		elif captcha_type == "cloudflare" and challenge_type == "interstitial":
-			target_type = CaptchaType.CLOUDFLARE_INTERSTITIAL
-		else:
-			print(
-				f"⚠️ LinuxDoSignIn: Unsupported captcha_type/challenge_type combination for playwright-captcha: "
-				f"{captcha_type}/{challenge_type}"
-			)
-			return False
-
-		async def _run_solver() -> bool:
-			async with ClickSolver(framework=framework, page=page) as solver:
-				# 对于 ClickSolver，solve_captcha 在成功时不会返回 token，能正常返回即视为成功
-				await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
-				return True
-
-		# 设置 30 秒超时（Turnstile 通常需要一些时间完成验证）
+	# ── 尝试 playwright-captcha ClickSolver ──
+	playwright_captcha_succeeded = False
+	if PLAYWRIGHT_CAPTCHA_AVAILABLE and ClickSolver is not None and FrameworkType is not None and CaptchaType is not None:
 		try:
-			return await asyncio.wait_for(_run_solver(), timeout=30.0)
-		except asyncio.TimeoutError:
-			print(f"⚠️ LinuxDoSignIn: playwright-captcha solver timed out after 30s")
-			return False
-	except Exception as e:
-		print(f"⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}")
-		return False
+			framework = FrameworkType.CAMOUFOX  # 当前项目在 Camoufox 上运行
+
+			# 将调用方传入的 captcha_type / challenge_type 映射到 playwright-captcha 的 CaptchaType
+			if is_turnstile:
+				target_type = CaptchaType.CLOUDFLARE_TURNSTILE
+			elif captcha_type == “cloudflare” and challenge_type == “interstitial”:
+				target_type = CaptchaType.CLOUDFLARE_INTERSTITIAL
+			else:
+				print(
+					f”⚠️ LinuxDoSignIn: Unsupported captcha_type/challenge_type combination for playwright-captcha: “
+					f”{captcha_type}/{challenge_type}”
+				)
+				return False
+
+			async def _run_solver() -> bool:
+				async with ClickSolver(framework=framework, page=page) as solver:
+					await solver.solve_captcha(captcha_container=page, captcha_type=target_type)
+					return True
+
+			try:
+				playwright_captcha_succeeded = await asyncio.wait_for(_run_solver(), timeout=30.0)
+			except asyncio.TimeoutError:
+				print(f”⚠️ LinuxDoSignIn: playwright-captcha solver timed out after 30s”)
+		except Exception as e:
+			print(f”⚠️ LinuxDoSignIn: playwright-captcha solve_captcha error: {e}”)
+
+		if playwright_captcha_succeeded:
+			return True
+
+	# ── Fallback: Frame API 直接点击 Turnstile iframe checkbox ──
+	if is_turnstile:
+		print(“ℹ️ LinuxDoSignIn: falling back to Frame API for Turnstile”)
+		try:
+			return await click_turnstile_via_frame_api(page, max_attempts=3)
+		except Exception as e:
+			print(f”⚠️ LinuxDoSignIn: Frame API fallback error: {e}”)
+
+	return False
 
 
 class LinuxDoSignIn:
@@ -636,6 +694,16 @@ class LinuxDoSignIn:
 					) or solver_succeeded
 				except Exception as e:
 					print(f"⚠️ {self.account_name}: CF turnstile solve error: {e}")
+
+			# Frame API 兜底：即使 solve_captcha 内部已有 fallback，这里在 solver 全部失败后
+			# 再单独尝试一次 Frame API（solve_captcha 可能因开关关闭/预检测未通过而跳过）
+			if not solver_succeeded and cf_type == "turnstile":
+				try:
+					solver_attempted = True
+					frame_api_ok = await click_turnstile_via_frame_api(page, max_attempts=3)
+					solver_succeeded = solver_succeeded or frame_api_ok
+				except Exception as e:
+					print(f"⚠️ {self.account_name}: CF turnstile Frame API error: {e}")
 
 			# 等待页面跳转或挑战消失
 			await page.wait_for_timeout(3000)
