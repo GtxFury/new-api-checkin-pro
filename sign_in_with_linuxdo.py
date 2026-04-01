@@ -225,7 +225,7 @@ async def solve_captcha(page, captcha_type: str = "cloudflare", challenge_type: 
 					const hasTurnstileInput = !!document.querySelector('input[name=\"cf-turnstile-response\"], textarea[name=\"cf-turnstile-response\"]');
 					const hasChlForm = !!document.querySelector('form[action*=\"__cf_chl\"], input[name=\"cf_chl_seq_\"], input[name=\"cf_challenge_response\"]');
 					const title = (document.title || '').toLowerCase();
-					const titleLooks = title.includes('just a moment') || title.includes('attention required');
+					const titleLooks = title.includes('just a moment') || title.includes('attention required') || title.includes('请稍候') || title.includes('请稍等');
 					return { hasIframe, hasTurnstileInput, hasChlForm, titleLooks };
 				} catch (e) {
 					return { hasIframe: false, hasTurnstileInput: false, hasChlForm: false, titleLooks: false };
